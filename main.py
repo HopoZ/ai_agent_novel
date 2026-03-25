@@ -1,3 +1,5 @@
+# cli版逻辑
+
 import os
 from datetime import datetime
 from dotenv import load_dotenv
@@ -18,11 +20,9 @@ class WritingAgent:
             api_key=os.getenv("DEEPSEEK_API_KEY"),
             base_url="https://api.deepseek.com/v1",
             temperature=0.8,
-            output_version="v1"
+            output_version="v1",
+            max_tokens=10000
         )
-
-        # 实例化分离出去的加载器
-        self.lore_loader = LoreLoader(data_path="data")
 
     def parse_content(self, response: AIMessage) -> str:
         """自动解读 v1 格式块，只提取纯文本正文"""
@@ -68,7 +68,7 @@ if __name__ == "__main__":
     agent = WritingAgent()
 
     # 设定具体创作任务
-    task = "描述依据百科全书创作的某一四千余字的章节"
+    task = "描述依据百科全书丰富为某一多于四千字的章节。最后总结一下你在章节中对设定(人物，怪物，体系等)的拓展或补充。"
 
     # 执行并获取解析后的文本
     content, usage = agent.write(task)
