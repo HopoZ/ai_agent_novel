@@ -138,15 +138,68 @@ class RunModeRequest(BaseModel):
     )
     user_task: str
     # 不建议前端显式指定 chapter_index（现实中会有重排/插入等需求）
-    # 保留这个字段仅用于兼容/内部调试；推荐使用 insert_anchor_id 来选择插入到事件网的哪一段
+    # 保留这个字段仅用于兼容/内部调试
     chapter_index: Optional[int] = None
-    insert_anchor_id: Optional[str] = Field(
-        default=None,
-        description="可选：插入锚点。例如 ev:timeline:3 或 ev:chapter:12；用于推导 time_slot_override",
-    )
+    # 区间语义（推荐）：插入在 after 之后、before 之前
+    insert_after_id: Optional[str] = Field(default=None, description="插入在该事件之后（ev:timeline:X / ev:chapter:Y）")
+    insert_before_id: Optional[str] = Field(default=None, description="插入在该事件之前（ev:timeline:X / ev:chapter:Y）")
+    # 兼容字段（已废弃）：单锚点插入（旧前端可能还会发）
+    insert_anchor_id: Optional[str] = Field(default=None, description="（deprecated）旧字段：单锚点 ev:timeline:X / ev:chapter:Y")
     time_slot_override: Optional[str] = None
     pov_character_id_override: Optional[str] = None
     lore_tags: Optional[List[str]] = None
+
+
+def _resolve_anchor_time_slot(novel_id: str, anchor_id: Optional[str]) -> Optional[str]:
+    """
+    把锚点 id 解析为 time_slot。
+    支持：
+      - ev:timeline:{idx}
+      - ev:chapter:{chapter_index}
+    """
+    if not anchor_id:
+        return None
+    anchor = (anchor_id or "").strip()
+    if not anchor:
+        return None
+    try:
+        if anchor.startswith("ev:timeline:"):
+            idx = int(anchor.split("ev:timeline:", 1)[1])
+            st = load_state(novel_id)
+            if st and st.world.timeline and 0 <= idx < len(st.world.timeline):
+                return st.world.timeline[idx].time_slot
+            return None
+        if anchor.startswith("ev:chapter:"):
+            chap_idx = int(anchor.split("ev:chapter:", 1)[1])
+            chap = load_chapter(novel_id, chap_idx)
+            return chap.time_slot if chap else None
+    except Exception:
+        return None
+    return None
+
+
+def _infer_time_slot(novel_id: str, req: RunModeRequest) -> Optional[str]:
+    """
+    time_slot 推导优先级：
+      1) time_slot_override（手动）
+      2) 区间语义 after/before -> 组合提示
+      3) deprecated 的 insert_anchor_id -> 单锚点 time_slot
+      4) None（交给 agent 自行延续/推断）
+    """
+    if req.time_slot_override and str(req.time_slot_override).strip():
+        return req.time_slot_override
+
+    after_slot = _resolve_anchor_time_slot(novel_id, req.insert_after_id)
+    before_slot = _resolve_anchor_time_slot(novel_id, req.insert_before_id)
+    if after_slot and before_slot:
+        return f"{after_slot}之后~{before_slot}之前"
+    if after_slot:
+        return f"{after_slot}之后"
+    if before_slot:
+        return f"{before_slot}之前"
+
+    legacy_slot = _resolve_anchor_time_slot(novel_id, req.insert_anchor_id)
+    return legacy_slot
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -186,26 +239,7 @@ def create_novel(req: CreateNovelRequest):
 
 @app.post("/api/novels/{novel_id}/run")
 def run_mode(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
-    # 如果用户没有手填 time_slot_override，但选择了“插入锚点”，则用锚点对应的 time_slot
-    # 这样生成的事件会自然落在“事件网”的那一段里（以时间段为主锚）
-    inferred_time_slot: Optional[str] = None
-    if (not req.time_slot_override) and req.insert_anchor_id:
-        anchor = req.insert_anchor_id.strip()
-        try:
-            if anchor.startswith("ev:timeline:"):
-                idx_str = anchor.split("ev:timeline:", 1)[1]
-                idx = int(idx_str)
-                st = load_state(novel_id)
-                if st and st.world.timeline and 0 <= idx < len(st.world.timeline):
-                    inferred_time_slot = st.world.timeline[idx].time_slot
-            elif anchor.startswith("ev:chapter:"):
-                idx_str = anchor.split("ev:chapter:", 1)[1]
-                chap_idx = int(idx_str)
-                chap = load_chapter(novel_id, chap_idx)
-                if chap:
-                    inferred_time_slot = chap.time_slot
-        except Exception:
-            inferred_time_slot = None
+    inferred_time_slot = _infer_time_slot(novel_id, req)
 
     try:
         result = agent.run(
@@ -213,7 +247,7 @@ def run_mode(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
             mode=req.mode,
             user_task=req.user_task,
             chapter_index=req.chapter_index,
-            time_slot_override=req.time_slot_override or inferred_time_slot,
+            time_slot_override=inferred_time_slot,
             pov_character_id_override=req.pov_character_id_override,
             lore_tags=req.lore_tags,
         )
@@ -255,25 +289,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest):
     def gen():
         yield _sse_pack("start", {"novel_id": novel_id, "mode": req.mode})
 
-        # 推导 time_slot（同 run_mode）
-        inferred_time_slot: Optional[str] = None
-        if (not req.time_slot_override) and req.insert_anchor_id:
-            anchor = req.insert_anchor_id.strip()
-            try:
-                if anchor.startswith("ev:timeline:"):
-                    idx_str = anchor.split("ev:timeline:", 1)[1]
-                    idx = int(idx_str)
-                    st = load_state(novel_id)
-                    if st and st.world.timeline and 0 <= idx < len(st.world.timeline):
-                        inferred_time_slot = st.world.timeline[idx].time_slot
-                elif anchor.startswith("ev:chapter:"):
-                    idx_str = anchor.split("ev:chapter:", 1)[1]
-                    chap_idx = int(idx_str)
-                    chap = load_chapter(novel_id, chap_idx)
-                    if chap:
-                        inferred_time_slot = chap.time_slot
-            except Exception:
-                inferred_time_slot = None
+        inferred_time_slot = _infer_time_slot(novel_id, req)
 
         try:
             # 这里对 write_chapter 做“正文流式”，其它模式走一次性结果但也会发阶段事件。
@@ -301,7 +317,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest):
                     novel_id=novel_id,
                     user_task=req.user_task,
                     chapter_index=chapter_index,
-                    time_slot_override=req.time_slot_override or inferred_time_slot,
+                    time_slot_override=inferred_time_slot,
                     pov_character_id_override=req.pov_character_id_override,
                     lore_tags=req.lore_tags,
                 )
@@ -369,7 +385,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest):
                     mode=req.mode,
                     user_task=req.user_task,
                     chapter_index=req.chapter_index,
-                    time_slot_override=req.time_slot_override or inferred_time_slot,
+                    time_slot_override=inferred_time_slot,
                     pov_character_id_override=req.pov_character_id_override,
                     lore_tags=req.lore_tags,
                 )

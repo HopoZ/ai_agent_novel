@@ -562,7 +562,6 @@ async function runMode() {
     const payload = {
       mode: form.mode,
       user_task: form.userTask,
-      insert_anchor_id: null,
       insert_after_id: form.insertMode === "anchors" ? (form.insertAfterId || null) : null,
       insert_before_id: form.insertMode === "anchors" ? (form.insertBeforeId || null) : null,
       time_slot_override: form.insertMode === "time" ? (form.timeSlotOverride || null) : null,
@@ -570,14 +569,19 @@ async function runMode() {
       lore_tags: loreTags,
     };
     // 流式输出：边生成边显示
+    const startAt = Date.now();
     let logText = "（流式输出开始）\n";
     let accContent = "";
     let donePayload: any = null;
 
     await apiSse(`/api/novels/${novelId}/run_stream`, "POST", payload, (evt) => {
       if (evt.event === "phase") {
-        const name = evt.data?.name || "running";
-        logText += `\n[phase] ${name}\n`;
+        const name = String(evt.data?.name || "running");
+        const extra =
+          name === "writing" && evt.data?.chapter_index ? ` chapter=${evt.data.chapter_index}` : "";
+        const out =
+          name === "outputs_written" && evt.data?.path ? ` path=${evt.data.path}` : "";
+        logText += `\n[phase] ${name}${extra}${out}\n`;
         resultText.value = `${logText}\n\n[content]\n${accContent}`;
       } else if (evt.event === "content") {
         const delta = evt.data?.delta || "";
@@ -594,8 +598,12 @@ async function runMode() {
     });
 
     if (donePayload) {
-      // done 事件里包含 plan/state 等完整信息：最后一次性格式化输出
-      resultText.value = formatResponse(donePayload);
+      // 不要用结构化结果覆盖掉正文；只追加一段“完成摘要”
+      const ms = Date.now() - startAt;
+      const ch = donePayload.chapter_index ? `chapter_index=${donePayload.chapter_index}` : "chapter_index=(auto)";
+      const st = donePayload.state_updated ? "state_updated=true" : "state_updated=false";
+      logText += `\n[done] ${ch}, ${st}, elapsed_ms=${ms}\n`;
+      resultText.value = `${logText}\n\n[content]\n${accContent}`;
     }
     await loadAnchors();
   } finally {

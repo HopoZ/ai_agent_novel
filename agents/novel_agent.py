@@ -36,7 +36,9 @@ def _write_outputs_txt(novel_title: str, chapter_index: int, content: str) -> st
     os.makedirs("outputs", exist_ok=True)
     ts = datetime.now().strftime("%m%d_%H%M%S")
     title = _safe_filename(novel_title, fallback="novel")
-    filename = f"{title}_第{chapter_index}章_{ts}.txt"
+    # 输出文件名不再使用“第几章”概念（章节可重排/插入），仅用小说名 + 时间戳保证可读与唯一性。
+    # chapter_index 仍保留在 storage/chapters/*.json 内部索引里。
+    filename = f"{title}_{ts}.txt"
     path = os.path.join("outputs", filename)
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
