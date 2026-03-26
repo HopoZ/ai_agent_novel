@@ -22,13 +22,46 @@
 
 ## 架构一览（Architecture）
 ```text
-Vue3 (Element Plus) ──SSE/REST──> FastAPI
-   |                                 |
-   | /run_stream (phase + content)   |  NovelAgent (LLM Orchestration)
-   | /graph?view=...                  |  Pydantic Models (NovelState/ChapterPlan/Record)
-   |                                  |
-   └────────────── storage/*.json <───┘
-                  outputs/*.txt（正文归档）
+[ Presentation Layer ]
+  Vue3 + Element Plus + ECharts
+    ├─ Novel UI（模式选择 / 标签树 / 任务输入）
+    ├─ SSE Client（实时接收 phase + content）
+    └─ Graph View（people / events / mixed）
+            │
+            │ REST + SSE
+            ▼
+[ API Layer ]
+  FastAPI (webapp/server.py)
+    ├─ /api/novels/*         小说创建、运行、状态与章节读取
+    ├─ /api/lore/*           设定标签、分组、预览
+    ├─ /api/novels/*/graph   图谱数据聚合
+    └─ /api/novels/*/run_stream (SSE)
+            │
+            ▼
+[ Domain Layer ]
+  NovelAgent (agents/novel_agent.py)
+    ├─ plan_chapter          章节规划（ChapterPlan）
+    ├─ write_chapter_text    正文生成（含流式）
+    ├─ merge_state           next_state patch 合并
+    └─ JSON repair pipeline  输出提取/修复/校验
+            │
+            ▼
+[ Data Layer ]
+  Pydantic Models + File Storage
+    ├─ settings/**/*.md                      设定输入（lorebook）
+    ├─ storage/novels/<id>/state.json        持久化世界状态
+    ├─ storage/novels/<id>/chapters/*.json   章节结构化记录
+    └─ outputs/<小说名>_<时间戳>.txt          正文归档
+```
+
+```text
+核心执行链路（write_chapter）:
+UI提交任务
+  -> /run_stream
+  -> plan_chapter
+  -> write_chapter_text_stream
+  -> save chapter/state + write outputs
+  -> SSE done + 前端完成提示
 ```
 
 ## 快速开始（Web 推荐）
@@ -83,6 +116,8 @@ cli端：
 
 网页端：
 ![](./images/网页端.jpg)
+
+图谱生成：
 ![](./images/图谱.jpg)
 
 ## 许可证与版权
