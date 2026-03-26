@@ -83,6 +83,7 @@ cli端：
 
 网页端：
 ![](./images/网页端.jpg)
+![](./images/图谱.jpg)
 
 ## 许可证与版权
 - **许可证**：AGPL-3.0-or-later（见 `LICENSE`）
