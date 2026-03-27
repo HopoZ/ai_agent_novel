@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
-import shutil
 from typing import Any, Dict, List, Optional
 from pathlib import Path
 from uuid import uuid4
@@ -12,12 +10,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field
 
 from agents.novel_agent import NovelAgent
 from agents.lore_summary import get_lore_summary, load_cached_summary, source_hash_from_map
 from agents.storage import load_state, load_chapter, get_chapters_dir, list_chapters
 from agents.state_models import NovelState, ChapterRecord
+from webapp.frontend_assets import run_frontend_startup
+from webapp.schemas import BuildLoreSummaryRequest, CreateNovelRequest, RunModeRequest
 
 
 app = FastAPI(title="AI Novel Agent")
@@ -48,76 +47,9 @@ _vite_frontend_dir = Path("webapp/frontend")
 _vite_dist_dir = _vite_frontend_dir / "dist"
 
 
-def _frontend_need_rebuild() -> bool:
-    # 可通过环境变量跳过构建（例如：你只想用开发版 dist）
-    if str(os.getenv("SKIP_FRONTEND_BUILD", "")).lower() in {"1", "true", "yes"}:
-        return False
-
-    dist_index = _vite_dist_dir / "index.html"
-    if not dist_index.exists():
-        return True
-
-    src_dir = _vite_frontend_dir / "src"
-    if not src_dir.exists():
-        return False
-
-    # 取 src 目录最新 mtime，和 dist/index.html 做比较
-    latest_src_mtime = 0.0
-    for p in src_dir.rglob("*"):
-        if not p.is_file():
-            continue
-        # 限制类型，避免把 node_modules 等计入（理论上 src 下不会有 node_modules）
-        if p.suffix.lower() not in {".ts", ".tsx", ".js", ".jsx", ".vue", ".css", ".scss", ".html", ".json"}:
-            continue
-        latest_src_mtime = max(latest_src_mtime, p.stat().st_mtime)
-
-    dist_mtime = dist_index.stat().st_mtime
-    return latest_src_mtime > dist_mtime
-
-
 @app.on_event("startup")
 def _maybe_build_frontend():
-    if _frontend_need_rebuild():
-        if not _vite_frontend_dir.exists():
-            logger.warning("Frontend dir not found: %s", _vite_frontend_dir)
-        else:
-            logger.info("Frontend dist is stale, running npm build...")
-            try:
-                # 注意：这是同步执行，会阻塞启动；但能保证你访问到的是最新前端。
-                import subprocess
-                npm_bin = "npm.cmd" if os.name == "nt" else "npm"
-                if not shutil.which(npm_bin):
-                    fallback = "npm"
-                    npm_bin = fallback if shutil.which(fallback) else ""
-                if not npm_bin:
-                    logger.warning("npm executable not found in PATH, skip auto frontend build.")
-                else:
-                    subprocess.run(
-                        [npm_bin, "run", "build"],
-                        cwd=str(_vite_frontend_dir),
-                        check=True,
-                    )
-                    logger.info("Frontend build finished.")
-
-            except Exception as e:
-                logger.exception("Frontend build failed: %s", e)
-    else:
-        logger.info("Frontend dist is up-to-date, skip build.")
-
-    _mount_vite_assets_if_needed()
-
-
-def _mount_vite_assets_if_needed() -> None:
-    assets_dir = _vite_dist_dir / "assets"
-    if not assets_dir.exists():
-        return
-
-    # 避免重复 mount
-    for r in app.routes:
-        if getattr(r, "path", None) == "/assets":
-            return
-
-    app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="vite_assets")
+    run_frontend_startup(app, logger, _vite_frontend_dir, _vite_dist_dir)
 
 
 @app.middleware("http")
@@ -131,43 +63,6 @@ async def log_http_requests(request: Request, call_next):
     except Exception:
         logger.exception("ERR %s %s", request.method, request.url.path)
         raise
-
-
-class CreateNovelRequest(BaseModel):
-    novel_title: Optional[str] = None
-    start_time_slot: Optional[str] = None
-    pov_character_id: Optional[str] = None
-    initial_user_task: Optional[str] = None
-    lore_tags: Optional[List[str]] = None
-
-
-class BuildLoreSummaryRequest(BaseModel):
-    tags: List[str] = Field(default_factory=list)
-    force: bool = False
-
-
-class RunModeRequest(BaseModel):
-    mode: str = Field(
-        description="init_state | plan_only | write_chapter | revise_chapter"
-    )
-    user_task: str
-    # 不建议前端显式指定 chapter_index（现实中会有重排/插入等需求）
-    # 保留这个字段仅用于兼容/内部调试
-    chapter_index: Optional[int] = None
-    chapter_preset_name: Optional[str] = Field(default=None, description="章节预设名（用于生成唯一章节 JSON 文件名）")
-    # 区间语义（推荐）：插入在 after 之后、before 之前
-    insert_after_id: Optional[str] = Field(default=None, description="插入在该事件之后（ev:timeline:X / ev:chapter:Y）")
-    insert_before_id: Optional[str] = Field(default=None, description="插入在该事件之前（ev:timeline:X / ev:chapter:Y）")
-    # 兼容字段（已废弃）：单锚点插入（旧前端可能还会发）
-    insert_anchor_id: Optional[str] = Field(default=None, description="（deprecated）旧字段：单锚点 ev:timeline:X / ev:chapter:Y")
-    time_slot_override: Optional[str] = None
-    # 新字段：主视角可多选（表示与本章最相关核心人物）
-    pov_character_ids_override: Optional[List[str]] = None
-    # 兼容旧字段：单 POV
-    pov_character_id_override: Optional[str] = None
-    # 配角设定（前端“快速多选角色”）
-    supporting_character_ids: Optional[List[str]] = None
-    lore_tags: Optional[List[str]] = None
 
 
 def _resolve_anchor_time_slot(novel_id: str, anchor_id: Optional[str]) -> Optional[str]:

@@ -147,6 +147,6 @@ python -m uvicorn webapp.server:app --reload --port 8000
 
 ## 10. 许可证
 
-- AGPL-3.0-or-later（见 `LICENSE`）
-- 作者信息见 `NOTICE`
+- AGPL-3.0-or-later 见[LICENSE](./LICENSE)
+- 作者信息见 [./NOTICE](./NOTICE)
 

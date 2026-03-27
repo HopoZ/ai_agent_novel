@@ -7,3 +7,9 @@
 *.tmp
 /webapp/frontend/dist
 /webapp/frontend/node_modules
+
+# Directory-level docs generated for internal notes
+/agents/README.md
+/webapp/README.md
+/webapp/frontend/README.md
+/tests/README.md

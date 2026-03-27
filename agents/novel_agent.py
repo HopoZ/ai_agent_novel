@@ -11,21 +11,29 @@ from typing import Any, Dict, Iterator, Optional, Set, Tuple, Type
 
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
-from langchain.messages import AIMessage, HumanMessage, SystemMessage
+from langchain.messages import HumanMessage, SystemMessage
 
 from agents.loader import LoreLoader
-from agents.lore_summary import (
-    build_source_map,
-    load_cached_summary,
-    save_summary,
-    source_hash_from_map,
+from agents.lore_runtime import build_lore_summary_llm as build_lore_summary_llm_runtime
+from agents.lore_runtime import build_lorebook
+from agents.prompt_builders import (
+    build_init_state_prompt,
+    build_plan_chapter_prompt,
+    build_write_chapter_prompt,
 )
-from .state_models import ChapterPlan, ChapterRecord, ContinuityState, CharacterState, CharacterPresence, NovelMeta, NovelState, WorldState
+from agents.state_compactor import (
+    compact_state_for_prompt as compact_state_for_prompt_runtime,
+    format_state_for_prompt as format_state_for_prompt_runtime,
+    select_related_character_ids as select_related_character_ids_runtime,
+)
+from agents.state_merge import (
+    merge_state as merge_state_runtime,
+    neighbor_chapters_context as neighbor_chapters_context_runtime,
+)
+from agents.text_utils import parse_ai_chunk_text, parse_ai_text, write_outputs_txt
+from .state_models import ChapterPlan, ChapterRecord, ContinuityState, NovelMeta, NovelState
 from .storage import (
-    get_state_path,
     ensure_novel_dirs,
-    list_chapters,
-    load_chapter,
     load_state,
     save_chapter,
     save_state,
@@ -33,59 +41,6 @@ from .storage import (
 
 
 logger = logging.getLogger("novel_agent")
-
-_INVALID_FILENAME_CHARS_RE = re.compile(r'[\\\\/:*?"<>|]+')
-
-
-def _safe_filename(name: str, fallback: str = "novel") -> str:
-    name = (name or "").strip()
-    if not name:
-        return fallback
-    name = _INVALID_FILENAME_CHARS_RE.sub("_", name)
-    name = re.sub(r"\s+", " ", name).strip()
-    return name[:80] if len(name) > 80 else name
-
-
-def _write_outputs_txt(novel_title: str, chapter_index: int, content: str) -> str:
-    os.makedirs("outputs", exist_ok=True)
-    ts = datetime.now().strftime("%m%d_%H%M%S")
-    title = _safe_filename(novel_title, fallback="novel")
-    # 输出文件名不再使用“第几章”概念（章节可重排/插入），仅用小说名 + 时间戳保证可读与唯一性。
-    # chapter_index 仍保留在 storage/chapters/*.json 内部索引里。
-    filename = f"{title}_{ts}.txt"
-    path = os.path.join("outputs", filename)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
-    return path
-
-
-def _parse_ai_text(response: AIMessage) -> str:
-    """
-    LangChain v1 可能返回 content_blocks；把它压成纯文本。
-    """
-    if isinstance(response.content, str):
-        return response.content
-    return "".join(
-        block.get("text", "")
-        for block in (response.content or [])
-        if isinstance(block, dict) and block.get("type") == "text"
-    )
-
-
-def _parse_ai_chunk_text(chunk: Any) -> str:
-    """
-    解析 streaming chunk 为纯文本（兼容 AIMessageChunk / dict blocks）。
-    """
-    content = getattr(chunk, "content", chunk)
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "".join(
-            block.get("text", "")
-            for block in (content or [])
-            if isinstance(block, dict) and block.get("type") == "text"
-        )
-    return str(content or "")
 
 
 def _extract_json_object(text: str) -> str:
@@ -169,101 +124,16 @@ class NovelAgent:
         return self.model
 
     def _lorebook(self, lore_tags: Optional[list[str]] = None, lore_summary_id: Optional[str] = None) -> str:
-        # 废弃 lore_summary_id：改为按 tags + version（llm_tag_v1）逐 tag 读取缓存
-        if lore_tags:
-            source = build_source_map(self.lore_loader, lore_tags)
-            parts: list[str] = []
-            missing_tags: list[str] = []
-            for tag in lore_tags:
-                md = source.get(tag, "")
-                if not md.strip():
-                    continue
-                tag_src_hash = source_hash_from_map({tag: md})
-                hit = load_cached_summary([tag], tag_src_hash, mode="llm_tag_v1")
-                if hit:
-                    rows = hit.get("tag_summaries") or []
-                    if isinstance(rows, list) and rows:
-                        first = rows[0] if isinstance(rows[0], dict) else {}
-                        summary = str(first.get("summary", "")).strip()
-                        if summary:
-                            parts.append(f"【{tag}】\n{summary}")
-                            continue
-                missing_tags.append(tag)
-
-            if parts and (not missing_tags):
-                return "### 创作百科全书(LLM摘要版) ###\n\n" + "\n\n".join(parts)
-
-            # 兜底：未命中缓存的 tag 直接注入原文，避免信息缺失
-            merged_parts = list(parts)
-            for tag in missing_tags:
-                md = (source.get(tag, "") or "").strip()
-                if md:
-                    merged_parts.append(f"【{tag}】\n{md}")
-            if merged_parts:
-                return "### 创作百科全书(混合：摘要+原文) ###\n\n" + "\n\n".join(merged_parts)
-
-        lore = self.lore_loader.get_all_lore()
-        if not lore.strip():
-            raise ValueError("settings 目录下没有找到 .md 设定文件，无法生成 lorebook。")
-        return lore
+        # lore_summary_id 已废弃；按 tags + 单 tag 缓存读取 lorebook
+        return build_lorebook(self.lore_loader, lore_tags=lore_tags)
 
     def build_lore_summary_llm(self, tags: list[str], force: bool = False) -> Dict[str, Any]:
-        tags = [str(t).strip() for t in (tags or []) if str(t).strip()]
-        if not tags:
-            raise ValueError("tags is required")
-        source = build_source_map(self.lore_loader, tags)
-        items: list[str] = []
-        tag_summaries: list[Dict[str, str]] = []
-        for tag in tags:
-            md = source.get(tag, "")
-            if not md.strip():
-                continue
-            # 单 tag 缓存：每个 tag 一份摘要缓存（按 tag + 原文 hash）
-            tag_src_hash = source_hash_from_map({tag: md})
-            if not force:
-                tag_cached = load_cached_summary([tag], tag_src_hash, mode="llm_tag_v1")
-                if tag_cached:
-                    cached_rows = tag_cached.get("tag_summaries") or []
-                    if isinstance(cached_rows, list) and cached_rows:
-                        first = cached_rows[0] if isinstance(cached_rows[0], dict) else {}
-                        c_tag = str(first.get("tag", "")).strip() or tag
-                        c_summary = str(first.get("summary", "")).strip()
-                        if c_summary:
-                            items.append(f"【{c_tag}】\n{c_summary}")
-                            tag_summaries.append({"tag": c_tag, "summary": c_summary})
-                            continue
-
-            system = (
-                "你是设定压缩器。请对输入内容做极致压缩，但对于后续写作模型不丢失关键信息。"
-                "只基于原文，不要新增设定，不要解释过程，只输出摘要正文。"
-            )
-            human = (
-                f"标签：{tag}\n\n"
-                "要求：极致压缩，不用在意可读性，但对于你读取来说不丢失关键信息（人物关系、规则边界、触发条件、限制、关键事实）。\n"
-                "使用简洁条目输出。\n\n"
-                f"原文：\n{md}\n"
-            )
-            resp = self._get_model().invoke([SystemMessage(system), HumanMessage(human)])
-            text = _parse_ai_text(resp).strip()
-            if not text:
-                continue
-            items.append(f"【{tag}】\n{text}")
-            tag_summaries.append({"tag": tag, "summary": text})
-            # 新生成结果按单 tag 落缓存
-            save_summary(
-                [tag],
-                tag_src_hash,
-                f"【{tag}】\n{text}",
-                mode="llm_tag_v1",
-                tag_summaries=[{"tag": tag, "summary": text}],
-            )
-
-        if not items:
-            raise ValueError("llm summary build failed: empty result")
-        summary_text = "### 创作百科全书(LLM摘要版) ###\n\n" + "\n\n".join(items)
-        # 返回当前“选中 tags 组合”的清单对象，便于前端/后续按 summary_id 引用
-        src_hash = source_hash_from_map(source)
-        return save_summary(tags, src_hash, summary_text, mode="llm_manifest_v1", tag_summaries=tag_summaries)
+        return build_lore_summary_llm_runtime(
+            model=self._get_model(),
+            lore_loader=self.lore_loader,
+            tags=tags,
+            force=force,
+        )
 
     def _select_related_character_ids(
         self,
@@ -272,24 +142,12 @@ class NovelAgent:
         pov_character_ids_override: Optional[list[str]] = None,
         supporting_character_ids: Optional[list[str]] = None,
     ) -> Set[str]:
-        ids = {c.character_id for c in (state.characters or []) if c.character_id}
-        selected: Set[str] = set()
-        for x in (pov_character_ids_override or []):
-            if x in ids:
-                selected.add(x)
-        for x in (supporting_character_ids or []):
-            if x in ids:
-                selected.add(x)
-        for p in (state.continuity.who_is_present or []):
-            if p.character_id in ids:
-                selected.add(p.character_id)
-        task = user_task or ""
-        for cid in ids:
-            if cid and (cid in task):
-                selected.add(cid)
-        if not selected and state.continuity.pov_character_id:
-            selected.add(state.continuity.pov_character_id)
-        return selected
+        return select_related_character_ids_runtime(
+            state=state,
+            user_task=user_task,
+            pov_character_ids_override=pov_character_ids_override,
+            supporting_character_ids=supporting_character_ids,
+        )
 
     def _compact_state_for_prompt(
         self,
@@ -301,103 +159,18 @@ class NovelAgent:
         timeline_n: int = 6,
         max_chars: int = 9000,
     ) -> str:
-        rel_ids = self._select_related_character_ids(
+        return compact_state_for_prompt_runtime(
             state=state,
             user_task=user_task,
+            time_slot_hint=time_slot_hint,
             pov_character_ids_override=pov_character_ids_override,
             supporting_character_ids=supporting_character_ids,
+            timeline_n=timeline_n,
+            max_chars=max_chars,
         )
-        compact_chars = []
-        for c in state.characters or []:
-            if rel_ids and c.character_id not in rel_ids:
-                continue
-            rel = list((c.relationships or {}).items())[:3]
-            compact_chars.append(
-                {
-                    "character_id": c.character_id,
-                    "current_location": c.current_location,
-                    "relationships": dict(rel),
-                    "goals": (c.goals or [])[:2],
-                    "known_facts": (c.known_facts or [])[:3],
-                }
-            )
-
-        # world.key_rules: 按关键词匹配相关规则键；若为空则保底前3项
-        task = user_task or ""
-        key_rules = state.world.key_rules or {}
-        picked_rules: Dict[str, str] = {}
-        for k, v in key_rules.items():
-            if (k and k in task) or any((cid and cid in (k + v)) for cid in rel_ids):
-                picked_rules[k] = v
-        if not picked_rules:
-            for i, (k, v) in enumerate(key_rules.items()):
-                if i >= 3:
-                    break
-                picked_rules[k] = v
-
-        # timeline：最近N条 + 与 time_slot_hint 相关条
-        timeline = list(state.world.timeline or [])
-        picked_tl = timeline[-max(1, timeline_n):]
-        if time_slot_hint:
-            for t in timeline:
-                if time_slot_hint in (t.time_slot or "") and t not in picked_tl:
-                    picked_tl.append(t)
-
-        payload = {
-            "meta": {
-                "novel_id": state.meta.novel_id,
-                "novel_title": state.meta.novel_title,
-                "initialized": state.meta.initialized,
-                "current_chapter_index": state.meta.current_chapter_index,
-            },
-            "continuity": {
-                "time_slot": state.continuity.time_slot,
-                "pov_character_id": state.continuity.pov_character_id,
-                "who_is_present": [p.model_dump() for p in (state.continuity.who_is_present or [])],
-            },
-            "characters": compact_chars,
-            "world": {
-                "key_rules": picked_rules,
-                "timeline": [t.model_dump(mode="json") for t in picked_tl],
-            },
-        }
-        s = json.dumps(payload, ensure_ascii=False, indent=2)
-        if len(s) > max_chars:
-            return s[:max_chars] + "\n...[truncated]"
-        return s
 
     def _format_state_for_prompt(self, state: NovelState, max_chars: int = 12000) -> str:
-        """
-        为了控制上下文长度：只注入“连续性关键字段”的压缩摘要。
-        """
-        payload = {
-            # model_dump(mode="json")：确保 datetime 等类型可以直接被 json.dumps 序列化
-            "meta": state.meta.model_dump(mode="json"),
-            "continuity": state.continuity.model_dump(),
-            "characters": [
-                {
-                    "character_id": c.character_id,
-                    "current_location": c.current_location,
-                    "alive": c.alive,
-                    "relationships": c.relationships,
-                    "goals": c.goals,
-                    "known_facts": c.known_facts,
-                    "description": c.description,
-                }
-                for c in state.characters
-            ],
-            "world": {
-                "key_rules": state.world.key_rules,
-                "factions": state.world.factions,
-                "timeline": [t.model_dump(mode="json") for t in state.world.timeline[-10:]],
-                "open_questions": state.world.open_questions[-30:],
-            },
-            "recent_summaries": state.recent_summaries[-10:],
-        }
-        s = json.dumps(payload, ensure_ascii=False, indent=2)
-        if len(s) > max_chars:
-            return s[:max_chars] + "\n...[truncated]"
-        return s
+        return format_state_for_prompt_runtime(state=state, max_chars=max_chars)
 
     def _neighbor_chapters_context(
         self,
@@ -405,40 +178,11 @@ class NovelAgent:
         target_chapter_index: int,
         enabled: bool = True,
     ) -> str:
-        """
-        仅注入“上下相关两章”（上一章 + 下一章）的轻量摘要，控制输入量。
-        """
-        if not enabled:
-            return "[]"
-        chapters = list_chapters(novel_id)
-        if not chapters:
-            return "[]"
-        prev_c = None
-        next_c = None
-        for c in chapters:
-            if c.chapter_index < target_chapter_index:
-                if (prev_c is None) or (c.chapter_index > prev_c.chapter_index):
-                    prev_c = c
-            elif c.chapter_index > target_chapter_index:
-                if (next_c is None) or (c.chapter_index < next_c.chapter_index):
-                    next_c = c
-        selected = [x for x in [prev_c, next_c] if x is not None]
-        payload = []
-        for c in selected:
-            payload.append(
-                {
-                    "chapter_index": c.chapter_index,
-                    "chapter_preset_name": c.chapter_preset_name,
-                    "time_slot": c.time_slot,
-                    "pov_character_id": c.pov_character_id,
-                    "who_is_present": [p.character_id for p in (c.who_is_present or [])],
-                    "beats": [
-                        {"beat_title": b.beat_title, "summary": b.summary}
-                        for b in (c.beats or [])[:6]
-                    ],
-                }
-            )
-        return json.dumps(payload, ensure_ascii=False, indent=2)
+        return neighbor_chapters_context_runtime(
+            novel_id=novel_id,
+            target_chapter_index=target_chapter_index,
+            enabled=enabled,
+        )
 
     def create_novel_stub(
         self,
@@ -485,25 +229,10 @@ class NovelAgent:
         lorebook = self._lorebook(lore_tags, lore_summary_id=lore_summary_id)
         state_context = self._compact_state_for_prompt(state, user_task=user_task)
 
-        system = (
-            "你是一个“网文世界建模器”。你的任务是：根据 lorebook 和用户需求，生成完整且可持续的世界状态。"
-            "输出必须是严格 JSON，且只包含一个 JSON 对象，不要输出任何多余文本。"
-        )
-        human = (
-            f"用户需求：{user_task}\n\n"
-            "当前状态（可能很空）：\n"
-            f"{state_context}\n\n"
-            "lorebook：\n"
-            f"{lorebook}\n\n"
-            "请生成“初始化后的 next_state”，要求：\n"
-            "- continuity.time_slot 保持用户指定或由你选择的开始时间段\n"
-            "- continuity.pov_character_id 选择一个合适的 POV 角色（除非用户已指定）\n"
-            "- continuity.who_is_present 至少包含 POV 与核心行动角色\n"
-            "- characters 给出主要人物的完整状态（位置/关系/目标/已知事实）\n"
-            "- world 给出关键规则结论、阵营/势力概述、时间线与 open_questions\n"
-            "- meta.initialized=true，meta.current_chapter_index 保持为 0\n"
-            "- recent_summaries 先给一个空列表或 1 条摘要\n"
-            "\n输出 JSON 必须符合 NovelState 的结构。"
+        system, human = build_init_state_prompt(
+            user_task=user_task,
+            state_context=state_context,
+            lorebook=lorebook,
         )
 
         plan_json, usage = self._invoke_json(system, human, root_model=NovelState, return_usage=True)
@@ -585,112 +314,20 @@ class NovelAgent:
             "supporting_character_ids": supporting_character_ids or [],
         }
 
-        system = (
-            "你是一个“网文章节规划器”。你必须输出严格 JSON（只包含一个 JSON 对象），用于生成下一章。"
-        )
-        human = (
-            f"用户本章任务：{user_task}\n\n"
-            f"目标 chapter_index：{chapter_index}\n"
-            f"连续性提示：{json.dumps(continuity_hint, ensure_ascii=False)}\n\n"
-            "当前 NovelState（压缩注入）：\n"
-            f"{state_context}\n\n"
-            "上下文章节（仅相邻两章；若为空表示本次不注入章节 JSON）：\n"
-            f"{chapter_context}\n\n"
-            "lorebook（静态设定）：\n"
-            f"{lorebook}\n\n"
-            "你要输出一个 ChapterPlan：\n"
-            "- chapter_index 必须等于目标\n"
-            "- time_slot 必须是本章写作的时间段（使用覆盖值或从世界线推断）\n"
-            "- pov_character_id：若提供了 pov_character_ids_override，则从该列表中选择最合适的一个作为主 POV；否则自行选择最稳定 POV\n"
-            "- who_is_present：列出在本章关键行动中出现的主要角色；若提供 supporting_character_ids，请优先纳入为配角出场候选\n"
-            "- beats：提供 6~12 条剧情 beats（每条有 beat_title/summary，可选 time_slot）\n"
-            "- next_state：给出“本章结束后的状态补丁（patch）”，不要重复整份 NovelState，避免输出过长被截断：\n"
-            "  - 必须包含 meta（沿用 novel_id/novel_title 等）与 continuity（更新到本章结束后的 time_slot/who_is_present/location/POV）\n"
-            "  - characters：只需要输出本章涉及/变化的角色（其余角色不必重复输出）\n"
-            "  - world：只需要输出本章新增/变化的部分（至少追加 1 条 timeline 事件，summary 简短）\n"
-            "  - recent_summaries：可选（0~1 条简短摘要）\n"
-            "\n注意：next_state 的 continuity/time_slot 与 who_is_present 要是“本章结束后的状态”。\n"
-            "严格要求：只输出 JSON 对象，不要 markdown，不要 ```json 代码块，不要额外解释。"
+        system, human = build_plan_chapter_prompt(
+            user_task=user_task,
+            chapter_index=chapter_index,
+            continuity_hint=continuity_hint,
+            state_context=state_context,
+            chapter_context=chapter_context,
+            lorebook=lorebook,
         )
 
         return self._invoke_json(system, human, root_model=ChapterPlan)
 
     @staticmethod
     def merge_state(base: NovelState, patch: NovelState) -> NovelState:
-        """
-        将模型给出的 next_state（允许是“补丁”）合并到当前 base 状态，避免因输出过长而截断。
-        规则（保守合并）：
-        - meta：以 patch 为准，但补齐 novel_id/novel_title/lore_tags 等缺失字段
-        - continuity：以 patch 为准；缺字段则回退 base
-        - characters：若 patch.characters 为空 -> 沿用 base.characters；
-          否则按 character_id 合并覆盖（patch 中出现的角色覆盖同 id 的 base）
-        - world：若 patch.world 是“空对象” -> 沿用 base.world；
-          否则 key_rules/factions/open_questions 用 patch 覆盖非空项；timeline 进行追加（去重按 time_slot+summary）
-        - recent_summaries：若 patch.recent_summaries 为空 -> 沿用 base；否则用 patch
-        """
-        merged = base.model_copy(deep=True)
-
-        # meta（patch 常只给增量；要避免默认值把 base 覆盖坏）
-        if patch.meta:
-            pm = patch.meta
-            mm = merged.meta
-            if pm.novel_id:
-                mm.novel_id = pm.novel_id
-            if pm.novel_title:
-                mm.novel_title = pm.novel_title
-            if pm.lore_tags:
-                mm.lore_tags = pm.lore_tags
-            # initialized 一旦为 True，不应被 patch 默认 False 回写
-            mm.initialized = bool(mm.initialized or pm.initialized)
-            # 章节号只允许前进，不允许因 patch 默认 0 回退
-            if isinstance(pm.current_chapter_index, int) and pm.current_chapter_index > mm.current_chapter_index:
-                mm.current_chapter_index = pm.current_chapter_index
-            merged.meta = mm
-
-        # continuity
-        if patch.continuity:
-            mc = merged.continuity.model_copy(deep=True)
-            pc = patch.continuity
-            merged.continuity = ContinuityState(
-                time_slot=pc.time_slot or mc.time_slot,
-                who_is_present=pc.who_is_present or mc.who_is_present,
-                pov_character_id=pc.pov_character_id or mc.pov_character_id,
-                current_location=pc.current_location or mc.current_location,
-            )
-
-        # characters
-        if patch.characters:
-            by_id: Dict[str, CharacterState] = {c.character_id: c for c in (base.characters or []) if c.character_id}
-            for c in patch.characters:
-                if not c.character_id:
-                    continue
-                by_id[c.character_id] = c
-            merged.characters = list(by_id.values())
-
-        # world
-        if patch.world:
-            pb = patch.world
-            mb = merged.world.model_copy(deep=True)
-            merged.world = WorldState(
-                key_rules=pb.key_rules or mb.key_rules,
-                factions=pb.factions or mb.factions,
-                timeline=mb.timeline,
-                open_questions=pb.open_questions or mb.open_questions,
-            )
-            # timeline append with simple de-dup
-            seen = {(t.time_slot, t.summary) for t in (mb.timeline or [])}
-            for t in pb.timeline or []:
-                k = (t.time_slot, t.summary)
-                if k in seen:
-                    continue
-                seen.add(k)
-                merged.world.timeline.append(t)
-
-        # recent_summaries
-        if patch.recent_summaries:
-            merged.recent_summaries = patch.recent_summaries
-
-        return merged
+        return merge_state_runtime(base=base, patch=patch)
 
     def write_chapter_text(
         self,
@@ -722,27 +359,18 @@ class NovelAgent:
             enabled=include_chapter_context,
         )
 
-        system = (
-            "你是一个网文作家。请根据当前 NovelState 与 ChapterPlan 生成章节正文。"
-            "要求：必须严格遵守设定与连续性；不要提及自己是 AI；不要输出任何多余说明。"
-            "正文直接开始叙述。"
-        )
-        human = (
-            f"用户本章任务：{user_task}\n\n"
-            f"当前状态（压缩）：\n{state_context}\n\n"
-            "上下文章节（仅相邻两章；若为空表示本次不注入章节 JSON）：\n"
-            f"{chapter_context}\n\n"
-            "ChapterPlan（用于写作）：\n"
-            f"{plan.model_dump_json(ensure_ascii=False, indent=2)}\n\n"
-            "lorebook（静态设定）：\n"
-            f"{lorebook}\n\n"
-            "请输出纯文本章节正文（不要输出 JSON、不要输出标题前的解释）。"
+        system, human = build_write_chapter_prompt(
+            user_task=user_task,
+            state_context=state_context,
+            chapter_context=chapter_context,
+            lorebook=lorebook,
+            plan=plan,
         )
 
         messages = [SystemMessage(system), HumanMessage(human)]
         logger.info("Writing chapter %s ...", plan.chapter_index)
         resp = self._get_model().invoke(messages)
-        text = _parse_ai_text(resp)
+        text = parse_ai_text(resp)
         usage = getattr(resp, "usage_metadata", None) or {}
         return text.strip(), usage
 
@@ -782,27 +410,18 @@ class NovelAgent:
             enabled=include_chapter_context,
         )
 
-        system = (
-            "你是一个网文作家。请根据当前 NovelState 与 ChapterPlan 生成章节正文。"
-            "要求：必须严格遵守设定与连续性；不要提及自己是 AI；不要输出任何多余说明。"
-            "正文直接开始叙述。"
-        )
-        human = (
-            f"用户本章任务：{user_task}\n\n"
-            f"当前状态（压缩）：\n{state_context}\n\n"
-            "上下文章节（仅相邻两章；若为空表示本次不注入章节 JSON）：\n"
-            f"{chapter_context}\n\n"
-            "ChapterPlan（用于写作）：\n"
-            f"{plan.model_dump_json(ensure_ascii=False, indent=2)}\n\n"
-            "lorebook（静态设定）：\n"
-            f"{lorebook}\n\n"
-            "请输出纯文本章节正文（不要输出 JSON、不要输出标题前的解释）。"
+        system, human = build_write_chapter_prompt(
+            user_task=user_task,
+            state_context=state_context,
+            chapter_context=chapter_context,
+            lorebook=lorebook,
+            plan=plan,
         )
 
         messages = [SystemMessage(system), HumanMessage(human)]
         logger.info("Streaming write chapter %s ...", plan.chapter_index)
         for chunk in self._get_model().stream(messages):
-            text = _parse_ai_chunk_text(chunk)
+            text = parse_ai_chunk_text(chunk)
             usage = getattr(chunk, "usage_metadata", None) or {}
             if text or usage:
                 yield {"delta": text, "usage_metadata": usage}
@@ -929,7 +548,7 @@ class NovelAgent:
             # 同步写出纯文本到 outputs/（保持脚本版的落盘习惯）
             try:
                 title = state.meta.novel_title or "未命名小说"
-                out_path = _write_outputs_txt(title, chapter_index, content_text)
+                out_path = write_outputs_txt(title, chapter_index, content_text)
                 logger.info("Wrote outputs txt: %s", out_path)
             except Exception as e:
                 logger.warning("Failed to write outputs txt: %s", e)
@@ -978,42 +597,20 @@ class NovelAgent:
             lorebook_init = self._lorebook(lore_tags, lore_summary_id=lore_summary_id)
             state_context_init = self._compact_state_for_prompt(state=state, user_task=user_task)
             auto_task = f"（自动初始化）{user_task}".strip()
-            init_system = (
-                "你是一个“网文世界建模器”。你的任务是：根据 lorebook 和用户需求，生成完整且可持续的世界状态。"
-                "输出必须是严格 JSON，且只包含一个 JSON 对象，不要输出任何多余文本。"
-            )
-            init_human = (
-                f"用户需求：{auto_task}\n\n"
-                "当前状态（可能很空）：\n"
-                f"{state_context_init}\n\n"
-                "lorebook：\n"
-                f"{lorebook_init}\n\n"
-                "请生成“初始化后的 next_state”，要求：\n"
-                "- continuity.time_slot 保持用户指定或由你选择的开始时间段\n"
-                "- continuity.pov_character_id 选择一个合适的 POV 角色（除非用户已指定）\n"
-                "- continuity.who_is_present 至少包含 POV 与核心行动角色\n"
-                "- characters 给出主要人物的完整状态（位置/关系/目标/已知事实）\n"
-                "- world 给出关键规则结论、阵营/势力概述、时间线与 open_questions\n"
-                "- meta.initialized=true，meta.current_chapter_index 保持为 0\n"
-                "- recent_summaries 先给一个空列表或 1 条摘要\n"
-                "\n输出 JSON 必须符合 NovelState 的结构。"
+            init_system, init_human = build_init_state_prompt(
+                user_task=auto_task,
+                state_context=state_context_init,
+                lorebook=lorebook_init,
             )
             out["stages"].append({"name": "auto_init", "system": init_system, "human": init_human})
 
         if mode == "init_state":
             lorebook = self._lorebook(lore_tags, lore_summary_id=lore_summary_id)
             state_context = self._compact_state_for_prompt(state=state, user_task=user_task)
-            system = (
-                "你是一个“网文世界建模器”。你的任务是：根据 lorebook 和用户需求，生成完整且可持续的世界状态。"
-                "输出必须是严格 JSON，且只包含一个 JSON 对象，不要输出任何多余文本。"
-            )
-            human = (
-                f"用户需求：{user_task}\n\n"
-                "当前状态（可能很空）：\n"
-                f"{state_context}\n\n"
-                "lorebook：\n"
-                f"{lorebook}\n\n"
-                "请生成“初始化后的 next_state”..."
+            system, human = build_init_state_prompt(
+                user_task=user_task,
+                state_context=state_context,
+                lorebook=lorebook,
             )
             out["stages"].append({"name": "init_state", "system": system, "human": human})
             return out
@@ -1039,37 +636,23 @@ class NovelAgent:
             "pov_character_ids_override": pov_character_ids_override or [],
             "supporting_character_ids": supporting_character_ids or [],
         }
-        plan_system = "你是一个“网文章节规划器”。你必须输出严格 JSON（只包含一个 JSON 对象），用于生成下一章。"
-        plan_human = (
-            f"用户本章任务：{user_task}\n\n"
-            f"目标 chapter_index：{chapter_index}\n"
-            f"连续性提示：{json.dumps(continuity_hint, ensure_ascii=False)}\n\n"
-            "当前 NovelState（压缩注入）：\n"
-            f"{state_context}\n\n"
-            "上下文章节（仅相邻两章；若为空表示本次不注入章节 JSON）：\n"
-            f"{chapter_context}\n\n"
-            "lorebook（静态设定）：\n"
-            f"{lorebook}\n\n"
-            "你要输出一个 ChapterPlan（严格 JSON）。"
+        plan_system, plan_human = build_plan_chapter_prompt(
+            user_task=user_task,
+            chapter_index=chapter_index,
+            continuity_hint=continuity_hint,
+            state_context=state_context,
+            chapter_context=chapter_context,
+            lorebook=lorebook,
         )
         out["stages"].append({"name": "plan_chapter", "system": plan_system, "human": plan_human})
 
         if mode in {"write_chapter", "revise_chapter"}:
-            write_system = (
-                "你是一个网文作家。请根据当前 NovelState 与 ChapterPlan 生成章节正文。"
-                "要求：必须严格遵守设定与连续性；不要提及自己是 AI；不要输出任何多余说明。"
-                "正文直接开始叙述。"
-            )
-            write_human = (
-                f"用户本章任务：{user_task}\n\n"
-                f"当前状态（压缩）：\n{state_context}\n\n"
-                "上下文章节（仅相邻两章；若为空表示本次不注入章节 JSON）：\n"
-                f"{chapter_context}\n\n"
-                "ChapterPlan（用于写作）：\n"
-                "[运行时由上一步 plan_chapter 产出]\n\n"
-                "lorebook（静态设定）：\n"
-                f"{lorebook}\n\n"
-                "请输出纯文本章节正文（不要输出 JSON、不要输出标题前的解释）。"
+            write_system, write_human = build_write_chapter_prompt(
+                user_task=user_task,
+                state_context=state_context,
+                chapter_context=chapter_context,
+                lorebook=lorebook,
+                plan=None,
             )
             out["stages"].append({"name": "write_chapter_text", "system": write_system, "human": write_human})
 
@@ -1084,11 +667,11 @@ class NovelAgent:
         def llm_fix_invoke(fix_prompt: str) -> str:
             fix_messages = [SystemMessage(system), HumanMessage(fix_prompt)]
             resp = self._get_model().invoke(fix_messages)
-            return _parse_ai_text(resp)
+            return parse_ai_text(resp)
 
         logger.info("Invoking JSON model ...")
         resp = self._get_model().invoke(messages)
-        raw_text = _parse_ai_text(resp)
+        raw_text = parse_ai_text(resp)
         usage = getattr(resp, "usage_metadata", None) or {}
 
         def parse_fn(json_dict: dict):

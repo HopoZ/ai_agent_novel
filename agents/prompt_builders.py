@@ -1,0 +1,98 @@
+from __future__ import annotations
+
+import json
+from typing import Optional
+
+from .state_models import ChapterPlan
+
+
+def build_init_state_prompt(user_task: str, state_context: str, lorebook: str) -> tuple[str, str]:
+    system = (
+        "你是一个“网文世界建模器”。你的任务是：根据 lorebook 和用户需求，生成完整且可持续的世界状态。"
+        "输出必须是严格 JSON，且只包含一个 JSON 对象，不要输出任何多余文本。"
+    )
+    human = (
+        f"用户需求：{user_task}\n\n"
+        "当前状态（可能很空）：\n"
+        f"{state_context}\n\n"
+        "lorebook：\n"
+        f"{lorebook}\n\n"
+        "请生成“初始化后的 next_state”，要求：\n"
+        "- continuity.time_slot 保持用户指定或由你选择的开始时间段\n"
+        "- continuity.pov_character_id 选择一个合适的 POV 角色（除非用户已指定）\n"
+        "- continuity.who_is_present 至少包含 POV 与核心行动角色\n"
+        "- characters 给出主要人物的完整状态（位置/关系/目标/已知事实）\n"
+        "- world 给出关键规则结论、阵营/势力概述、时间线与 open_questions\n"
+        "- meta.initialized=true，meta.current_chapter_index 保持为 0\n"
+        "- recent_summaries 先给一个空列表或 1 条摘要\n"
+        "\n输出 JSON 必须符合 NovelState 的结构。"
+    )
+    return system, human
+
+
+def build_plan_chapter_prompt(
+    user_task: str,
+    chapter_index: int,
+    continuity_hint: dict,
+    state_context: str,
+    chapter_context: str,
+    lorebook: str,
+) -> tuple[str, str]:
+    system = "你是一个“网文章节规划器”。你必须输出严格 JSON（只包含一个 JSON 对象），用于生成下一章。"
+    human = (
+        f"用户本章任务：{user_task}\n\n"
+        f"目标 chapter_index：{chapter_index}\n"
+        f"连续性提示：{json.dumps(continuity_hint, ensure_ascii=False)}\n\n"
+        "当前 NovelState（压缩注入）：\n"
+        f"{state_context}\n\n"
+        "上下文章节（仅相邻两章；若为空表示本次不注入章节 JSON）：\n"
+        f"{chapter_context}\n\n"
+        "lorebook（静态设定）：\n"
+        f"{lorebook}\n\n"
+        "你要输出一个 ChapterPlan：\n"
+        "- chapter_index 必须等于目标\n"
+        "- time_slot 必须是本章写作的时间段（使用覆盖值或从世界线推断）\n"
+        "- pov_character_id：若提供了 pov_character_ids_override，则从该列表中选择最合适的一个作为主 POV；否则自行选择最稳定 POV\n"
+        "- who_is_present：列出在本章关键行动中出现的主要角色；若提供 supporting_character_ids，请优先纳入为配角出场候选\n"
+        "- beats：提供 6~12 条剧情 beats（每条有 beat_title/summary，可选 time_slot）\n"
+        "- next_state：给出“本章结束后的状态补丁（patch）”，不要重复整份 NovelState，避免输出过长被截断：\n"
+        "  - 必须包含 meta（沿用 novel_id/novel_title 等）与 continuity（更新到本章结束后的 time_slot/who_is_present/location/POV）\n"
+        "  - characters：只需要输出本章涉及/变化的角色（其余角色不必重复输出）\n"
+        "  - world：只需要输出本章新增/变化的部分（至少追加 1 条 timeline 事件，summary 简短）\n"
+        "  - recent_summaries：可选（0~1 条简短摘要）\n"
+        "\n注意：next_state 的 continuity/time_slot 与 who_is_present 要是“本章结束后的状态”。\n"
+        "严格要求：只输出 JSON 对象，不要 markdown，不要 ```json 代码块，不要额外解释。"
+    )
+    return system, human
+
+
+def build_write_chapter_prompt(
+    user_task: str,
+    state_context: str,
+    chapter_context: str,
+    lorebook: str,
+    plan: Optional[ChapterPlan] = None,
+) -> tuple[str, str]:
+    system = (
+        "你是一个网文作家。请根据当前 NovelState 与 ChapterPlan 生成章节正文。"
+        "要求：必须严格遵守设定与连续性；不要提及自己是 AI；不要输出任何多余说明。"
+        "正文直接开始叙述。"
+    )
+    plan_text = (
+        plan.model_dump_json(ensure_ascii=False, indent=2)
+        if plan is not None
+        else "[运行时由上一步 plan_chapter 产出]"
+    )
+    human = (
+        f"用户本章任务：{user_task}\n\n"
+        f"当前状态（压缩）：\n{state_context}\n\n"
+        "上下文章节（仅相邻两章；若为空表示本次不注入章节 JSON）：\n"
+        f"{chapter_context}\n\n"
+        "ChapterPlan（用于写作）：\n"
+        f"{plan_text}\n\n"
+        "lorebook（静态设定）：\n"
+        f"{lorebook}\n\n"
+        "请输出纯文本章节正文（不要输出 JSON、不要输出标题前的解释）。"
+    )
+    return system, human
+

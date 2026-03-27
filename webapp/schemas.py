@@ -1,0 +1,51 @@
+from __future__ import annotations
+
+from typing import List, Optional
+
+from pydantic import BaseModel, Field
+
+
+class CreateNovelRequest(BaseModel):
+    novel_title: Optional[str] = None
+    start_time_slot: Optional[str] = None
+    pov_character_id: Optional[str] = None
+    initial_user_task: Optional[str] = None
+    lore_tags: Optional[List[str]] = None
+
+
+class BuildLoreSummaryRequest(BaseModel):
+    tags: List[str] = Field(default_factory=list)
+    force: bool = False
+
+
+class RunModeRequest(BaseModel):
+    mode: str = Field(
+        description="init_state | plan_only | write_chapter | revise_chapter"
+    )
+    user_task: str
+    # 不建议前端显式指定 chapter_index（现实中会有重排/插入等需求）
+    # 保留这个字段仅用于兼容/内部调试
+    chapter_index: Optional[int] = None
+    chapter_preset_name: Optional[str] = Field(
+        default=None, description="章节预设名（用于生成唯一章节 JSON 文件名）"
+    )
+    # 区间语义（推荐）：插入在 after 之后、before 之前
+    insert_after_id: Optional[str] = Field(
+        default=None, description="插入在该事件之后（ev:timeline:X / ev:chapter:Y）"
+    )
+    insert_before_id: Optional[str] = Field(
+        default=None, description="插入在该事件之前（ev:timeline:X / ev:chapter:Y）"
+    )
+    # 兼容字段（已废弃）：单锚点插入（旧前端可能还会发）
+    insert_anchor_id: Optional[str] = Field(
+        default=None, description="（deprecated）旧字段：单锚点 ev:timeline:X / ev:chapter:Y"
+    )
+    time_slot_override: Optional[str] = None
+    # 新字段：主视角可多选（表示与本章最相关核心人物）
+    pov_character_ids_override: Optional[List[str]] = None
+    # 兼容旧字段：单 POV
+    pov_character_id_override: Optional[str] = None
+    # 配角设定（前端“快速多选角色”）
+    supporting_character_ids: Optional[List[str]] = None
+    lore_tags: Optional[List[str]] = None
+
