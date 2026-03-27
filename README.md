@@ -17,12 +17,13 @@
 ## 2. 系统能力矩阵
 
 ### 2.1 叙事状态管理（Stateful Narrative Engine）
-- 通过 `NovelState` 持久化：
+- 通过 `NovelState` 维持运行态连续性摘要：
   - 人物状态（关系、目标、已知事实、位置）
   - 世界规则（规则、阵营、开放问题）
   - 时间线（timeline）
   - 连续性约束（time_slot / POV / 出场角色）
 - 存储路径：`storage/novels/<novel_id>/state.json`
+- 重要：`state.json` 是**运行态摘要/快照**，人物/事件关系的**真源**来自图谱表（见「关键数据资产」）
 
 ### 2.2 写作链路（Plan + Draft）
 - `plan_chapter` 生成结构化 `ChapterPlan`
@@ -46,19 +47,23 @@
 
 ### 2.5 可观测性与交互
 - SSE 阶段事件：`planning -> writing -> saving -> done`
-- 前端单按钮流程：先生成 Input 预览，再确认运行
+- 前端单按钮流程：先生成 Input 预览，再确认运行（避免“填完直接烧 token”）
 - `/preview_input` 可查看本次真实拼装输入
 - 悬浮预览 `compact=1` 显示 tag 摘要（无缓存提示先生成）
 - 图谱视图：`people / events / mixed`
+- 右侧输出：正文/规划流/下章建议均为流式增量，并支持**自动滚动到底**
+- 支持前端中止生成（中止后端尽快停止，以节省 token）
 
 ## 3. 运行模式
 
 | Mode | 语义 |
 |---|---|
-| `init_state` | 初始化世界状态 |
+| `init_state` | 初始化世界状态（显式执行；写作链路不会自动初始化） |
 | `plan_only` | 仅生成章节规划并推进状态 |
 | `write_chapter` | 规划 + 正文生成 + 落盘 |
 | `revise_chapter` | 修订（当前沿用规划+写作链路） |
+
+注意：若 `state.meta.initialized=false`，写作链路会直接报错提示先初始化（避免“隐式初始化造成规划/写作上下文冲突”）。
 
 ## 4. 架构分层
 
@@ -67,7 +72,7 @@
 Vue3 + Element Plus + ECharts
   - 标签树/角色选择/输入预览
   - SSE 流式正文
-  - 图谱可视化
+  - 图谱可视化（全屏查看 + 节点/边编辑）
         |
         v
 [API]
@@ -97,8 +102,8 @@ outputs/*.txt
 
 - `settings/**/*.md`：静态设定源
 - `storage/lore_summaries/*.json`：tag 摘要缓存
-- `storage/novels/<id>/state.json`：运行态摘要（供模型连续性使用，非关系真源）
-- `storage/novels/<id>/chapters/*.json`：章节结构化记录（每章一表）
+- `storage/novels/<id>/state.json`：运行态摘要（供模型连续性使用，**非关系真源**）
+- `storage/novels/<id>/chapters/*.json`：章节结构化记录（每章一表，source-of-truth 用于刷新运行态摘要字段）
 - `storage/novels/<id>/character_entities.json`：人物实体表
 - `storage/novels/<id>/character_relations.json`：人物关系表
 - `storage/novels/<id>/event_entities.json`：事件实体表
@@ -150,11 +155,11 @@ python -m uvicorn webapp.server:app --reload --port 8000
 
 - **先摘要后写作**：先执行“生成当前Tag摘要”，再运行章节生成
 - **按章控范围**：每章任务仅描述本章目标，避免跨多章超大任务
-- **周期性回看输入**：用 `/preview_input` 验证拼装内容是否超量
 - **以四表为关系事实源**：人物/事件实体与关系使用四表，`state.json` 用作运行态摘要
+- **图谱先落表再生成**：章节“归属事件 + 关联人物”的选择应先写入图谱表，再进入 plan/write（减少 LLM 自行绑定造成的不一致）
 
 ## 10. 许可证
 
-- AGPL-3.0-or-later 见[LICENSE](./LICENSE)
+- AGPL-3.0-or-later 见[./LICENSE](./LICENSE)
 - 作者信息见 [./NOTICE](./NOTICE)
 
