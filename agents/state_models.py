@@ -162,6 +162,8 @@ class ChapterPlan(BaseModel):
 
 class ChapterRecord(BaseModel):
     chapter_index: int
+    # 用户可选的章节预设名，用于生成唯一章节文件名
+    chapter_preset_name: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     time_slot: str

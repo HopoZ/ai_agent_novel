@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 from typing import Any, Dict, List, Optional
 from pathlib import Path
 from uuid import uuid4
@@ -14,7 +15,8 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from agents.novel_agent import NovelAgent
-from agents.storage import load_state, load_chapter, get_chapters_dir
+from agents.lore_summary import get_lore_summary, load_cached_summary, source_hash_from_map
+from agents.storage import load_state, load_chapter, get_chapters_dir, list_chapters
 from agents.state_models import NovelState, ChapterRecord
 
 
@@ -83,13 +85,20 @@ def _maybe_build_frontend():
             try:
                 # 注意：这是同步执行，会阻塞启动；但能保证你访问到的是最新前端。
                 import subprocess
+                npm_bin = "npm.cmd" if os.name == "nt" else "npm"
+                if not shutil.which(npm_bin):
+                    fallback = "npm"
+                    npm_bin = fallback if shutil.which(fallback) else ""
+                if not npm_bin:
+                    logger.warning("npm executable not found in PATH, skip auto frontend build.")
+                else:
+                    subprocess.run(
+                        [npm_bin, "run", "build"],
+                        cwd=str(_vite_frontend_dir),
+                        check=True,
+                    )
+                    logger.info("Frontend build finished.")
 
-                subprocess.run(
-                    ["npm", "run", "build"],
-                    cwd=str(_vite_frontend_dir),
-                    check=True,
-                )
-                logger.info("Frontend build finished.")
             except Exception as e:
                 logger.exception("Frontend build failed: %s", e)
     else:
@@ -132,6 +141,11 @@ class CreateNovelRequest(BaseModel):
     lore_tags: Optional[List[str]] = None
 
 
+class BuildLoreSummaryRequest(BaseModel):
+    tags: List[str] = Field(default_factory=list)
+    force: bool = False
+
+
 class RunModeRequest(BaseModel):
     mode: str = Field(
         description="init_state | plan_only | write_chapter | revise_chapter"
@@ -140,13 +154,19 @@ class RunModeRequest(BaseModel):
     # 不建议前端显式指定 chapter_index（现实中会有重排/插入等需求）
     # 保留这个字段仅用于兼容/内部调试
     chapter_index: Optional[int] = None
+    chapter_preset_name: Optional[str] = Field(default=None, description="章节预设名（用于生成唯一章节 JSON 文件名）")
     # 区间语义（推荐）：插入在 after 之后、before 之前
     insert_after_id: Optional[str] = Field(default=None, description="插入在该事件之后（ev:timeline:X / ev:chapter:Y）")
     insert_before_id: Optional[str] = Field(default=None, description="插入在该事件之前（ev:timeline:X / ev:chapter:Y）")
     # 兼容字段（已废弃）：单锚点插入（旧前端可能还会发）
     insert_anchor_id: Optional[str] = Field(default=None, description="（deprecated）旧字段：单锚点 ev:timeline:X / ev:chapter:Y")
     time_slot_override: Optional[str] = None
+    # 新字段：主视角可多选（表示与本章最相关核心人物）
+    pov_character_ids_override: Optional[List[str]] = None
+    # 兼容旧字段：单 POV
     pov_character_id_override: Optional[str] = None
+    # 配角设定（前端“快速多选角色”）
+    supporting_character_ids: Optional[List[str]] = None
     lore_tags: Optional[List[str]] = None
 
 
@@ -237,9 +257,42 @@ def create_novel(req: CreateNovelRequest):
     return {"novel_id": novel_id}
 
 
+@app.post("/api/lore/summary/build")
+def build_lore_summary_api(req: BuildLoreSummaryRequest):
+    tags = [str(t).strip() for t in (req.tags or []) if str(t).strip()]
+    if not tags:
+        raise HTTPException(status_code=400, detail="tags is required")
+    data = agent.build_lore_summary_llm(tags, force=bool(req.force))
+    return {
+        "summary_id": data.get("summary_id"),
+        "tags": data.get("tags"),
+        "mode": data.get("mode"),
+        "cached": bool(data.get("cached")),
+        "summary_text": data.get("summary_text"),
+        "tag_summaries": data.get("tag_summaries") or [],
+    }
+
+
+@app.get("/api/lore/summary/{summary_id}")
+def get_lore_summary_api(summary_id: str):
+    data = get_lore_summary(summary_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="summary not found")
+    return {
+        "summary_id": data.get("summary_id"),
+        "tags": data.get("tags"),
+        "summary_text": data.get("summary_text"),
+        "tag_summaries": data.get("tag_summaries") or [],
+    }
+
+
 @app.post("/api/novels/{novel_id}/run")
 def run_mode(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
     inferred_time_slot = _infer_time_slot(novel_id, req)
+    manual_time_slot = bool((req.time_slot_override or "").strip())
+    pov_ids = (req.pov_character_ids_override or [])
+    if (not pov_ids) and req.pov_character_id_override:
+        pov_ids = [req.pov_character_id_override]
 
     try:
         result = agent.run(
@@ -247,8 +300,11 @@ def run_mode(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
             mode=req.mode,
             user_task=req.user_task,
             chapter_index=req.chapter_index,
+            chapter_preset_name=req.chapter_preset_name,
             time_slot_override=inferred_time_slot,
-            pov_character_id_override=req.pov_character_id_override,
+            manual_time_slot=manual_time_slot,
+            pov_character_ids_override=pov_ids,
+            supporting_character_ids=(req.supporting_character_ids or []),
             lore_tags=req.lore_tags,
         )
     except Exception as e:
@@ -271,6 +327,30 @@ def run_mode(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
     return resp
 
 
+@app.post("/api/novels/{novel_id}/preview_input")
+def preview_mode_input(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
+    inferred_time_slot = _infer_time_slot(novel_id, req)
+    manual_time_slot = bool((req.time_slot_override or "").strip())
+    pov_ids = (req.pov_character_ids_override or [])
+    if (not pov_ids) and req.pov_character_id_override:
+        pov_ids = [req.pov_character_id_override]
+    try:
+        return agent.preview_input(
+            novel_id=novel_id,
+            mode=req.mode,
+            user_task=req.user_task,
+            chapter_index=req.chapter_index,
+            time_slot_override=inferred_time_slot,
+            manual_time_slot=manual_time_slot,
+            pov_character_ids_override=pov_ids,
+            supporting_character_ids=(req.supporting_character_ids or []),
+            lore_tags=req.lore_tags,
+        )
+    except Exception as e:
+        logger.exception("preview_input failed novel_id=%s mode=%s", novel_id, req.mode)
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 def _sse_pack(event: str, data: Any) -> bytes:
     # SSE: "event: xxx\ndata: <json>\n\n"
     import json as _json
@@ -290,6 +370,10 @@ def run_mode_stream(novel_id: str, req: RunModeRequest):
         yield _sse_pack("start", {"novel_id": novel_id, "mode": req.mode})
 
         inferred_time_slot = _infer_time_slot(novel_id, req)
+        manual_time_slot = bool((req.time_slot_override or "").strip())
+        pov_ids = (req.pov_character_ids_override or [])
+        if (not pov_ids) and req.pov_character_id_override:
+            pov_ids = [req.pov_character_id_override]
 
         try:
             # 这里对 write_chapter 做“正文流式”，其它模式走一次性结果但也会发阶段事件。
@@ -306,7 +390,13 @@ def run_mode_stream(novel_id: str, req: RunModeRequest):
                 st = load_state(novel_id)
                 if st and (not st.meta.initialized) and req.mode in {"write_chapter", "revise_chapter"}:
                     yield _sse_pack("phase", {"name": "auto_init"})
-                    agent.init_state(novel_id, user_task=f"（自动初始化）{req.user_task}", lore_tags=req.lore_tags)
+                    _, init_usage = agent.init_state_with_usage(
+                        novel_id,
+                        user_task=f"（自动初始化）{req.user_task}",
+                        lore_tags=req.lore_tags,
+                    )
+                    if init_usage:
+                        yield _sse_pack("phase", {"name": "auto_init", "status": "done", "usage_metadata": init_usage})
                     st = load_state(novel_id)
 
                 if not st:
@@ -318,7 +408,9 @@ def run_mode_stream(novel_id: str, req: RunModeRequest):
                     user_task=req.user_task,
                     chapter_index=chapter_index,
                     time_slot_override=inferred_time_slot,
-                    pov_character_id_override=req.pov_character_id_override,
+                    pov_character_ids_override=pov_ids,
+                    supporting_character_ids=(req.supporting_character_ids or []),
+                    include_chapter_context=(not manual_time_slot),
                     lore_tags=req.lore_tags,
                 )
                 # 允许 next_state 是补丁：合并成完整状态再落盘
@@ -329,28 +421,39 @@ def run_mode_stream(novel_id: str, req: RunModeRequest):
 
                 yield _sse_pack("phase", {"name": "writing", "chapter_index": chapter_index})
                 parts: List[str] = []
-                for txt in agent.write_chapter_text_stream(
+                usage_meta: Dict[str, Any] = {}
+                for item in agent.write_chapter_text_stream(
                     novel_id=novel_id,
                     plan=plan,
                     user_task=req.user_task,
+                    include_chapter_context=(not manual_time_slot),
                     lore_tags=req.lore_tags,
+                    time_slot_hint=inferred_time_slot,
+                    pov_character_ids_override=pov_ids,
+                    supporting_character_ids=(req.supporting_character_ids or []),
                 ):
-                    parts.append(txt)
-                    yield _sse_pack("content", {"delta": txt})
+                    txt = str(item.get("delta", "") or "")
+                    if txt:
+                        parts.append(txt)
+                        yield _sse_pack("content", {"delta": txt})
+                    um = item.get("usage_metadata") or {}
+                    if isinstance(um, dict) and um:
+                        usage_meta = um
 
                 content_text = "".join(parts).strip()
 
                 yield _sse_pack("phase", {"name": "saving"})
                 record = ChapterRecord(
                     chapter_index=chapter_index,
+                    chapter_preset_name=req.chapter_preset_name,
                     time_slot=plan.time_slot,
                     pov_character_id=plan.pov_character_id,
                     who_is_present=plan.who_is_present,
                     beats=plan.beats,
                     content=content_text,
-                    usage_metadata={},
+                    usage_metadata=usage_meta,
                 )
-                save_chapter(novel_id, record)
+                save_chapter(novel_id, record, chapter_preset_name=req.chapter_preset_name)
 
                 next_state = plan.next_state
                 next_state.meta.current_chapter_index = chapter_index
@@ -374,6 +477,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest):
                         "mode": req.mode,
                         "chapter_index": chapter_index,
                         "state_updated": True,
+                        "usage_metadata": usage_meta,
                         "plan": plan.model_dump(mode="json"),
                         "state": (load_state(novel_id).model_dump(mode="json") if load_state(novel_id) else None),
                     },
@@ -385,8 +489,11 @@ def run_mode_stream(novel_id: str, req: RunModeRequest):
                     mode=req.mode,
                     user_task=req.user_task,
                     chapter_index=req.chapter_index,
+                    chapter_preset_name=req.chapter_preset_name,
                     time_slot_override=inferred_time_slot,
-                    pov_character_id_override=req.pov_character_id_override,
+                    manual_time_slot=manual_time_slot,
+                    pov_character_ids_override=pov_ids,
+                    supporting_character_ids=(req.supporting_character_ids or []),
                     lore_tags=req.lore_tags,
                 )
                 state_obj = load_state(novel_id)
@@ -459,24 +566,15 @@ def list_event_anchors(novel_id: str):
         )
 
     # chapter anchors
-    chapters_dir = get_chapters_dir(novel_id)
-    if chapters_dir.exists():
-        for p in sorted(chapters_dir.glob("*.json")):
-            try:
-                chap_idx = int(p.stem)
-            except Exception:
-                continue
-            chap = load_chapter(novel_id, chap_idx)
-            if not chap:
-                continue
-            anchors.append(
-                {
-                    "id": f"ev:chapter:{chap.chapter_index}",
-                    "type": "chapter_event",
-                    "label": f"章节事件 · {chap.time_slot}",
-                    "time_slot": chap.time_slot,
-                }
-            )
+    for chap in list_chapters(novel_id):
+        anchors.append(
+            {
+                "id": f"ev:chapter:{chap.chapter_index}",
+                "type": "chapter_event",
+                "label": f"章节事件 · {chap.time_slot}",
+                "time_slot": chap.time_slot,
+            }
+        )
 
     # 让“较新的”在前面：先按 time_slot 字符串逆序（不保证严格时序，但对可读性够用）
     anchors.sort(key=lambda x: (x.get("time_slot") or ""), reverse=True)
@@ -548,26 +646,17 @@ def get_novel_graph(novel_id: str, view: str = "mixed"):
             add_edge(f"ev:timeline:{idx}", f"ev:timeline:{idx+1}", "时间推进", "timeline_next")
 
         # chapter events: from saved chapters
-        chapters_dir = get_chapters_dir(novel_id)
-        if chapters_dir.exists():
-            for p in sorted(chapters_dir.glob("*.json")):
-                try:
-                    chap_idx = int(p.stem)
-                except Exception:
-                    continue
-                chap = load_chapter(novel_id, chap_idx)
-                if not chap:
-                    continue
-                cid = f"ev:chapter:{chap.chapter_index}"
-                label = f"章节事件 · {chap.time_slot}"
-                add_node(cid, label, "chapter_event", {"data": chap.model_dump(mode="json")})
+        for chap in list_chapters(novel_id):
+            cid = f"ev:chapter:{chap.chapter_index}"
+            label = f"章节事件 · {chap.time_slot}"
+            add_node(cid, label, "chapter_event", {"data": chap.model_dump(mode="json")})
 
-                # events 视图：不混入人物节点；mixed 视图才连“人物出场 -> 章节事件”
-                if view == "mixed":
-                    for pres in chap.who_is_present or []:
-                        ch_id = f"char:{pres.character_id}"
-                        add_node(ch_id, pres.character_id, "character")
-                        add_edge(ch_id, cid, pres.role_in_scene or "出场", "appear")
+            # events 视图：不混入人物节点；mixed 视图才连“人物出场 -> 章节事件”
+            if view == "mixed":
+                for pres in chap.who_is_present or []:
+                    ch_id = f"char:{pres.character_id}"
+                    add_node(ch_id, pres.character_id, "character")
+                    add_edge(ch_id, cid, pres.role_in_scene or "出场", "appear")
 
     # ---- 势力节点（world.factions） ----
     if view == "mixed":
@@ -623,8 +712,24 @@ def get_lore_tags():
 
 
 @app.get("/api/lore/preview")
-def get_lore_preview(tag: str, max_chars: int = 0):
-    logger.info("preview tag=%s max_chars=%s", tag, max_chars)
-    preview = agent.lore_loader.get_preview_by_tag(tag=tag, max_chars=max_chars)
+def get_lore_preview(tag: str, max_chars: int = 0, compact: bool = False):
+    logger.info("preview tag=%s max_chars=%s compact=%s", tag, max_chars, compact)
+    if compact:
+        # compact 视为“摘要预览”：读取单 tag 的 LLM 摘要缓存（llm_tag_v1）
+        md = agent.lore_loader.get_markdown_by_tag(tag=tag) or ""
+        tag_src_hash = source_hash_from_map({tag: md})
+        hit = load_cached_summary([tag], tag_src_hash, mode="llm_tag_v1")
+        preview = ""
+        if hit:
+            rows = hit.get("tag_summaries") or []
+            if isinstance(rows, list) and rows:
+                first = rows[0] if isinstance(rows[0], dict) else {}
+                preview = str(first.get("summary", "")).strip()
+        if not preview:
+            preview = "该标签暂无摘要缓存，请先点击“生成当前Tag摘要”。"
+        if max_chars and max_chars > 0 and len(preview) > max_chars:
+            preview = preview[:max_chars]
+    else:
+        preview = agent.lore_loader.get_preview_by_tag(tag=tag, max_chars=max_chars)
     return {"tag": tag, "preview": preview}
 

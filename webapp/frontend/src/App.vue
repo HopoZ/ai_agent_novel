@@ -8,7 +8,7 @@
         <el-card class="panel" shadow="never">
           <div style="display:flex; justify-content:space-between; align-items:center;">
             <div style="font-weight:600;">设定标签</div>
-            <span class="muted">可勾选 / 悬浮预览</span>
+            <span class="muted">可勾选 / 预览摘要</span>
           </div>
 
           <el-divider></el-divider>
@@ -17,6 +17,9 @@
             <el-button size="small" @click="selectAll">全选</el-button>
             <el-button size="small" @click="invertSelect">反选</el-button>
             <el-button size="small" type="warning" @click="clearSelect">清空</el-button>
+            <el-button size="small" type="primary" :loading="buildingLoreSummary" @click="buildCurrentLoreSummary">
+              生成当前Tag摘要
+            </el-button>
           </div>
 
           <div v-if="tagsLoading" style="color:#909399;">正在加载设定文件...</div>
@@ -54,7 +57,7 @@
                           type="primary"
                           @click.stop
                         >
-                          悬浮预览
+                          预览摘要
                         </el-button>
                       </template>
                     </el-popover>
@@ -173,8 +176,61 @@
               </el-form-item>
             </template>
 
-            <el-form-item label="视角角色覆盖（可选）">
-              <el-input v-model="form.povCharacterOverride" placeholder="例如：主角名/角色ID（按你的设定文本）"></el-input>
+            <el-form-item label="主视角覆盖（可多选）">
+              <el-select
+                v-model="form.povCharacterOverride"
+                multiple
+                collapse-tags
+                collapse-tags-tooltip
+                clearable
+                filterable
+                allow-create
+                default-first-option
+                placeholder="多选表示与本章最相关的核心人物"
+                style="width:100%;"
+                @change="onPovChange"
+              >
+                <el-option v-for="cid in allCharacterOptions" :key="cid" :label="cid" :value="cid" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="快速多选角色（配角设定）">
+              <el-select
+                v-model="form.focusCharacterIds"
+                multiple
+                collapse-tags
+                collapse-tags-tooltip
+                clearable
+                filterable
+                allow-create
+                default-first-option
+                placeholder="点击快速多选作为配角设定（可清空）"
+                style="width:100%;"
+                @change="onFocusChange"
+              >
+                <el-option v-for="cid in allCharacterOptions" :key="`focus-${cid}`" :label="cid" :value="cid" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="角色标签管理（本次会话）">
+              <div style="display:flex; gap:8px; width:100%;">
+                <el-input v-model="characterTagDraft" placeholder="输入角色标签后点“添加”"></el-input>
+                <el-button @click="addCharacterTag">添加</el-button>
+              </div>
+              <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;">
+                <el-tag
+                  v-for="cid in allCharacterOptions"
+                  :key="`mg-${cid}`"
+                  closable
+                  @close="removeCharacterTag(cid)"
+                >
+                  {{ cid }}
+                </el-tag>
+              </div>
+              <div class="muted" style="margin-top:6px;">
+                支持新增/删除角色标签；如需“修改”，先删除旧标签再添加新标签。主视角可多选，快速多选用于配角设定。
+              </div>
+            </el-form-item>
+            <el-form-item label="章节预设名（可选）">
+              <el-input v-model="form.chapterPresetName" placeholder="例如：重逢夜 / 石碑共鸣 / 古墟初探"></el-input>
             </el-form-item>
 
             <el-form-item label="本章任务描述">
@@ -187,9 +243,14 @@
             </el-form-item>
 
             <el-form-item>
-              <el-button type="primary" style="width:100%;" @click="runMode" :loading="running">
-                {{ running ? "运行中..." : "运行模式" }}
-              </el-button>
+              <div style="display:flex; gap:8px; width:100%;">
+                <el-button type="primary" style="flex:1;" @click="runMode" :loading="running">
+                  {{ running ? "运行中..." : "运行模式" }}
+                </el-button>
+                <el-button style="flex:1;" @click="previewCurrentInput" :loading="previewingInput" :disabled="running">
+                  查看当前 Input
+                </el-button>
+              </div>
             </el-form-item>
           </el-form>
         </el-card>
@@ -201,6 +262,21 @@
           <div style="display:flex; gap:8px; align-items:baseline; flex-wrap:wrap;">
             <div style="font-weight:600;">运行结果</div>
             <div class="muted" style="font-size:12px;">会自动显示 state.continuity / content / plan 等</div>
+          </div>
+          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px;">
+            <el-tag size="small" :type="running ? 'warning' : (runPhase === 'error' ? 'danger' : 'success')">
+              {{ running ? `进行中：${runPhaseLabel}` : `状态：${runPhaseLabel}` }}
+            </el-tag>
+            <span class="muted" v-if="runHint">{{ runHint }}</span>
+          </div>
+          <div v-if="tokenUsageText" class="output-path-tip">
+            本次 Token：<code>{{ tokenUsageText }}</code>
+          </div>
+          <div v-if="initTokenUsageText" class="output-path-tip">
+            初始化 Token：<code>{{ initTokenUsageText }}</code>
+          </div>
+          <div v-if="lastOutputPath" class="output-path-tip">
+            输出文件：<code>{{ lastOutputPath }}</code>
           </div>
           <el-divider></el-divider>
           <el-tabs v-model="rightTab" class="right-tabs">
@@ -267,6 +343,17 @@
       </span>
     </template>
   </el-dialog>
+
+  <el-dialog v-model="inputPreviewVisible" title="当前模型 Input 预览" width="78%">
+    <div class="dialog-body">
+      <pre class="dialog-pre" v-text="inputPreviewText"></pre>
+    </div>
+    <template #footer>
+      <span class="dialog-footer">
+        <el-button @click="inputPreviewVisible = false">关闭</el-button>
+      </span>
+    </template>
+  </el-dialog>
 </template>
 
 <script lang="ts" setup>
@@ -284,12 +371,23 @@ const tagTreeRef = ref<any>(null);
 const novelsLoading = ref(true);
 const novels = ref<Array<{ novel_id: string; novel_title: string }>>([]);
 const previewCache = reactive<Record<string, string>>({});
+const previewFullCache = reactive<Record<string, string>>({});
 
 const anchorsLoading = ref(false);
 const anchors = ref<Array<{ id: string; label: string; type: string; time_slot: string }>>([]);
+const characterOptions = ref<string[]>([]);
+const customCharacterOptions = ref<string[]>([]);
+const hiddenCharacterOptions = ref<string[]>([]);
+const characterTagDraft = ref("");
+const buildingLoreSummary = ref(false);
 
 const running = ref(false);
 const resultText = ref("等待你的操作...");
+const runPhase = ref<"idle" | "planning" | "auto_init" | "writing" | "saving" | "outputs_written" | "done" | "error">("idle");
+const runHint = ref("");
+const lastOutputPath = ref("");
+const initTokenUsageText = ref("");
+const tokenUsageText = ref("");
 const leftPanelWidth = ref(360);
 const LEFT_MIN_WIDTH = 280;
 const LEFT_MAX_WIDTH = 680;
@@ -309,6 +407,9 @@ const dialogTitle = ref("");
 const dialogText = ref("");
 
 const createDialogVisible = ref(false);
+const previewingInput = ref(false);
+const inputPreviewVisible = ref(false);
+const inputPreviewText = ref("");
 
 const createForm = reactive<{
   novelTitle: string;
@@ -331,7 +432,9 @@ const form = reactive<{
   insertAfterId: string;
   insertBeforeId: string;
   timeSlotOverride: string;
-  povCharacterOverride: string;
+  povCharacterOverride: string[];
+  focusCharacterIds: string[];
+  chapterPresetName: string;
   userTask: string;
 }>({
   novelId: "",
@@ -340,7 +443,9 @@ const form = reactive<{
   insertAfterId: "",
   insertBeforeId: "",
   timeSlotOverride: "",
-  povCharacterOverride: "",
+  povCharacterOverride: [],
+  focusCharacterIds: [],
+  chapterPresetName: "",
   userTask: "",
 });
 
@@ -359,6 +464,27 @@ const currentNovelTitle = computed(() => {
   if (!id) return "";
   const hit = novels.value.find((n) => n.novel_id === id);
   return hit?.novel_title || "";
+});
+
+const allCharacterOptions = computed(() => {
+  const hidden = new Set(hiddenCharacterOptions.value || []);
+  const merged = [...(characterOptions.value || []), ...(customCharacterOptions.value || [])]
+    .map((x) => String(x || "").trim())
+    .filter((x) => !!x && !hidden.has(x));
+  return Array.from(new Set(merged));
+});
+
+const runPhaseLabel = computed(() => {
+  const p = runPhase.value;
+  if (p === "idle") return "待命";
+  if (p === "planning") return "正在规划章节";
+  if (p === "auto_init") return "正在自动初始化状态";
+  if (p === "writing") return "正在生成正文";
+  if (p === "saving") return "正在保存章节与状态";
+  if (p === "outputs_written") return "正文已写入 outputs";
+  if (p === "done") return "已完成";
+  if (p === "error") return "执行失败";
+  return p;
 });
 
 type TagTreeNode = { id: string; label: string; children?: TagTreeNode[]; isLeaf?: boolean; tag?: string };
@@ -518,10 +644,35 @@ async function loadTags() {
   tagGroups.value = res.groups || {};
   selectedTags.value = [...tags.value];
   for (const k of Object.keys(previewCache)) delete previewCache[k];
+  for (const k of Object.keys(previewFullCache)) delete previewFullCache[k];
   tagsLoading.value = false;
   logDebug(`Loaded tags count=${tags.value.length}`);
   await nextTick();
   if (tagTreeRef.value) tagTreeRef.value.setCheckedKeys([...selectedTags.value], false);
+}
+
+async function buildCurrentLoreSummary() {
+  const tagsNow = selectedTags.value || [];
+  if (tagsNow.length === 0) {
+    ElMessage.error("请至少勾选 1 个设定标签。");
+    return;
+  }
+  buildingLoreSummary.value = true;
+  try {
+    const res = await apiJson("/api/lore/summary/build", "POST", { tags: tagsNow, force: true });
+    const rows = Array.isArray(res?.tag_summaries) ? res.tag_summaries : [];
+    const text = rows.length
+      ? rows
+          .map((x: any) => `【${String(x?.tag || "")}】\n${String(x?.summary || "")}`)
+          .join("\n\n")
+      : String(res?.summary_text || "");
+    dialogTitle.value = "Tag摘要预览";
+    dialogText.value = text;
+    dialogVisible.value = true;
+    ElMessage.success("已按当前勾选标签重新生成摘要");
+  } finally {
+    buildingLoreSummary.value = false;
+  }
 }
 
 async function loadNovels() {
@@ -557,12 +708,79 @@ async function loadAnchors() {
   }
 }
 
+async function loadCharacterOptions() {
+  const novelId = (form.novelId || "").trim();
+  characterOptions.value = [];
+  hiddenCharacterOptions.value = [];
+  customCharacterOptions.value = [];
+  characterTagDraft.value = "";
+  form.povCharacterOverride = [];
+  form.focusCharacterIds = [];
+  if (!novelId) return;
+  try {
+    const st = await apiJson(`/api/novels/${encodeURIComponent(novelId)}/state`, "GET", null);
+    const list = Array.isArray(st?.characters) ? st.characters : [];
+    const ids = list
+      .map((c: any) => String(c?.character_id || "").trim())
+      .filter((x: string) => !!x);
+    characterOptions.value = Array.from(new Set(ids));
+  } catch (e: any) {
+    logDebug("loadCharacterOptions failed: " + (e?.message || String(e)));
+  }
+}
+
+function addCharacterTag() {
+  const v = String(characterTagDraft.value || "").trim();
+  if (!v) return;
+  if (!customCharacterOptions.value.includes(v) && !characterOptions.value.includes(v)) {
+    customCharacterOptions.value.push(v);
+  }
+  hiddenCharacterOptions.value = hiddenCharacterOptions.value.filter((x) => x !== v);
+  characterTagDraft.value = "";
+}
+
+function removeCharacterTag(cid: string) {
+  const key = String(cid || "").trim();
+  if (!key) return;
+  if (!hiddenCharacterOptions.value.includes(key)) hiddenCharacterOptions.value.push(key);
+  customCharacterOptions.value = customCharacterOptions.value.filter((x) => x !== key);
+  form.povCharacterOverride = (form.povCharacterOverride || []).filter((x) => x !== key);
+  form.focusCharacterIds = (form.focusCharacterIds || []).filter((x) => x !== key);
+}
+
+function onPovChange(v: any) {
+  const arr = Array.isArray(v) ? v : [];
+  for (const item of arr) {
+    const key = String(item || "").trim();
+    if (!key) continue;
+    if (!allCharacterOptions.value.includes(key)) customCharacterOptions.value.push(key);
+    hiddenCharacterOptions.value = hiddenCharacterOptions.value.filter((x) => x !== key);
+  }
+}
+
+function onFocusChange(v: any) {
+  const arr = Array.isArray(v) ? v : [];
+  for (const item of arr) {
+    const key = String(item || "").trim();
+    if (!key) continue;
+    if (!allCharacterOptions.value.includes(key)) customCharacterOptions.value.push(key);
+    hiddenCharacterOptions.value = hiddenCharacterOptions.value.filter((x) => x !== key);
+  }
+}
+
 async function loadPreview(tag: string) {
   if (Object.prototype.hasOwnProperty.call(previewCache, tag)) return;
-  const url = `/api/lore/preview?tag=${encodeURIComponent(tag)}&max_chars=0`;
+  const url = `/api/lore/preview?tag=${encodeURIComponent(tag)}&max_chars=0&compact=1`;
   const res = await apiJson(url, "GET", null);
   previewCache[tag] = (res && res.preview) ? res.preview : "";
   logDebug(`Loaded preview tag=${tag} len=${previewCache[tag].length}`);
+}
+
+async function loadPreviewFull(tag: string) {
+  if (Object.prototype.hasOwnProperty.call(previewFullCache, tag)) return;
+  const url = `/api/lore/preview?tag=${encodeURIComponent(tag)}&max_chars=0&compact=0`;
+  const res = await apiJson(url, "GET", null);
+  previewFullCache[tag] = (res && res.preview) ? res.preview : "";
 }
 
 async function preloadAllPreviews() {
@@ -579,12 +797,12 @@ function getTagPreview(tag: string) {
 async function openTagDialog(tag: string) {
   dialogTitle.value = "设定预览： " + tag;
   logDebug(`openTagDialog tag=${tag}`);
-  if (Object.prototype.hasOwnProperty.call(previewCache, tag)) {
-    dialogText.value = previewCache[tag];
+  if (Object.prototype.hasOwnProperty.call(previewFullCache, tag)) {
+    dialogText.value = previewFullCache[tag];
   } else {
     dialogText.value = "预览加载中...";
-    await loadPreview(tag).catch(() => {});
-    dialogText.value = previewCache[tag] || "";
+    await loadPreviewFull(tag).catch(() => {});
+    dialogText.value = previewFullCache[tag] || "";
   }
   dialogVisible.value = true;
 }
@@ -647,14 +865,27 @@ async function runMode() {
   }
 
   running.value = true;
+  runPhase.value = "planning";
+  runHint.value = "已提交任务，正在排队/规划...";
+  lastOutputPath.value = "";
+  initTokenUsageText.value = "";
+  tokenUsageText.value = "";
   try {
+    const mergedTask = (() => {
+      const base = form.userTask || "";
+      const picked = (form.focusCharacterIds || []).filter(Boolean);
+      if (picked.length === 0) return base;
+      return `${base}\n\n（配角设定：${picked.join("、")}）`;
+    })();
     const payload = {
       mode: form.mode,
-      user_task: form.userTask,
+      user_task: mergedTask,
       insert_after_id: form.insertMode === "anchors" ? (form.insertAfterId || null) : null,
       insert_before_id: form.insertMode === "anchors" ? (form.insertBeforeId || null) : null,
       time_slot_override: form.insertMode === "time" ? (form.timeSlotOverride || null) : null,
-      pov_character_id_override: form.povCharacterOverride || null,
+      pov_character_ids_override: (form.povCharacterOverride || []).filter(Boolean),
+      supporting_character_ids: (form.focusCharacterIds || []).filter(Boolean),
+      chapter_preset_name: form.chapterPresetName || null,
       lore_tags: loreTags,
     };
     // 流式输出：边生成边显示
@@ -666,10 +897,35 @@ async function runMode() {
     await apiSse(`/api/novels/${novelId}/run_stream`, "POST", payload, (evt) => {
       if (evt.event === "phase") {
         const name = String(evt.data?.name || "running");
+        if (name === "planning" || name === "auto_init" || name === "writing" || name === "saving" || name === "outputs_written") {
+          runPhase.value = name;
+        }
         const extra =
           name === "writing" && evt.data?.chapter_index ? ` chapter=${evt.data.chapter_index}` : "";
         const out =
           name === "outputs_written" && evt.data?.path ? ` path=${evt.data.path}` : "";
+        if (name === "planning") runHint.value = "正在生成章节规划（beats + next_state）";
+        if (name === "auto_init") runHint.value = "检测到未初始化，正在自动初始化世界状态";
+        if (name === "writing") runHint.value = "正在流式生成正文，请稍候...";
+        if (name === "saving") runHint.value = "正在保存章节记录和世界状态";
+        if (name === "auto_init" && evt.data?.usage_metadata) {
+          const u = evt.data.usage_metadata || {};
+          const input =
+            u.input_tokens ?? u.prompt_tokens ?? u.input_token_count ?? null;
+          const output =
+            u.output_tokens ?? u.completion_tokens ?? u.output_token_count ?? null;
+          const total =
+            u.total_tokens ?? u.total_token_count ??
+            ((typeof input === "number" && typeof output === "number") ? (input + output) : null);
+          if (input !== null || output !== null || total !== null) {
+            initTokenUsageText.value = `input=${input ?? "-"}, output=${output ?? "-"}, total=${total ?? "-"}`;
+            logText += `[usage:auto_init] ${initTokenUsageText.value}\n`;
+          }
+        }
+        if (name === "outputs_written") {
+          lastOutputPath.value = String(evt.data?.path || "");
+          runHint.value = "正文已归档到 outputs，可在本地打开查看";
+        }
         logText += `\n[phase] ${name}${extra}${out}\n`;
         resultText.value = `${logText}\n\n[content]\n${accContent}`;
       } else if (evt.event === "content") {
@@ -679,10 +935,14 @@ async function runMode() {
         resultText.value = `${logText}\n\n[content]\n${accContent}`;
       } else if (evt.event === "error") {
         const msg = evt.data?.message || JSON.stringify(evt.data);
+        runPhase.value = "error";
+        runHint.value = "执行失败，请查看下方错误日志";
         logText += `\n[error]\n${msg}\n`;
         resultText.value = `${logText}\n\n[content]\n${accContent}`;
       } else if (evt.event === "done") {
         donePayload = evt.data;
+        runPhase.value = "done";
+        runHint.value = "本次任务已完成";
       }
     });
 
@@ -691,12 +951,65 @@ async function runMode() {
       const ms = Date.now() - startAt;
       const ch = donePayload.chapter_index ? `chapter_index=${donePayload.chapter_index}` : "chapter_index=(auto)";
       const st = donePayload.state_updated ? "state_updated=true" : "state_updated=false";
+      const u = donePayload.usage_metadata || {};
+      const input =
+        u.input_tokens ?? u.prompt_tokens ?? u.input_token_count ?? null;
+      const output =
+        u.output_tokens ?? u.completion_tokens ?? u.output_token_count ?? null;
+      const total =
+        u.total_tokens ?? u.total_token_count ??
+        ((typeof input === "number" && typeof output === "number") ? (input + output) : null);
+      if (input !== null || output !== null || total !== null) {
+        tokenUsageText.value = `input=${input ?? "-"}, output=${output ?? "-"}, total=${total ?? "-"}`;
+      }
       logText += `\n[done] ${ch}, ${st}, elapsed_ms=${ms}\n`;
       resultText.value = `${logText}\n\n[content]\n${accContent}`;
     }
     await loadAnchors();
   } finally {
     running.value = false;
+  }
+}
+
+async function previewCurrentInput() {
+  const novelId = (form.novelId || "").trim();
+  if (!novelId) {
+    ElMessage.error("请先选择/创建小说。");
+    return;
+  }
+  if (!form.userTask || !form.userTask.trim()) {
+    ElMessage.error("请先填写本章任务描述。");
+    return;
+  }
+  const loreTags = selectedTags.value || [];
+  if (loreTags.length === 0) {
+    ElMessage.error("请至少勾选 1 项设定。");
+    return;
+  }
+  previewingInput.value = true;
+  try {
+    const mergedTask = (() => {
+      const base = form.userTask || "";
+      const picked = (form.focusCharacterIds || []).filter(Boolean);
+      if (picked.length === 0) return base;
+      return `${base}\n\n（配角设定：${picked.join("、")}）`;
+    })();
+    const payload = {
+      mode: form.mode,
+      user_task: mergedTask,
+      insert_after_id: form.insertMode === "anchors" ? (form.insertAfterId || null) : null,
+      insert_before_id: form.insertMode === "anchors" ? (form.insertBeforeId || null) : null,
+      time_slot_override: form.insertMode === "time" ? (form.timeSlotOverride || null) : null,
+      pov_character_ids_override: (form.povCharacterOverride || []).filter(Boolean),
+      supporting_character_ids: (form.focusCharacterIds || []).filter(Boolean),
+      chapter_preset_name: form.chapterPresetName || null,
+      lore_tags: loreTags,
+    };
+    const data = await apiJson(`/api/novels/${encodeURIComponent(novelId)}/preview_input`, "POST", payload);
+    inputPreviewText.value = JSON.stringify(data, null, 2);
+    inputPreviewVisible.value = true;
+  } finally {
+    previewingInput.value = false;
   }
 }
 
@@ -809,6 +1122,7 @@ onMounted(async () => {
     await loadTags();
     await loadNovels();
     await loadAnchors();
+    await loadCharacterOptions();
     await preloadAllPreviews();
   } catch (e: any) {
     tagsLoading.value = false;
@@ -820,6 +1134,7 @@ watch(
   () => form.novelId,
   async () => {
     await loadAnchors();
+    await loadCharacterOptions();
   }
 );
 
@@ -891,6 +1206,12 @@ onBeforeUnmount(() => {
 .muted {
   color: #909399;
   font-size: 12px;
+}
+.output-path-tip {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #606266;
+  word-break: break-all;
 }
 .result-pre {
   max-height: 48vh;
