@@ -45,8 +45,8 @@
 - 章节 JSON `content` 不作为核心上下文输入，避免 token 爆炸
 
 ### 2.5 可观测性与交互
-- SSE 阶段事件：`planning -> auto_init -> writing -> saving -> done`
-- 前端展示 auto_init 与正文 token 消耗
+- SSE 阶段事件：`planning -> writing -> saving -> done`
+- 前端单按钮流程：先生成 Input 预览，再确认运行
 - `/preview_input` 可查看本次真实拼装输入
 - 悬浮预览 `compact=1` 显示 tag 摘要（无缓存提示先生成）
 - 图谱视图：`people / events / mixed`
@@ -89,7 +89,7 @@ NovelAgent (agents/novel_agent.py)
 [Data]
 settings/*.md
 storage/lore_summaries/*.json
-storage/novels/<id>/{state.json, chapters/*.json}
+storage/novels/<id>/{state.json, chapters/*.json, character_entities.json, character_relations.json, event_entities.json, event_relations.json}
 outputs/*.txt
 ```
 
@@ -97,8 +97,12 @@ outputs/*.txt
 
 - `settings/**/*.md`：静态设定源
 - `storage/lore_summaries/*.json`：tag 摘要缓存
-- `storage/novels/<id>/state.json`：长期叙事状态
-- `storage/novels/<id>/chapters/*.json`：章节结构化记录
+- `storage/novels/<id>/state.json`：运行态摘要（供模型连续性使用，非关系真源）
+- `storage/novels/<id>/chapters/*.json`：章节结构化记录（每章一表）
+- `storage/novels/<id>/character_entities.json`：人物实体表
+- `storage/novels/<id>/character_relations.json`：人物关系表
+- `storage/novels/<id>/event_entities.json`：事件实体表
+- `storage/novels/<id>/event_relations.json`：事件关系表
 - `outputs/*.txt`：正文归档
 
 ## 6. 接口总览（高频）
@@ -147,7 +151,7 @@ python -m uvicorn webapp.server:app --reload --port 8000
 - **先摘要后写作**：先执行“生成当前Tag摘要”，再运行章节生成
 - **按章控范围**：每章任务仅描述本章目标，避免跨多章超大任务
 - **周期性回看输入**：用 `/preview_input` 验证拼装内容是否超量
-- **以 state 为事实源**：避免在自由文本中重复定义核心设定
+- **以四表为关系事实源**：人物/事件实体与关系使用四表，`state.json` 用作运行态摘要
 
 ## 10. 许可证
 

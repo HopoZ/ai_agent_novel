@@ -62,7 +62,8 @@ def build_plan_chapter_prompt(
         "- next_state：给出“本章结束后的状态补丁（patch）”，不要重复整份 NovelState，避免输出过长被截断：\n"
         "  - 必须包含 meta（沿用 novel_id/novel_title 等）与 continuity（更新到本章结束后的 time_slot/who_is_present/location/POV）\n"
         "  - characters：只需要输出本章涉及/变化的角色（其余角色不必重复输出）\n"
-        "  - world：只需要输出本章新增/变化的部分（至少追加 1 条 timeline 事件，summary 简短）\n"
+        "  - world：只需要输出本章新增/变化的部分（可选：0~1 条 timeline 事件，summary 简短）\n"
+        "  - 章节归属事件由用户在前端选择/新建并由后端落盘绑定；你不要尝试在 world.timeline 里设置/修改 chapter_index 来“绑定章节”\n"
         "  - world.timeline 每个事件对象必须严格包含字段：time_slot（字符串）、summary（字符串），"
         "禁止使用 event_summary、desc、content 等别名\n"
         "  - recent_summaries：可选（0~1 条简短摘要）\n"
@@ -101,7 +102,8 @@ def build_write_chapter_prompt(
         f"{plan_text}\n\n"
         "lorebook（静态设定）：\n"
         f"{lorebook}\n\n"
-        "请输出纯文本章节正文（不要输出 JSON、不要输出标题前的解释）。"
+        "请输出纯文本章节正文（不要输出 JSON、不要输出标题前的解释）。\n"
+        "写作时必须严格遵循 ChapterPlan.time_slot（本章时间段），不要擅自改写本章归属事件。"
     )
     if strict_no_supporting:
         human += "\n补充约束：未指定 supporting_character_ids，本章不要主动扩展知名配角出场。"

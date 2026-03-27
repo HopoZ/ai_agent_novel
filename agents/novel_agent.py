@@ -33,11 +33,11 @@ from agents.state_merge import (
     neighbor_chapters_context as neighbor_chapters_context_runtime,
 )
 from agents.text_utils import parse_ai_chunk_text, parse_ai_text, write_outputs_txt
+from agents.graph_tables import hydrate_state_character_relationships, persist_chapter_artifacts
 from .state_models import ChapterPlan, ChapterRecord, ContinuityState, NovelMeta, NovelState
 from .storage import (
     ensure_novel_dirs,
     load_state,
-    save_chapter,
     save_state,
 )
 
@@ -126,6 +126,12 @@ class NovelAgent:
         if self.model is None:
             self.model = _init_llm()
         return self.model
+
+    def _load_state_hydrated(self, novel_id: str) -> Optional[NovelState]:
+        state = load_state(novel_id)
+        if not state:
+            return None
+        return hydrate_state_character_relationships(novel_id, state)
 
     def _lorebook(self, lore_tags: Optional[list[str]] = None, lore_summary_id: Optional[str] = None) -> str:
         # lore_summary_id 已废弃；按 tags + 单 tag 缓存读取 lorebook
@@ -248,7 +254,7 @@ class NovelAgent:
         lore_tags: Optional[list[str]] = None,
         lore_summary_id: Optional[str] = None,
     ) -> Tuple[NovelState, Dict[str, Any]]:
-        state = load_state(novel_id)
+        state = self._load_state_hydrated(novel_id)
         if not state:
             raise ValueError(f"novel_id not found: {novel_id}")
 
@@ -314,7 +320,7 @@ class NovelAgent:
         - 每个 chunk：{"delta": str, "usage_metadata": {...}}
         - 结束时：{"done": True, "state": {...}, "usage_metadata": {...}}
         """
-        state = load_state(novel_id)
+        state = self._load_state_hydrated(novel_id)
         if not state:
             raise ValueError(f"novel_id not found: {novel_id}")
 
@@ -363,7 +369,7 @@ class NovelAgent:
         lore_tags: Optional[list[str]] = None,
         lore_summary_id: Optional[str] = None,
     ) -> ChapterPlan:
-        state = load_state(novel_id)
+        state = self._load_state_hydrated(novel_id)
         if not state:
             raise ValueError(f"novel_id not found: {novel_id}")
         if not state.meta.initialized:
@@ -426,7 +432,7 @@ class NovelAgent:
         - chunk: {"delta": str, "usage_metadata": {...}}
         - done: {"done": True, "plan": {...}, "usage_metadata": {...}}
         """
-        state = load_state(novel_id)
+        state = self._load_state_hydrated(novel_id)
         if not state:
             raise ValueError(f"novel_id not found: {novel_id}")
         if not state.meta.initialized:
@@ -517,7 +523,7 @@ class NovelAgent:
         pov_character_ids_override: Optional[list[str]] = None,
         supporting_character_ids: Optional[list[str]] = None,
     ) -> Tuple[str, Dict[str, Any]]:
-        state = load_state(novel_id)
+        state = self._load_state_hydrated(novel_id)
         if not state:
             raise ValueError(f"novel_id not found: {novel_id}")
 
@@ -577,7 +583,7 @@ class NovelAgent:
         - delta: 文本增量
         - usage_metadata: 可能存在的 token 统计（不同 provider 可能只在末 chunk 提供）
         """
-        state = load_state(novel_id)
+        state = self._load_state_hydrated(novel_id)
         if not state:
             raise ValueError(f"novel_id not found: {novel_id}")
 
@@ -630,7 +636,7 @@ class NovelAgent:
         """
         独立生成“下章建议”，不参与当前章节 plan/write。
         """
-        state = load_state(novel_id)
+        state = self._load_state_hydrated(novel_id)
         if not state:
             return ""
         state_context = self._compact_state_for_prompt(
@@ -666,7 +672,7 @@ class NovelAgent:
         lore_tags: Optional[list[str]] = None,
         lore_summary_id: Optional[str] = None,
     ) -> RunResult:
-        state = load_state(novel_id)
+        state = self._load_state_hydrated(novel_id)
         if not state:
             raise ValueError(f"novel_id not found: {novel_id}")
 
@@ -681,12 +687,7 @@ class NovelAgent:
 
         if mode in {"plan_only", "write_chapter", "revise_chapter"}:
             if not state.meta.initialized:
-                # 无感初始化：当用户直接点“生成正文/规划”等模式时，自动补全初始状态。
-                # 用同一个 user_task 作为初始化依据，避免需要用户额外点一次 init_state。
-                auto_task = f"（自动初始化）{user_task}".strip()
-                logger.info("state not initialized, auto init_state. novel_id=%s mode=%s", novel_id, mode)
-                self.init_state(novel_id, user_task=auto_task, lore_tags=lore_tags, lore_summary_id=lore_summary_id)
-                state = load_state(novel_id) or state
+                raise ValueError("state not initialized. please run init_state first")
 
             if chapter_index is None:
                 chapter_index = state.meta.current_chapter_index + 1
@@ -710,12 +711,6 @@ class NovelAgent:
 
             if mode == "plan_only":
                 # 不落正文，但保存 plan 与 next_state（更新状态）
-                plan_save_state = plan.next_state
-                plan_save_state.meta.current_chapter_index = chapter_index
-                plan_save_state.meta.updated_at = datetime.utcnow()
-                save_state(novel_id, plan_save_state)
-
-                # 也落盘本章的 beats，便于后续查看/修订
                 record = ChapterRecord(
                     chapter_index=chapter_index,
                     chapter_preset_name=chapter_preset_name,
@@ -726,7 +721,12 @@ class NovelAgent:
                     content="",
                     usage_metadata={},
                 )
-                save_chapter(novel_id, record, chapter_preset_name=chapter_preset_name)
+                persist_chapter_artifacts(
+                    novel_id=novel_id,
+                    chapter=record,
+                    next_state=plan.next_state,
+                    chapter_preset_name=chapter_preset_name,
+                )
                 return RunResult(
                     novel_id=novel_id,
                     mode=mode,
@@ -763,13 +763,13 @@ class NovelAgent:
                 content=content_text,
                 usage_metadata=usage,
             )
-            save_chapter(novel_id, record, chapter_preset_name=chapter_preset_name)
-
-            # 提交 next_state
             next_state = plan.next_state
-            next_state.meta.current_chapter_index = chapter_index
-            next_state.meta.updated_at = datetime.utcnow()
-            save_state(novel_id, next_state)
+            persist_chapter_artifacts(
+                novel_id=novel_id,
+                chapter=record,
+                next_state=next_state,
+                chapter_preset_name=chapter_preset_name,
+            )
 
             # 同步写出纯文本到 outputs/（保持脚本版的落盘习惯）
             try:
@@ -820,9 +820,14 @@ class NovelAgent:
         """
         返回“本次运行将喂给模型的输入”预览，不调用模型、无落盘副作用。
         """
-        state = load_state(novel_id)
+        state = self._load_state_hydrated(novel_id)
         if not state:
-            raise ValueError(f"novel_id not found: {novel_id}")
+            # 兜底：某些热重载瞬间可能导致 hydrated 路径读空，再直接读取一次。
+            raw_state = load_state(novel_id)
+            if raw_state:
+                state = hydrate_state_character_relationships(novel_id, raw_state)
+            else:
+                raise ValueError(f"novel_id not found: {novel_id}")
 
         out: Dict[str, Any] = {
             "novel_id": novel_id,
@@ -831,17 +836,8 @@ class NovelAgent:
             "stages": [],
         }
 
-        # 若会触发自动初始化，则先给出 init_state 输入预览
         if mode in {"plan_only", "write_chapter", "revise_chapter"} and (not state.meta.initialized):
-            lorebook_init = self._lorebook(lore_tags, lore_summary_id=lore_summary_id)
-            state_context_init = self._compact_state_for_prompt(state=state, user_task=user_task)
-            auto_task = f"（自动初始化）{user_task}".strip()
-            init_system, init_human = build_init_state_prompt(
-                user_task=auto_task,
-                state_context=state_context_init,
-                lorebook=lorebook_init,
-            )
-            out["stages"].append({"name": "auto_init", "system": init_system, "human": init_human})
+            raise ValueError("state not initialized. please run init_state first")
 
         if mode == "init_state":
             lorebook = self._lorebook(lore_tags, lore_summary_id=lore_summary_id)

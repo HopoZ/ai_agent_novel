@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import List, Optional
 from uuid import UUID
 
-from .state_models import ChapterRecord, NovelState
+from .state_models import ChapterRecord, ContinuityState, NovelMeta, NovelState, WorldState
 
 
 APP_STORAGE_DIR = Path("storage")
@@ -49,16 +49,57 @@ def ensure_novel_dirs(novel_id: str) -> None:
 
 def load_state(novel_id: str) -> Optional[NovelState]:
     p = get_state_path(novel_id)
-    if not p.exists():
-        return None
-    data = json.loads(p.read_text(encoding="utf-8"))
-    return NovelState.model_validate(data)
+    state: Optional[NovelState] = None
+    if p.exists():
+        data = json.loads(p.read_text(encoding="utf-8"))
+        state = NovelState.model_validate(data)
+
+    # 每次 load 都按最新章节“重算运行态关键字段”，避免一直沿用旧 state 快照。
+    chapters = list_chapters(novel_id)
+    if not chapters:
+        return state
+
+    latest = max(chapters, key=lambda c: (c.chapter_index, c.created_at))
+    if state is None:
+        state = NovelState(
+            meta=NovelMeta(
+                novel_id=novel_id,
+                novel_title="未命名小说",
+                initialized=False,
+                current_chapter_index=int(latest.chapter_index),
+            ),
+            continuity=ContinuityState(
+                time_slot=str(latest.time_slot or "未设置"),
+                pov_character_id=latest.pov_character_id,
+                who_is_present=(latest.who_is_present or []),
+            ),
+            characters=[],
+            world=WorldState(),
+            recent_summaries=[],
+        )
+    else:
+        state.meta.current_chapter_index = int(latest.chapter_index)
+        state.continuity.time_slot = str(latest.time_slot or state.continuity.time_slot or "未设置")
+        state.continuity.pov_character_id = latest.pov_character_id or state.continuity.pov_character_id
+        state.continuity.who_is_present = latest.who_is_present or []
+
+    # 回写一次，让 state.json 始终是“本次加载后”的最新运行态。
+    try:
+        save_state(novel_id, state)
+    except Exception:
+        pass
+    return state
 
 
 def save_state(novel_id: str, state: NovelState) -> None:
     ensure_novel_dirs(novel_id)
     p = get_state_path(novel_id)
-    p.write_text(state.model_dump_json(indent=2, ensure_ascii=False), encoding="utf-8")
+    # 人物关系（relationships）已迁移到 graph/character_relations.json，state.json 不再作为真源。
+    # 这里强制清空，避免旧数据回流/双写不一致。
+    state_to_save = state.model_copy(deep=True)
+    for c in state_to_save.characters or []:
+        c.relationships = {}
+    p.write_text(state_to_save.model_dump_json(indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def load_chapter(novel_id: str, chapter_index: int) -> Optional[ChapterRecord]:

@@ -43,7 +43,6 @@
           :open-role-manager="openRoleManager"
           :run-mode="runMode"
           :abort-run="abortRun"
-          :preview-current-input="previewCurrentInput"
         />
       </div>
 
@@ -116,6 +115,14 @@
     </div>
     <template #footer>
       <span class="dialog-footer">
+        <el-button
+          type="primary"
+          :disabled="running || !pendingRunPayload"
+          :loading="pendingRunStarting"
+          @click="confirmRunFromPreview"
+        >
+          确认并运行
+        </el-button>
         <el-button @click="inputPreviewVisible = false">关闭</el-button>
       </span>
     </template>
@@ -142,6 +149,189 @@
       <div v-else :ref="onGraphRef" class="graph-canvas-fullscreen"></div>
     </div>
   </el-dialog>
+
+  <el-drawer v-model="graphEditVisible" title="图谱编辑" size="520px" append-to-body>
+    <div v-if="!graphEditNode && !graphEditEdge" class="muted">请先在图谱中点击一个节点或一条边。</div>
+    <template v-else-if="graphEditEdge">
+      <div class="muted">边：<code>{{ graphEditEdge.source }}</code> -> <code>{{ graphEditEdge.target }}</code></div>
+      <div class="muted" style="margin-top:4px;">类型：{{ graphEditEdge.type || "relationship" }}</div>
+      <div style="height:10px;"></div>
+      <template v-if="String(graphEditEdge.type || '').toLowerCase() === 'relationship'">
+        <el-form label-position="top">
+          <el-form-item label="source">
+            <el-select v-model="edgeSourceDraft" filterable placeholder="选择 source">
+              <el-option v-for="c in graphCharacterNodeIds" :key="`es-${c}`" :label="c" :value="`char:${c}`" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="target">
+            <el-select v-model="edgeTargetDraft" filterable placeholder="选择 target">
+              <el-option v-for="c in graphCharacterNodeIds" :key="`et-${c}`" :label="c" :value="`char:${c}`" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="怎么关联（label）">
+            <el-input v-model="edgeRelLabel" placeholder="例如：师徒 / 敌对 / 欠人情 / 互相利用" />
+          </el-form-item>
+          <div style="display:flex; gap:8px;">
+            <el-button type="primary" @click="saveEdgeRelationship">保存边关系</el-button>
+            <el-button type="danger" plain @click="deleteEdgeRelationship">删除这条边</el-button>
+          </div>
+        </el-form>
+      </template>
+      <template v-else-if="String(graphEditEdge.type || '').toLowerCase() === 'appear'">
+        <el-form label-position="top">
+          <el-form-item label="source（角色）">
+            <el-select v-model="edgeSourceDraft" filterable placeholder="选择角色">
+              <el-option v-for="c in graphCharacterNodeIds" :key="`as-${c}`" :label="c" :value="`char:${c}`" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="target（章节事件）">
+            <el-select v-model="edgeTargetDraft" filterable placeholder="选择章节事件">
+              <el-option v-for="c in graphChapterNodeIds" :key="`at-${c}`" :label="c" :value="c" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="出场/角色定位（label）">
+            <el-input v-model="edgeRelLabel" placeholder="例如：出场 / 指挥 / 旁观 / 受伤撤离" />
+          </el-form-item>
+          <div style="display:flex; gap:8px;">
+            <el-button type="primary" @click="saveEdgeRelationship">保存边</el-button>
+            <el-button type="danger" plain @click="deleteEdgeRelationship">删除这条边</el-button>
+          </div>
+        </el-form>
+      </template>
+      <template v-else-if="String(graphEditEdge.type || '').toLowerCase() === 'timeline_next'">
+        <el-form label-position="top">
+          <el-form-item label="source（时间线事件）">
+            <el-select v-model="edgeSourceDraft" filterable placeholder="选择 source">
+              <el-option label="（未安排）当前时间线暂无起始事件" value="" />
+              <el-option v-for="t in graphTimelineOptions" :key="`ts-${t.id}`" :label="t.label" :value="t.id" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="target（下一跳）">
+            <el-select v-model="edgeTargetDraft" filterable placeholder="选择 target">
+              <el-option label="（未安排）当前时间线暂无下个事件" value="" />
+              <el-option v-for="t in graphTimelineOptions" :key="`tt-${t.id}`" :label="t.label" :value="t.id" />
+            </el-select>
+          </el-form-item>
+          <div style="display:flex; gap:8px;">
+            <el-button type="primary" @click="saveEdgeRelationship">保存边</el-button>
+            <el-button type="danger" plain @click="deleteEdgeRelationship">删除当前边</el-button>
+          </div>
+          <div class="muted" style="margin-top:8px;">提示：timeline_next 现在直接写入“事件关系表”；手工编辑的连线会保留，未定义下跳才会自动补默认顺序边。</div>
+        </el-form>
+      </template>
+      <template v-else-if="String(graphEditEdge.type || '').toLowerCase() === 'chapter_belongs'">
+        <el-form label-position="top">
+          <el-form-item label="source（章节事件）">
+            <el-select v-model="edgeSourceDraft" filterable placeholder="选择章节事件">
+              <el-option v-for="c in graphChapterNodeIds" :key="`cb-s-${c}`" :label="c" :value="c" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="target（归属的时间线事件）">
+            <el-select v-model="edgeTargetDraft" filterable clearable placeholder="选择时间线事件（可清空表示取消归属）">
+              <el-option label="（取消归属）" value="" />
+              <el-option v-for="t in graphTimelineOptions" :key="`cb-t-${t.id}`" :label="t.label" :value="t.id" />
+            </el-select>
+          </el-form-item>
+          <div style="display:flex; gap:8px;">
+            <el-button type="primary" @click="saveEdgeRelationship">保存归属</el-button>
+            <el-button type="danger" plain @click="deleteEdgeRelationship">删除当前边</el-button>
+          </div>
+          <div class="muted" style="margin-top:8px;">提示：章节归属会写回时间线事件的 chapter_index，并同步三表。</div>
+        </el-form>
+      </template>
+      <template v-else>
+        <div class="muted">该类型边暂不支持修改（可修改 relationship 边）。</div>
+      </template>
+    </template>
+    <template v-else>
+      <div class="muted">节点：<code>{{ graphEditNode.id }}</code>（{{ graphEditNode.type }}）</div>
+      <div style="height:10px;"></div>
+
+      <template v-if="graphEditNode.type === 'character'">
+        <el-form label-position="top">
+          <el-form-item label="description">
+            <el-input v-model="graphCharDesc" type="textarea" :rows="3" />
+          </el-form-item>
+          <el-form-item label="current_location">
+            <el-input v-model="graphCharLoc" />
+          </el-form-item>
+          <el-form-item label="goals（每行一条）">
+            <el-input v-model="graphCharGoals" type="textarea" :rows="4" />
+          </el-form-item>
+          <el-form-item label="known_facts（每行一条）">
+            <el-input v-model="graphCharFacts" type="textarea" :rows="4" />
+          </el-form-item>
+          <el-button type="primary" @click="saveGraphNodePatch" :disabled="!form.novelId">保存节点</el-button>
+        </el-form>
+
+        <el-divider />
+        <div style="font-weight:600; margin-bottom:6px;">人物关系（relationship）</div>
+        <div class="muted" style="margin-bottom:10px;">修改 source 角色 -> target 角色 的关系描述。</div>
+        <el-form label-position="top">
+          <el-form-item label="关联到哪个角色（target）">
+            <el-select v-model="relTarget" filterable clearable placeholder="选择一个角色">
+              <el-option v-for="c in graphCharacterNodeIds" :key="c" :label="c" :value="c" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="怎么关联（label）">
+            <el-input v-model="relLabel" placeholder="例如：师徒 / 敌对 / 欠人情 / 互相利用" />
+          </el-form-item>
+          <div style="display:flex; gap:8px;">
+            <el-button type="primary" @click="setRelationship">新增/更新关系</el-button>
+            <el-button type="danger" plain @click="deleteRelationship">删除关系</el-button>
+          </div>
+        </el-form>
+      </template>
+
+      <template v-else-if="graphEditNode.type === 'faction'">
+        <el-form label-position="top">
+          <el-form-item label="description">
+            <el-input v-model="graphFacDesc" type="textarea" :rows="6" />
+          </el-form-item>
+          <el-button type="primary" @click="saveGraphNodePatch" :disabled="!form.novelId">保存节点</el-button>
+        </el-form>
+      </template>
+
+      <template v-else-if="graphEditNode.type === 'timeline_event'">
+        <el-form label-position="top">
+          <el-form-item label="time_slot">
+            <el-input v-model="graphTlSlot" />
+          </el-form-item>
+          <el-form-item label="summary">
+            <el-input v-model="graphTlSummary" type="textarea" :rows="4" />
+          </el-form-item>
+          <el-form-item label="上一跳（谁指向当前事件）">
+            <el-select v-model="timelinePrevDraft" filterable clearable placeholder="选择上一事件（可空）">
+              <el-option label="（未安排）暂无上一事件" value="" />
+              <el-option
+                v-for="t in graphTimelineOptions"
+                :key="`prev-${t.id}`"
+                :label="t.label"
+                :value="t.id"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="下一跳（当前事件指向谁）">
+            <el-select v-model="timelineNextDraft" filterable clearable placeholder="选择下一事件（可空）">
+              <el-option label="（未安排）暂无下一事件" value="" />
+              <el-option
+                v-for="t in graphTimelineOptions"
+                :key="`next-${t.id}`"
+                :label="t.label"
+                :value="t.id"
+              />
+            </el-select>
+          </el-form-item>
+          <el-button @click="saveTimelineNeighbors" :disabled="!form.novelId" style="margin-right:8px;">保存上下关系</el-button>
+          <el-button type="primary" @click="saveGraphNodePatch" :disabled="!form.novelId">保存节点</el-button>
+        </el-form>
+      </template>
+
+      <template v-else>
+        <div class="muted">该类型节点暂不支持编辑。</div>
+      </template>
+    </template>
+  </el-drawer>
 
   <el-dialog v-model="roleManagerVisible" title="角色标签管理（本次会话）" width="680px">
     <el-form label-position="top">
@@ -251,6 +441,236 @@ const graphData = ref<{ nodes: any[]; edges: any[] } | null>(null);
 function onGraphRef(el: any) {
   graphEl.value = el as HTMLDivElement | null;
 }
+
+const graphEditVisible = ref(false);
+const graphEditNode = ref<any>(null);
+const graphEditEdge = ref<any>(null);
+const graphCharDesc = ref("");
+const graphCharLoc = ref("");
+const graphCharGoals = ref("");
+const graphCharFacts = ref("");
+const graphFacDesc = ref("");
+const graphTlSlot = ref("");
+const graphTlSummary = ref("");
+const timelinePrevDraft = ref("");
+const timelineNextDraft = ref("");
+const relTarget = ref("");
+const relLabel = ref("");
+const edgeRelLabel = ref("");
+const edgeSourceDraft = ref("");
+const edgeTargetDraft = ref("");
+
+const graphCharacterNodeIds = computed(() => {
+  const nodes = graphData.value?.nodes || [];
+  return nodes
+    .filter((n: any) => n && n.type === "character" && typeof n.id === "string" && n.id.startsWith("char:"))
+    .map((n: any) => String(n.id).slice("char:".length))
+    .filter(Boolean);
+});
+
+const graphTimelineNodeIds = computed(() => {
+  const nodes = graphData.value?.nodes || [];
+  return nodes
+    .filter((n: any) => n && n.type === "timeline_event" && typeof n.id === "string" && n.id.startsWith("ev:timeline:"))
+    .map((n: any) => String(n.id))
+    .filter(Boolean);
+});
+
+const graphTimelineOptions = computed(() => {
+  const nodes = graphData.value?.nodes || [];
+  return nodes
+    .filter((n: any) => n && n.type === "timeline_event" && typeof n.id === "string" && n.id.startsWith("ev:timeline:"))
+    .map((n: any) => ({
+      id: String(n.id),
+      label: String(n.label || n.id),
+    }));
+});
+
+const graphChapterNodeIds = computed(() => {
+  const nodes = graphData.value?.nodes || [];
+  return nodes
+    .filter((n: any) => n && n.type === "chapter_event" && typeof n.id === "string" && n.id.startsWith("ev:chapter:"))
+    .map((n: any) => String(n.id))
+    .filter(Boolean);
+});
+
+function openGraphEditor(node: any) {
+  graphEditEdge.value = null;
+  graphEditNode.value = node;
+  graphEditVisible.value = true;
+  const data = node?.data || {};
+  if (node?.type === "character") {
+    graphCharDesc.value = String(data?.description || "");
+    graphCharLoc.value = String(data?.current_location || "");
+    graphCharGoals.value = Array.isArray(data?.goals) ? data.goals.join("\n") : String(data?.goals || "");
+    graphCharFacts.value = Array.isArray(data?.known_facts) ? data.known_facts.join("\n") : String(data?.known_facts || "");
+  } else if (node?.type === "faction") {
+    graphFacDesc.value = String(data?.description || "");
+  } else if (node?.type === "timeline_event") {
+    graphTlSlot.value = String(data?.time_slot || "");
+    graphTlSummary.value = String(data?.summary || "");
+    const edges = (graphData.value?.edges || []).filter((e: any) => (e?.type || "") === "timeline_next");
+    const nodeId = String(node?.id || "");
+    const incoming = edges.find((e: any) => String(e?.target || "") === nodeId);
+    const outgoing = edges.find((e: any) => String(e?.source || "") === nodeId);
+    timelinePrevDraft.value = String(incoming?.source || "");
+    timelineNextDraft.value = String(outgoing?.target || "");
+  }
+  relTarget.value = "";
+  relLabel.value = "";
+}
+
+async function saveTimelineNeighbors() {
+  const novelId = (form.novelId || "").trim();
+  const node = graphEditNode.value;
+  if (!novelId || !node || node.type !== "timeline_event") return;
+  const nodeId = String(node.id || "");
+  if (!nodeId.startsWith("ev:timeline:")) {
+    ElMessage.error("当前节点不是可编辑的时间线事件。");
+    return;
+  }
+  if (timelinePrevDraft.value && timelinePrevDraft.value === nodeId) {
+    ElMessage.error("上一跳不能指向自己。");
+    return;
+  }
+  if (timelineNextDraft.value && timelineNextDraft.value === nodeId) {
+    ElMessage.error("下一跳不能指向自己。");
+    return;
+  }
+
+  const newPrev = (timelinePrevDraft.value || "").trim();
+  const newNext = (timelineNextDraft.value || "").trim();
+  await apiJson(`/api/novels/${encodeURIComponent(novelId)}/graph/timeline-neighbors`, "PATCH", {
+    node_id: nodeId,
+    prev_source: newPrev || "",
+    next_target: newNext || "",
+  });
+
+  ElMessage.success("已保存事件节点的上/下关系");
+  await loadGraph();
+}
+
+function openGraphEdgeEditor(edge: any) {
+  graphEditNode.value = null;
+  graphEditEdge.value = edge;
+  graphEditVisible.value = true;
+  edgeRelLabel.value = String(edge?.rel_label || (typeof edge?.label === "string" ? edge.label : ""));
+  edgeSourceDraft.value = String(edge?.source || "");
+  edgeTargetDraft.value = String(edge?.target || "");
+}
+
+async function saveGraphNodePatch() {
+  const novelId = (form.novelId || "").trim();
+  if (!novelId || !graphEditNode.value) return;
+  const node = graphEditNode.value;
+  let patch: any = {};
+  if (node.type === "character") {
+    patch = {
+      description: graphCharDesc.value,
+      current_location: graphCharLoc.value,
+      goals: graphCharGoals.value,
+      known_facts: graphCharFacts.value,
+    };
+  } else if (node.type === "faction") {
+    patch = { description: graphFacDesc.value };
+  } else if (node.type === "timeline_event") {
+    patch = { time_slot: graphTlSlot.value, summary: graphTlSummary.value };
+  } else {
+    ElMessage.warning("该节点类型暂不支持保存。");
+    return;
+  }
+  await apiJson(`/api/novels/${encodeURIComponent(novelId)}/graph/node`, "PATCH", {
+    node_id: node.id,
+    patch,
+  });
+  ElMessage.success("已保存节点修改");
+  await loadGraph();
+}
+
+async function setRelationship() {
+  const novelId = (form.novelId || "").trim();
+  const node = graphEditNode.value;
+  if (!novelId || !node || node.type !== "character") return;
+  const srcId = String(node.id || "");
+  const tgtId = (relTarget.value || "").trim();
+  const label = (relLabel.value || "").trim();
+  if (!tgtId || !label) {
+    ElMessage.error("请选择 target 并填写关系 label。");
+    return;
+  }
+  await apiJson(`/api/novels/${encodeURIComponent(novelId)}/graph/relationship`, "POST", {
+    source: srcId,
+    target: `char:${tgtId}`,
+    label,
+    op: "set",
+  });
+  ElMessage.success("已更新关系");
+  await loadGraph();
+}
+
+async function deleteRelationship() {
+  const novelId = (form.novelId || "").trim();
+  const node = graphEditNode.value;
+  if (!novelId || !node || node.type !== "character") return;
+  const srcId = String(node.id || "");
+  const tgtId = (relTarget.value || "").trim();
+  if (!tgtId) {
+    ElMessage.error("请选择要删除的 target。");
+    return;
+  }
+  await apiJson(`/api/novels/${encodeURIComponent(novelId)}/graph/relationship`, "POST", {
+    source: srcId,
+    target: `char:${tgtId}`,
+    label: "",
+    op: "delete",
+  });
+  ElMessage.success("已删除关系");
+  await loadGraph();
+}
+
+async function saveEdgeRelationship() {
+  const novelId = (form.novelId || "").trim();
+  const e = graphEditEdge.value;
+  if (!novelId || !e) return;
+  const source = String(e.source || "");
+  const target = String(e.target || "");
+  const new_source = (edgeSourceDraft.value || source).trim();
+  const new_target = (edgeTargetDraft.value || target).trim();
+  const label = (edgeRelLabel.value || "").trim();
+  const edge_type = String(e.type || "relationship");
+  if (edge_type.toLowerCase() === "relationship" && !label) {
+    ElMessage.error("请先填写关系 label。");
+    return;
+  }
+  await apiJson(`/api/novels/${encodeURIComponent(novelId)}/graph/edge`, "PATCH", {
+    edge_type,
+    source,
+    target,
+    new_source,
+    new_target,
+    label,
+    op: "set",
+  });
+  ElMessage.success("已保存边修改");
+  await loadGraph();
+}
+
+async function deleteEdgeRelationship() {
+  const novelId = (form.novelId || "").trim();
+  const e = graphEditEdge.value;
+  if (!novelId || !e) return;
+  const source = String(e.source || "");
+  const target = String(e.target || "");
+  const edge_type = String(e.type || "relationship");
+  await apiJson(`/api/novels/${encodeURIComponent(novelId)}/graph/edge`, "PATCH", {
+    edge_type,
+    source,
+    target,
+    op: "delete",
+  });
+  ElMessage.success("已删除边");
+  await loadGraph();
+}
 async function openGraphDialog() {
   const novelId = (form.novelId || "").trim();
   if (!novelId) {
@@ -286,6 +706,9 @@ const createDialogVisible = ref(false);
 const previewingInput = ref(false);
 const inputPreviewVisible = ref(false);
 const inputPreviewText = ref("");
+const pendingRunPayload = ref<any | null>(null);
+const pendingRunNovelId = ref("");
+const pendingRunStarting = ref(false);
 
 const createForm = reactive<{
   novelTitle: string;
@@ -304,10 +727,12 @@ function openCreateDialog() {
 const form = reactive<{
   novelId: string;
   mode: Mode;
-  insertMode: "anchors" | "time";
-  insertAfterId: string;
-  insertBeforeId: string;
-  timeSlotOverride: string;
+  eventMode: "existing" | "new";
+  existingEventId: string;
+  newEventTimeSlot: string;
+  newEventSummary: string;
+  newEventPrevId: string;
+  newEventNextId: string;
   povCharacterOverride: string[];
   focusCharacterIds: string[];
   chapterPresetName: string;
@@ -315,10 +740,12 @@ const form = reactive<{
 }>({
   novelId: "",
   mode: "write_chapter",
-  insertMode: "anchors",
-  insertAfterId: "",
-  insertBeforeId: "",
-  timeSlotOverride: "",
+  eventMode: "existing",
+  existingEventId: "",
+  newEventTimeSlot: "",
+  newEventSummary: "",
+  newEventPrevId: "",
+  newEventNextId: "",
   povCharacterOverride: [],
   focusCharacterIds: [],
   chapterPresetName: "",
@@ -327,8 +754,14 @@ const form = reactive<{
 
 const inferredTimeSlotHint = computed(() => {
   const byId = new Map((anchors.value || []).map((a) => [a.id, a]));
-  const after = form.insertAfterId ? byId.get(form.insertAfterId)?.time_slot : "";
-  const before = form.insertBeforeId ? byId.get(form.insertBeforeId)?.time_slot : "";
+  if (form.eventMode === "existing") {
+    const slot = form.existingEventId ? byId.get(form.existingEventId)?.time_slot : "";
+    return slot || "";
+  }
+  const slot = (form.newEventTimeSlot || "").trim();
+  if (slot) return slot;
+  const after = form.newEventPrevId ? byId.get(form.newEventPrevId)?.time_slot : "";
+  const before = form.newEventNextId ? byId.get(form.newEventNextId)?.time_slot : "";
   if (after && before) return `${after}之后~${before}之前`;
   if (after) return `${after}之后`;
   if (before) return `${before}之前`;
@@ -356,7 +789,7 @@ const runPhaseLabel = computed(() => {
   if (p === "planning") return "正在规划章节";
   if (p === "auto_init") return "正在自动初始化状态";
   if (p === "writing") return "正在生成正文";
-  if (p === "saving") return "正在保存章节与状态";
+  if (p === "saving") return "正在保存章节、状态与三表";
   if (p === "outputs_written") return "正文已写入 outputs";
   if (p === "done") return "已完成";
   if (p === "error") return "执行失败";
@@ -607,9 +1040,12 @@ async function loadNovels() {
 async function loadAnchors() {
   const novelId = (form.novelId || "").trim();
   anchors.value = [];
-  form.insertAfterId = "";
-  form.insertBeforeId = "";
-  form.insertMode = "anchors";
+  form.existingEventId = "";
+  form.newEventTimeSlot = "";
+  form.newEventSummary = "";
+  form.newEventPrevId = "";
+  form.newEventNextId = "";
+  form.eventMode = "existing";
   if (!novelId) return;
   anchorsLoading.value = true;
   try {
@@ -759,11 +1195,11 @@ async function createNovel() {
   createDialogVisible.value = false;
 }
 
-async function runMode() {
+function buildRunPayload() {
   const novelId = (form.novelId || "").trim();
   if (!novelId) {
     ElMessage.error("请先创建新小说或填写小说编号。");
-    return;
+    return null;
   }
 
   // 不再强制要求手动 init_state：后端会在需要时自动初始化
@@ -771,15 +1207,40 @@ async function runMode() {
   const loreTags = selectedTags.value || [];
   if (loreTags.length === 0) {
     ElMessage.error("请至少勾选 1 项设定（settings/*.md 文件名）。");
-    return;
+    return null;
   }
   if (!form.userTask || !form.userTask.trim()) {
     ElMessage.error("请输入本章任务描述（例如：写第3章 + 更新世界线/人物关系的要求）。");
-    return;
+    return null;
   }
   if (!validateTimePlan()) {
-    return;
+    return null;
   }
+
+  const mergedTask = (() => {
+    const base = form.userTask || "";
+    const picked = (form.focusCharacterIds || []).filter(Boolean);
+    if (picked.length === 0) return base;
+    return `${base}\n\n（配角设定：${picked.join("、")}）`;
+  })();
+  const payload = {
+    mode: form.mode,
+    user_task: mergedTask,
+    existing_event_id: form.eventMode === "existing" ? (form.existingEventId || null) : null,
+    new_event_time_slot: form.eventMode === "new" ? (form.newEventTimeSlot || null) : null,
+    new_event_summary: form.eventMode === "new" ? (form.newEventSummary || null) : null,
+    new_event_prev_id: form.eventMode === "new" ? (form.newEventPrevId || null) : null,
+    new_event_next_id: form.eventMode === "new" ? (form.newEventNextId || null) : null,
+    time_slot_override: null,
+    pov_character_ids_override: (form.povCharacterOverride || []).filter(Boolean),
+    supporting_character_ids: (form.focusCharacterIds || []).filter(Boolean),
+    chapter_preset_name: form.chapterPresetName || null,
+    lore_tags: loreTags,
+  };
+  return { novelId, payload };
+}
+
+async function executeRun(novelId: string, payload: any) {
 
   running.value = true;
   runAbortController = new AbortController();
@@ -792,23 +1253,6 @@ async function runMode() {
   planStreamText.value = "";
   initStreamText.value = "";
   try {
-    const mergedTask = (() => {
-      const base = form.userTask || "";
-      const picked = (form.focusCharacterIds || []).filter(Boolean);
-      if (picked.length === 0) return base;
-      return `${base}\n\n（配角设定：${picked.join("、")}）`;
-    })();
-    const payload = {
-      mode: form.mode,
-      user_task: mergedTask,
-      insert_after_id: form.insertMode === "anchors" ? (form.insertAfterId || null) : null,
-      insert_before_id: form.insertMode === "anchors" ? (form.insertBeforeId || null) : null,
-      time_slot_override: form.insertMode === "time" ? (form.timeSlotOverride || null) : null,
-      pov_character_ids_override: (form.povCharacterOverride || []).filter(Boolean),
-      supporting_character_ids: (form.focusCharacterIds || []).filter(Boolean),
-      chapter_preset_name: form.chapterPresetName || null,
-      lore_tags: loreTags,
-    };
     // 流式输出：边生成边显示
     const startAt = Date.now();
     let logText = "（流式输出开始）\n";
@@ -837,7 +1281,7 @@ async function runMode() {
         if (name === "planning") runHint.value = "正在生成章节规划（beats + next_state）";
         if (name === "auto_init") runHint.value = "检测到未初始化，正在自动初始化世界状态";
         if (name === "writing") runHint.value = "正在流式生成正文，请稍候...";
-        if (name === "saving") runHint.value = "正在保存章节记录和世界状态";
+        if (name === "saving") runHint.value = "正在保存章节记录、世界状态和图谱三表";
         if (name === "next_status") runHint.value = "正在生成下章建议...";
         if (name === "next_status_done") runHint.value = "下章建议已生成";
         if (name === "next_status_failed") runHint.value = "下章建议生成失败（可重试）";
@@ -919,6 +1363,9 @@ async function runMode() {
       refreshStreamText();
     }
     await loadAnchors();
+    if (graphFullscreenVisible.value || rightTab.value === "graph") {
+      await loadGraph();
+    }
   } catch (e: any) {
     const aborted = e?.name === "AbortError";
     if (aborted) {
@@ -936,45 +1383,44 @@ async function runMode() {
   }
 }
 
-async function previewCurrentInput() {
-  const novelId = (form.novelId || "").trim();
-  if (!novelId) {
-    ElMessage.error("请先选择/创建小说。");
-    return;
-  }
-  if (!form.userTask || !form.userTask.trim()) {
-    ElMessage.error("请先填写本章任务描述。");
-    return;
-  }
-  const loreTags = selectedTags.value || [];
-  if (loreTags.length === 0) {
-    ElMessage.error("请至少勾选 1 项设定。");
-    return;
-  }
-  if (!validateTimePlan()) {
-    return;
-  }
+async function runMode() {
+  const built = buildRunPayload();
+  if (!built) return;
   previewingInput.value = true;
   try {
-    const mergedTask = (() => {
-      const base = form.userTask || "";
-      const picked = (form.focusCharacterIds || []).filter(Boolean);
-      if (picked.length === 0) return base;
-      return `${base}\n\n（配角设定：${picked.join("、")}）`;
-    })();
-    const payload = {
-      mode: form.mode,
-      user_task: mergedTask,
-      insert_after_id: form.insertMode === "anchors" ? (form.insertAfterId || null) : null,
-      insert_before_id: form.insertMode === "anchors" ? (form.insertBeforeId || null) : null,
-      time_slot_override: form.insertMode === "time" ? (form.timeSlotOverride || null) : null,
-      pov_character_ids_override: (form.povCharacterOverride || []).filter(Boolean),
-      supporting_character_ids: (form.focusCharacterIds || []).filter(Boolean),
-      chapter_preset_name: form.chapterPresetName || null,
-      lore_tags: loreTags,
-    };
-    const data = await apiJson(`/api/novels/${encodeURIComponent(novelId)}/preview_input`, "POST", payload);
+    const data = await apiJson(`/api/novels/${encodeURIComponent(built.novelId)}/preview_input`, "POST", built.payload);
     inputPreviewText.value = JSON.stringify(data, null, 2);
+    pendingRunPayload.value = built.payload;
+    pendingRunNovelId.value = built.novelId;
+    inputPreviewVisible.value = true;
+  } finally {
+    previewingInput.value = false;
+  }
+}
+
+async function confirmRunFromPreview() {
+  if (!pendingRunPayload.value || !pendingRunNovelId.value) {
+    ElMessage.error("没有可运行的预览内容，请先点击主按钮生成 Input。");
+    return;
+  }
+  pendingRunStarting.value = true;
+  inputPreviewVisible.value = false;
+  try {
+    await executeRun(pendingRunNovelId.value, pendingRunPayload.value);
+  } finally {
+    pendingRunStarting.value = false;
+  }
+}
+
+async function previewCurrentInput() {
+  const built = buildRunPayload();
+  if (!built) return;
+  previewingInput.value = true;
+  try {
+    const data = await apiJson(`/api/novels/${encodeURIComponent(built.novelId)}/preview_input`, "POST", built.payload);
+    inputPreviewText.value = JSON.stringify(data, null, 2);
+    pendingRunPayload.value = built.payload;
+    pendingRunNovelId.value = built.novelId;
     inputPreviewVisible.value = true;
   } finally {
     previewingInput.value = false;
@@ -982,17 +1428,23 @@ async function previewCurrentInput() {
 }
 
 function validateTimePlan(): boolean {
-  if (form.insertMode === "time") {
-    if (!(form.timeSlotOverride || "").trim()) {
-      ElMessage.error("已选择手动时间段，请先填写时间段内容。");
+  if (form.eventMode === "existing") {
+    if (!(form.existingEventId || "").trim()) {
+      ElMessage.error("请先选择“归属到已有事件”。");
       return false;
     }
     return true;
   }
-  const hasAfter = !!(form.insertAfterId || "").trim();
-  const hasBefore = !!(form.insertBeforeId || "").trim();
-  if (!hasAfter && !hasBefore) {
-    ElMessage.error("时间规划二选一至少完成一个：请选择手动时间段，或在事件网至少选择一个锚点（前/后其一）。");
+  if (!(form.newEventTimeSlot || "").trim() || !(form.newEventSummary || "").trim()) {
+    ElMessage.error("新建事件时请填写 time_slot 和 summary。");
+    return false;
+  }
+  if (
+    (form.newEventPrevId || "").trim() &&
+    (form.newEventNextId || "").trim() &&
+    form.newEventPrevId === form.newEventNextId
+  ) {
+    ElMessage.error("新建事件的前后事件不能相同。");
     return false;
   }
   return true;
@@ -1006,14 +1458,12 @@ function ensureGraphChart() {
   graphChart.on("click", (params: any) => {
     if (params?.dataType === "node" && params?.data) {
       const n = params.data;
-      dialogTitle.value = `节点详情：${n.label || n.name || n.id}`;
-      dialogText.value = JSON.stringify(n, null, 2);
-      dialogVisible.value = true;
+      // 节点点击：进入可编辑面板
+      openGraphEditor(n);
     }
     if (params?.dataType === "edge" && params?.data) {
-      dialogTitle.value = `关系详情：${params.data?.label || ""}`.trim() || "关系详情";
-      dialogText.value = JSON.stringify(params.data, null, 2);
-      dialogVisible.value = true;
+      // 边点击：进入边编辑面板
+      openGraphEdgeEditor(params.data);
     }
   });
 }
@@ -1049,9 +1499,59 @@ function renderGraph() {
   }));
   const links = (payload.edges || []).map((e: any) => ({
     ...e,
+    rel_label: (typeof e?.label === "string" ? e.label : ""),
     lineStyle: { opacity: 0.7, width: 1.2, curveness: 0.18 },
-    label: { show: !!e.label, formatter: e.label },
+    label: {
+      show: !!(typeof e?.label === "string" ? e.label : ""),
+      formatter: (typeof e?.label === "string" ? e.label : ""),
+    },
   }));
+
+  // 给“未安排上/下一跳”的时间线节点打黄色角标
+  const timelineIds = new Set(
+    nodes
+      .map((n: any) => String(n?.id || ""))
+      .filter((id: string) => id.startsWith("ev:timeline:") && !id.includes(":draft_"))
+  );
+  const inCnt = new Map<string, number>();
+  const outCnt = new Map<string, number>();
+  for (const id of timelineIds) {
+    inCnt.set(id, 0);
+    outCnt.set(id, 0);
+  }
+  for (const e of links) {
+    if ((e?.type || "") !== "timeline_next") continue;
+    const s = String(e?.source || "");
+    const t = String(e?.target || "");
+    if (outCnt.has(s)) outCnt.set(s, (outCnt.get(s) || 0) + 1);
+    if (inCnt.has(t)) inCnt.set(t, (inCnt.get(t) || 0) + 1);
+  }
+  for (const n of nodes as any[]) {
+    const id = String(n?.id || "");
+    if (!timelineIds.has(id)) continue;
+    const noPrev = (inCnt.get(id) || 0) === 0;
+    const noNext = (outCnt.get(id) || 0) === 0;
+    // 同时没有上下跳的一般是孤立点，不做“待定”提示，避免噪音
+    if (!(noPrev || noNext) || (noPrev && noNext)) continue;
+    const flag = noPrev && !noNext ? "待定(上)" : "待定(下)";
+    n.label = {
+      show: true,
+      position: "right",
+      formatter: `{b}\n{flag|${flag}}`,
+      rich: {
+        flag: {
+          color: "#8a5a00",
+          backgroundColor: "#fff7cc",
+          borderColor: "#f5c542",
+          borderWidth: 1,
+          borderRadius: 3,
+          padding: [1, 4],
+          fontSize: 11,
+          lineHeight: 16,
+        },
+      },
+    };
+  }
 
   graphChart.setOption(
     {

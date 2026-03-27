@@ -11,12 +11,29 @@ from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from agents.graph_tables import (
+    ensure_graph_tables,
+    load_character_relations,
+    load_event_relations,
+    persist_chapter_artifacts,
+    resolve_chapter_event_ids,
+    replace_appear_edges_for_chapter,
+    replace_timeline_next_edges_from_state,
+    save_character_entities,
+    save_character_relations,
+    save_event_rows,
+    save_event_relations,
+    sync_chapter_table_from_record,
+    update_chapter_table,
+)
 from agents.novel_agent import NovelAgent
 from agents.lore_summary import get_lore_summary, load_cached_summary, source_hash_from_map
-from agents.storage import load_state, load_chapter, get_chapters_dir, list_chapters
+from agents.storage import load_state, save_state, load_chapter, save_chapter, get_chapters_dir, list_chapters
 from agents.state_models import NovelState, ChapterRecord, ChapterPlan
 from webapp.frontend_assets import run_frontend_startup
 from webapp.schemas import BuildLoreSummaryRequest, CreateNovelRequest, RunModeRequest
+
+from pydantic import BaseModel
 
 
 app = FastAPI(title="AI Novel Agent")
@@ -104,6 +121,13 @@ def _infer_time_slot(novel_id: str, req: RunModeRequest) -> Optional[str]:
     if req.time_slot_override and str(req.time_slot_override).strip():
         return req.time_slot_override
 
+    existing_slot = _resolve_anchor_time_slot(novel_id, req.existing_event_id)
+    if existing_slot:
+        return existing_slot
+
+    if req.new_event_time_slot and str(req.new_event_time_slot).strip():
+        return str(req.new_event_time_slot).strip()
+
     after_slot = _resolve_anchor_time_slot(novel_id, req.insert_after_id)
     before_slot = _resolve_anchor_time_slot(novel_id, req.insert_before_id)
     if after_slot and before_slot:
@@ -115,6 +139,245 @@ def _infer_time_slot(novel_id: str, req: RunModeRequest) -> Optional[str]:
 
     legacy_slot = _resolve_anchor_time_slot(novel_id, req.insert_anchor_id)
     return legacy_slot
+
+
+def _timeline_idx(node_id: Optional[str]) -> Optional[int]:
+    raw = str(node_id or "").strip()
+    if not raw.startswith("ev:timeline:"):
+        return None
+    try:
+        return int(raw.split("ev:timeline:", 1)[1].strip())
+    except Exception:
+        return None
+
+
+def _apply_chapter_event_selection(next_state: NovelState, chapter_index: int, req: RunModeRequest) -> NovelState:
+    """
+    新时序语义：
+    - existing_event_id: 把本章绑定到已有事件
+    - new_event_*: 新建事件并插入前后位置后绑定本章
+    """
+    tl = list(next_state.world.timeline or [])
+
+    # 清理旧绑定，避免同一章重复归属
+    for ev in tl:
+        if ev.chapter_index == chapter_index:
+            ev.chapter_index = None
+
+    existing_idx = _timeline_idx(req.existing_event_id)
+    if existing_idx is not None and 0 <= existing_idx < len(tl):
+        tl[existing_idx].chapter_index = chapter_index
+        next_state.world.timeline = tl
+        return next_state
+
+    new_slot = str(req.new_event_time_slot or "").strip()
+    new_summary = str(req.new_event_summary or "").strip()
+    if not (new_slot and new_summary):
+        next_state.world.timeline = tl
+        return next_state
+
+    prev_idx = _timeline_idx(req.new_event_prev_id)
+    next_idx = _timeline_idx(req.new_event_next_id)
+    insert_at = len(tl)
+    if prev_idx is not None and 0 <= prev_idx < len(tl):
+        insert_at = prev_idx + 1
+    elif next_idx is not None and 0 <= next_idx < len(tl):
+        insert_at = next_idx
+    if next_idx is not None and 0 <= next_idx < len(tl):
+        insert_at = min(insert_at, next_idx)
+    insert_at = max(0, min(insert_at, len(tl)))
+
+    from agents.state_models import TimelineEvent
+
+    tl.insert(
+        insert_at,
+        TimelineEvent(
+            time_slot=new_slot,
+            chapter_index=chapter_index,
+            summary=new_summary,
+        ),
+    )
+    next_state.world.timeline = tl
+    return next_state
+
+
+def _build_llm_user_task(
+    novel_id: str,
+    raw_user_task: str,
+    req: RunModeRequest,
+    inferred_time_slot: Optional[str],
+    pov_ids: List[str],
+) -> str:
+    """
+    把“用户显式填写的关键约束”拼接到 user_task，确保模型稳定拿到：
+    - 本章归属事件（已有/新建）
+    - 主视角
+    - 重点涉及角色
+    """
+    base = str(raw_user_task or "").strip()
+    lines: List[str] = []
+
+    st = load_state(novel_id)
+    timeline = list(st.world.timeline or []) if st else []
+
+    def _event_desc(event_id: str) -> str:
+        idx = _timeline_idx(event_id)
+        if idx is None or not (0 <= idx < len(timeline)):
+            return event_id
+        ev = timeline[idx]
+        return f"{event_id}（{ev.time_slot}｜{ev.summary}）"
+
+    existing_id = str(req.existing_event_id or "").strip()
+    if existing_id.startswith("ev:timeline:") and st:
+        idx = _timeline_idx(existing_id)
+        if idx is not None and 0 <= idx < len(timeline):
+            ev = timeline[idx]
+            lines.append(f"章节归属时间线：{existing_id}（{ev.time_slot}｜{ev.summary}）")
+            if idx > 0:
+                prev_ev = timeline[idx - 1]
+                lines.append(f"该事件前一事件：ev:timeline:{idx-1}（{prev_ev.time_slot}｜{prev_ev.summary}）")
+            if idx + 1 < len(timeline):
+                next_ev = timeline[idx + 1]
+                lines.append(f"该事件后一事件：ev:timeline:{idx+1}（{next_ev.time_slot}｜{next_ev.summary}）")
+        else:
+            lines.append(f"章节归属时间线：{existing_id}")
+    elif (req.new_event_time_slot or "").strip() and (req.new_event_summary or "").strip():
+        lines.append(
+            "章节归属时间线（新建事件）："
+            f"time_slot={str(req.new_event_time_slot).strip()}，"
+            f"summary={str(req.new_event_summary).strip()}"
+        )
+        prev_id = str(req.new_event_prev_id or "").strip()
+        next_id = str(req.new_event_next_id or "").strip()
+        if prev_id:
+            lines.append(f"新事件前置事件（可选）：{_event_desc(prev_id)}")
+        if next_id:
+            lines.append(f"新事件后置事件（可选）：{_event_desc(next_id)}")
+    else:
+        lines.append("章节归属时间线：未显式指定（按系统推导/默认流程）")
+
+    if inferred_time_slot:
+        lines.append(f"本章时间段（系统推导）：{inferred_time_slot}")
+
+    if pov_ids:
+        lines.append(f"主视角候选：{', '.join([x for x in pov_ids if x])}")
+
+    supporting_ids = [str(x).strip() for x in (req.supporting_character_ids or []) if str(x).strip()]
+    if supporting_ids:
+        lines.append(f"重点涉及角色：{', '.join(supporting_ids)}")
+
+    lore_tags = [str(x).strip() for x in (req.lore_tags or []) if str(x).strip()]
+    if lore_tags:
+        lines.append(f"设定标签（lore_tags）：{', '.join(lore_tags)}")
+
+    if not lines:
+        return base
+    suffix = "\n".join(lines)
+    return f"{base}\n\n[系统注入约束]\n{suffix}".strip()
+
+
+def _prebuild_chapter_graph_records(
+    novel_id: str,
+    req: RunModeRequest,
+    chapter_index: int,
+    inferred_time_slot: Optional[str],
+    pov_ids: List[str],
+) -> None:
+    """
+    生成前预构建三表中的“本章骨架”：
+    - graph/chapters/{chapter}.json：先落 chapter_index/time_slot/character_ids/event_ids
+    - graph/event_relations.json：先落主要人物 -> 本章 的 appear 边
+    - 若已选择章节归属事件（已有/新建），先把 chapter_index 绑定到 timeline 事件
+    """
+    st = load_state(novel_id)
+    if not st:
+        return
+    ensure_graph_tables(novel_id)
+
+    has_event_selection = bool(
+        (req.existing_event_id or "").strip()
+        or ((req.new_event_time_slot or "").strip() and (req.new_event_summary or "").strip())
+    )
+    if has_event_selection:
+        st = _apply_chapter_event_selection(st, chapter_index, req)
+        save_state(novel_id, st)
+        replace_timeline_next_edges_from_state(novel_id, st)
+
+    major_chars = [str(x).strip() for x in (pov_ids or []) if str(x).strip()]
+    major_chars.extend([str(x).strip() for x in (req.supporting_character_ids or []) if str(x).strip()])
+    if not major_chars and st.continuity.pov_character_id:
+        major_chars.append(str(st.continuity.pov_character_id).strip())
+    major_chars = [x for i, x in enumerate(major_chars) if x and x not in major_chars[:i]]
+
+    # 1) 预构建人物实体表（按当前 state 角色 + 本次主要角色占位）
+    char_map: Dict[str, Dict[str, Any]] = {}
+    for c in st.characters or []:
+        char_map[str(c.character_id)] = {
+            "character_id": c.character_id,
+            "description": c.description,
+            "current_location": c.current_location,
+            "alive": c.alive,
+            "goals": list(c.goals or []),
+            "known_facts": list(c.known_facts or []),
+        }
+    for cid in major_chars:
+        char_map.setdefault(
+            cid,
+            {
+                "character_id": cid,
+                "description": None,
+                "current_location": None,
+                "alive": None,
+                "goals": [],
+                "known_facts": [],
+            },
+        )
+    save_character_entities(novel_id, list(char_map.values()))
+
+    # 2) 预构建事件实体表（按当前 state.timeline）
+    save_event_rows(
+        novel_id,
+        [
+            {
+                "event_id": f"ev:timeline:{i}",
+                "time_slot": str(ev.time_slot or "").strip(),
+                "summary": str(ev.summary or "").strip(),
+                "chapter_index": ev.chapter_index,
+            }
+            for i, ev in enumerate(st.world.timeline or [])
+        ],
+    )
+
+    chapter_time_slot = str(inferred_time_slot or st.continuity.time_slot or "未设置").strip() or "未设置"
+    event_ids = resolve_chapter_event_ids(st, chapter_index, chapter_time_slot)
+    update_chapter_table(
+        novel_id=novel_id,
+        chapter_index=chapter_index,
+        time_slot=chapter_time_slot,
+        character_ids=[f"char:{c}" for c in major_chars],
+        event_ids=event_ids,
+    )
+
+    # 预构建“主要人物 -> 本章” appear 边（标签可被后续真实章节出场信息覆盖）
+    rows = load_event_relations(novel_id)
+    target = f"ev:chapter:{chapter_index}"
+    rows = [
+        r for r in rows
+        if not (
+            str(r.get("kind", "")).strip().lower() == "appear"
+            and str(r.get("target", "")).strip() == target
+        )
+    ]
+    for c in major_chars:
+        rows.append(
+            {
+                "source": f"char:{c}",
+                "target": target,
+                "label": "主要人物",
+                "kind": "appear",
+            }
+        )
+    save_event_relations(novel_id, rows)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -188,12 +451,26 @@ def run_mode(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
     pov_ids = (req.pov_character_ids_override or [])
     if (not pov_ids) and req.pov_character_id_override:
         pov_ids = [req.pov_character_id_override]
+    llm_user_task = _build_llm_user_task(novel_id, req.user_task, req, inferred_time_slot, pov_ids)
+    st0 = load_state(novel_id)
+    pre_chapter_index = req.chapter_index or ((st0.meta.current_chapter_index + 1) if st0 else 1)
+    if req.mode in {"plan_only", "write_chapter", "revise_chapter"}:
+        try:
+            _prebuild_chapter_graph_records(
+                novel_id=novel_id,
+                req=req,
+                chapter_index=int(pre_chapter_index),
+                inferred_time_slot=inferred_time_slot,
+                pov_ids=pov_ids,
+            )
+        except Exception as e:
+            logger.warning("prebuild chapter graph records failed: %s", e)
 
     try:
         result = agent.run(
             novel_id=novel_id,
             mode=req.mode,
-            user_task=req.user_task,
+            user_task=llm_user_task,
             chapter_index=req.chapter_index,
             chapter_preset_name=req.chapter_preset_name,
             time_slot_override=inferred_time_slot,
@@ -205,6 +482,21 @@ def run_mode(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
     except Exception as e:
         logger.exception("run_mode failed novel_id=%s mode=%s", novel_id, req.mode)
         raise HTTPException(status_code=400, detail=str(e))
+
+    if req.mode in {"plan_only", "write_chapter", "revise_chapter"} and result.chapter_index is not None:
+        has_event_selection = bool(
+            (req.existing_event_id or "").strip()
+            or ((req.new_event_time_slot or "").strip() and (req.new_event_summary or "").strip())
+        )
+        if has_event_selection:
+            st_now = load_state(novel_id)
+            ch_now = load_chapter(novel_id, int(result.chapter_index))
+            if st_now and ch_now:
+                st_now = _apply_chapter_event_selection(st_now, int(result.chapter_index), req)
+                save_state(novel_id, st_now)
+                ensure_graph_tables(novel_id)
+                replace_timeline_next_edges_from_state(novel_id, st_now)
+                sync_chapter_table_from_record(novel_id, ch_now, state=st_now)
 
     resp: Dict[str, Any] = {
         "novel_id": novel_id,
@@ -231,11 +523,12 @@ def preview_mode_input(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
     pov_ids = (req.pov_character_ids_override or [])
     if (not pov_ids) and req.pov_character_id_override:
         pov_ids = [req.pov_character_id_override]
+    llm_user_task = _build_llm_user_task(novel_id, req.user_task, req, inferred_time_slot, pov_ids)
     try:
         return agent.preview_input(
             novel_id=novel_id,
             mode=req.mode,
-            user_task=req.user_task,
+            user_task=llm_user_task,
             chapter_index=req.chapter_index,
             time_slot_override=inferred_time_slot,
             manual_time_slot=manual_time_slot,
@@ -277,6 +570,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
         pov_ids = (req.pov_character_ids_override or [])
         if (not pov_ids) and req.pov_character_id_override:
             pov_ids = [req.pov_character_id_override]
+        llm_user_task = _build_llm_user_task(novel_id, req.user_task, req, inferred_time_slot, pov_ids)
 
         try:
             # 这里对 write_chapter 做“正文流式”，其它模式走一次性结果但也会发阶段事件。
@@ -288,44 +582,30 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                 # 让 agent.run() 自己处理自动 init_state；我们这里需要拿到 plan 才能流式写正文
                 # 因此：先调用 agent.run(mode=plan_only) 得到 plan+state，再流式写，然后手动落盘逻辑由 agent.run 做。
                 # 但为了复用现有落盘，我们改成：直接复用 agent.plan_chapter + agent.write_chapter_text_stream + 手动保存，与 agent.run 保持一致。
-                from agents.storage import load_state, save_chapter, save_state
+                from agents.storage import load_state
                 from agents.state_models import ChapterRecord
-                from datetime import datetime
 
-                # 确保初始化
                 st = load_state(novel_id)
-                if st and (not st.meta.initialized) and req.mode in {"write_chapter", "revise_chapter"}:
-                    if await _disconnected():
-                        logger.info("run_stream disconnected before auto_init. novel_id=%s", novel_id)
-                        return
-                    yield _sse_pack("phase", {"name": "auto_init"})
-                    init_usage: Dict[str, Any] = {}
-                    for item in agent.init_state_stream(
-                        novel_id=novel_id,
-                        user_task=f"（自动初始化）{req.user_task}",
-                        lore_tags=req.lore_tags,
-                    ):
-                        if await _disconnected():
-                            logger.info("run_stream disconnected during auto_init stream. novel_id=%s", novel_id)
-                            return
-                        txt = str(item.get("delta", "") or "")
-                        if txt:
-                            yield _sse_pack("init_content", {"delta": txt})
-                        um = item.get("usage_metadata") or {}
-                        if isinstance(um, dict) and um:
-                            init_usage = um
-                    if init_usage:
-                        yield _sse_pack("phase", {"name": "auto_init", "status": "done", "usage_metadata": init_usage})
-                    st = load_state(novel_id)
-
                 if not st:
                     raise ValueError("novel not found")
+                if not st.meta.initialized:
+                    raise ValueError("state not initialized. please run init_state first")
 
                 chapter_index = req.chapter_index or (st.meta.current_chapter_index + 1)
+                try:
+                    _prebuild_chapter_graph_records(
+                        novel_id=novel_id,
+                        req=req,
+                        chapter_index=int(chapter_index),
+                        inferred_time_slot=inferred_time_slot,
+                        pov_ids=pov_ids,
+                    )
+                except Exception as e:
+                    logger.warning("prebuild chapter graph records failed(stream): %s", e)
                 plan_json: Optional[Dict[str, Any]] = None
                 for item in agent.plan_chapter_stream(
                     novel_id=novel_id,
-                    user_task=req.user_task,
+                    user_task=llm_user_task,
                     chapter_index=chapter_index,
                     time_slot_override=inferred_time_slot,
                     pov_character_ids_override=pov_ids,
@@ -349,6 +629,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     plan.next_state = NovelAgent.merge_state(st, plan.next_state)  # type: ignore
                 except Exception as e:
                     logger.warning("merge_state failed in stream save: %s", e)
+                plan.next_state = _apply_chapter_event_selection(plan.next_state, chapter_index, req)
 
                 yield _sse_pack("phase", {"name": "writing", "chapter_index": chapter_index})
                 parts: List[str] = []
@@ -356,7 +637,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                 for item in agent.write_chapter_text_stream(
                     novel_id=novel_id,
                     plan=plan,
-                    user_task=req.user_task,
+                    user_task=llm_user_task,
                     include_chapter_context=(not manual_time_slot),
                     lore_tags=req.lore_tags,
                     time_slot_hint=inferred_time_slot,
@@ -390,12 +671,13 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     content=content_text,
                     usage_metadata=usage_meta,
                 )
-                save_chapter(novel_id, record, chapter_preset_name=req.chapter_preset_name)
-
                 next_state = plan.next_state
-                next_state.meta.current_chapter_index = chapter_index
-                next_state.meta.updated_at = datetime.utcnow()
-                save_state(novel_id, next_state)
+                persist_chapter_artifacts(
+                    novel_id=novel_id,
+                    chapter=record,
+                    next_state=next_state,
+                    chapter_preset_name=req.chapter_preset_name,
+                )
 
                 # 同步写出纯文本到 outputs/（保持脚本版的落盘习惯）
                 try:
@@ -419,7 +701,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     yield _sse_pack("phase", {"name": "next_status"})
                     next_status = agent.suggest_next_status(
                         novel_id=novel_id,
-                        user_task=req.user_task,
+                        user_task=llm_user_task,
                         chapter_index=chapter_index,
                         latest_content=content_text,
                     )
@@ -446,10 +728,22 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     logger.info("run_stream disconnected before non-stream run. novel_id=%s mode=%s", novel_id, req.mode)
                     return
                 yield _sse_pack("phase", {"name": "running"})
+                stx = load_state(novel_id)
+                chapter_index = req.chapter_index or ((stx.meta.current_chapter_index + 1) if stx else 1)
+                try:
+                    _prebuild_chapter_graph_records(
+                        novel_id=novel_id,
+                        req=req,
+                        chapter_index=int(chapter_index),
+                        inferred_time_slot=inferred_time_slot,
+                        pov_ids=pov_ids,
+                    )
+                except Exception as e:
+                    logger.warning("prebuild chapter graph records failed(non-stream): %s", e)
                 result = agent.run(
                     novel_id=novel_id,
                     mode=req.mode,
-                    user_task=req.user_task,
+                    user_task=llm_user_task,
                     chapter_index=req.chapter_index,
                     chapter_preset_name=req.chapter_preset_name,
                     time_slot_override=inferred_time_slot,
@@ -458,6 +752,20 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     supporting_character_ids=(req.supporting_character_ids or []),
                     lore_tags=req.lore_tags,
                 )
+                if req.mode in {"plan_only", "write_chapter", "revise_chapter"} and result.chapter_index is not None:
+                    has_event_selection = bool(
+                        (req.existing_event_id or "").strip()
+                        or ((req.new_event_time_slot or "").strip() and (req.new_event_summary or "").strip())
+                    )
+                    if has_event_selection:
+                        st_now = load_state(novel_id)
+                        ch_now = load_chapter(novel_id, int(result.chapter_index))
+                        if st_now and ch_now:
+                            st_now = _apply_chapter_event_selection(st_now, int(result.chapter_index), req)
+                            save_state(novel_id, st_now)
+                            ensure_graph_tables(novel_id)
+                            replace_timeline_next_edges_from_state(novel_id, st_now)
+                            sync_chapter_table_from_record(novel_id, ch_now, state=st_now)
                 state_obj = load_state(novel_id)
                 yield _sse_pack(
                     "done",
@@ -561,6 +869,10 @@ def get_novel_graph(novel_id: str, view: str = "mixed"):
     if view not in {"people", "events", "mixed"}:
         raise HTTPException(status_code=400, detail="view must be one of: people, events, mixed")
 
+    ensure_graph_tables(novel_id)
+    char_relations = load_character_relations(novel_id)
+    event_relations = load_event_relations(novel_id)
+
     nodes: List[Dict[str, Any]] = []
     edges: List[Dict[str, Any]] = []
     node_ids: set[str] = set()
@@ -588,13 +900,14 @@ def get_novel_graph(novel_id: str, view: str = "mixed"):
             cid = c.character_id
             add_node(f"char:{cid}", cid, "character", {"data": c.model_dump(mode="json")})
 
-        # relationships: {other_id/name: relation}
-        for c in state.characters:
-            src = f"char:{c.character_id}"
-            for other, rel in (c.relationships or {}).items():
-                tgt = f"char:{other}"
-                add_node(tgt, other, "character")
-                add_edge(src, tgt, rel, "relationship")
+        for r in char_relations:
+            src = str(r.get("source", "")).strip()
+            tgt = str(r.get("target", "")).strip()
+            if not (src.startswith("char:") and tgt.startswith("char:")):
+                continue
+            add_node(src, src.split("char:", 1)[1], "character")
+            add_node(tgt, tgt.split("char:", 1)[1], "character")
+            add_edge(src, tgt, str(r.get("label", "")), "relationship")
 
     # ---- 事件节点（时间线 + 章节）----
     if view in {"events", "mixed"}:
@@ -604,9 +917,27 @@ def get_novel_graph(novel_id: str, view: str = "mixed"):
             label = f"{ev.time_slot}：{ev.summary}"
             add_node(eid, label, "timeline_event", {"data": ev.model_dump(mode="json")})
 
-        # timeline ordering edges (events-only makes this more meaningful)
-        for idx in range(0, max(0, len(state.world.timeline or []) - 1)):
-            add_edge(f"ev:timeline:{idx}", f"ev:timeline:{idx+1}", "时间推进", "timeline_next")
+        # timeline_next / appear 来自事件关系表
+        for i, r in enumerate(event_relations):
+            kind = str(r.get("kind", "")).strip().lower()
+            if kind not in {"timeline_next", "appear"}:
+                continue
+            src = str(r.get("source", "") or "").strip()
+            tgt = str(r.get("target", "") or "").strip()
+            label = str(r.get("label", "") or ("时间推进" if kind == "timeline_next" else "出场"))
+            if kind == "timeline_next":
+                if not src:
+                    src = f"ev:timeline:draft_src:{i}"
+                    add_node(src, "（待定起点）", "timeline_event", {"data": {"time_slot": "待定", "summary": "待完善"}})
+                if not tgt:
+                    tgt = f"ev:timeline:draft_tgt:{i}"
+                    add_node(tgt, "（待定终点）", "timeline_event", {"data": {"time_slot": "待定", "summary": "待完善"}})
+                add_edge(src, tgt, label, "timeline_next")
+            elif kind == "appear" and view == "mixed":
+                if src and src.startswith("char:"):
+                    add_node(src, src.split("char:", 1)[1], "character")
+                if tgt and tgt.startswith("ev:chapter:"):
+                    add_edge(src, tgt, label, "appear")
 
         # chapter events: from saved chapters
         for chap in list_chapters(novel_id):
@@ -614,12 +945,20 @@ def get_novel_graph(novel_id: str, view: str = "mixed"):
             label = f"章节事件 · {chap.time_slot}"
             add_node(cid, label, "chapter_event", {"data": chap.model_dump(mode="json")})
 
-            # events 视图：不混入人物节点；mixed 视图才连“人物出场 -> 章节事件”
-            if view == "mixed":
-                for pres in chap.who_is_present or []:
-                    ch_id = f"char:{pres.character_id}"
-                    add_node(ch_id, pres.character_id, "character")
-                    add_edge(ch_id, cid, pres.role_in_scene or "出场", "appear")
+            # chapter_belongs：按 timeline.chapter_index / time_slot 匹配
+            timeline_idx = -1
+            for ti, ev in enumerate(state.world.timeline or []):
+                if ev.chapter_index == chap.chapter_index:
+                    timeline_idx = ti
+                    break
+            if timeline_idx < 0:
+                ts = str(chap.time_slot or "").strip()
+                for ti, ev in enumerate(state.world.timeline or []):
+                    if str(ev.time_slot or "").strip() == ts:
+                        timeline_idx = ti
+                        break
+            if timeline_idx >= 0:
+                add_edge(cid, f"ev:timeline:{timeline_idx}", "属于事件", "chapter_belongs")
 
     # ---- 势力节点（world.factions） ----
     if view == "mixed":
@@ -628,6 +967,267 @@ def get_novel_graph(novel_id: str, view: str = "mixed"):
             add_node(fid, fname, "faction", {"data": {"description": fdesc}})
 
     return {"view": view, "nodes": nodes, "edges": edges}
+
+
+class GraphNodePatchRequest(BaseModel):
+    node_id: str
+    patch: Dict[str, Any]
+
+
+@app.patch("/api/novels/{novel_id}/graph/node")
+def patch_graph_node(novel_id: str, req: GraphNodePatchRequest):
+    state = load_state(novel_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="novel not found")
+    node_id = (req.node_id or "").strip()
+    patch = req.patch or {}
+
+    if node_id.startswith("char:"):
+        cid = node_id.split("char:", 1)[1].strip()
+        hit = None
+        for c in state.characters or []:
+            if c.character_id == cid:
+                hit = c
+                break
+        if not hit:
+            raise HTTPException(status_code=404, detail="character not found")
+        if "description" in patch:
+            hit.description = str(patch.get("description") or "").strip() or hit.description
+        if "current_location" in patch:
+            hit.current_location = str(patch.get("current_location") or "").strip() or hit.current_location
+        if "goals" in patch:
+            v = patch.get("goals")
+            if isinstance(v, list):
+                hit.goals = [str(x).strip() for x in v if str(x).strip()]
+            else:
+                txt = str(v or "").strip()
+                hit.goals = [s.strip() for s in txt.splitlines() if s.strip()] if txt else []
+        if "known_facts" in patch:
+            v = patch.get("known_facts")
+            if isinstance(v, list):
+                hit.known_facts = [str(x).strip() for x in v if str(x).strip()]
+            else:
+                txt = str(v or "").strip()
+                hit.known_facts = [s.strip() for s in txt.splitlines() if s.strip()] if txt else []
+        save_state(novel_id, state)
+        return {"ok": True, "node_id": node_id}
+
+    if node_id.startswith("fac:"):
+        fname = node_id.split("fac:", 1)[1].strip()
+        if not fname:
+            raise HTTPException(status_code=400, detail="invalid faction id")
+        if state.world.factions is None:
+            state.world.factions = {}
+        if "description" in patch:
+            state.world.factions[fname] = str(patch.get("description") or "").strip()
+        save_state(novel_id, state)
+        return {"ok": True, "node_id": node_id}
+
+    if node_id.startswith("ev:timeline:"):
+        raw = node_id.split("ev:timeline:", 1)[1].strip()
+        try:
+            idx = int(raw)
+        except Exception:
+            raise HTTPException(status_code=400, detail="invalid timeline index")
+        if not (0 <= idx < len(state.world.timeline or [])):
+            raise HTTPException(status_code=404, detail="timeline event not found")
+        ev = state.world.timeline[idx]
+        if "time_slot" in patch:
+            ev.time_slot = str(patch.get("time_slot") or "").strip() or ev.time_slot
+        if "summary" in patch:
+            ev.summary = str(patch.get("summary") or "").strip() or ev.summary
+        save_state(novel_id, state)
+        ensure_graph_tables(novel_id)
+        replace_timeline_next_edges_from_state(novel_id, state)
+        return {"ok": True, "node_id": node_id}
+
+    raise HTTPException(status_code=400, detail="unsupported node_id")
+
+
+class GraphRelationshipRequest(BaseModel):
+    source: str
+    target: str
+    label: str = ""
+    op: str = "set"  # set | delete
+
+
+@app.post("/api/novels/{novel_id}/graph/relationship")
+def upsert_graph_relationship(novel_id: str, req: GraphRelationshipRequest):
+    state = load_state(novel_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="novel not found")
+    ensure_graph_tables(novel_id)
+    src = (req.source or "").strip()
+    tgt = (req.target or "").strip()
+    if (not src.startswith("char:")) or (not tgt.startswith("char:")):
+        raise HTTPException(status_code=400, detail="source/target must be char:{id}")
+
+    op = (req.op or "set").strip().lower()
+    label = str(req.label or "").strip()
+    rows = load_character_relations(novel_id)
+    rows = [
+        r for r in rows
+        if not (
+            str(r.get("kind", "")).strip().lower() == "relationship"
+            and str(r.get("source", "")).strip() == src
+            and str(r.get("target", "")).strip() == tgt
+        )
+    ]
+    if op != "delete":
+        if not label:
+            raise HTTPException(status_code=400, detail="label is required for set")
+        rows.append({"source": src, "target": tgt, "label": label, "kind": "relationship"})
+    save_character_relations(novel_id, rows)
+    return {"ok": True}
+
+
+class TimelineNeighborsRequest(BaseModel):
+    node_id: str
+    prev_source: Optional[str] = None   # ev:timeline:* or ""
+    next_target: Optional[str] = None   # ev:timeline:* or ""
+
+
+@app.patch("/api/novels/{novel_id}/graph/timeline-neighbors")
+def patch_timeline_neighbors(novel_id: str, req: TimelineNeighborsRequest):
+    state = load_state(novel_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="novel not found")
+    ensure_graph_tables(novel_id)
+
+    node_id = (req.node_id or "").strip()
+    if not node_id.startswith("ev:timeline:"):
+        raise HTTPException(status_code=400, detail="node_id must be ev:timeline:*")
+    prev_source = (req.prev_source or "").strip()
+    next_target = (req.next_target or "").strip()
+
+    rows = load_event_relations(novel_id)
+    rows = [
+        r for r in rows
+        if not (
+            str(r.get("kind", "")).strip().lower() == "timeline_next"
+            and (str(r.get("source", "")).strip() == node_id or str(r.get("target", "")).strip() == node_id)
+        )
+    ]
+    if prev_source:
+        rows.append({"source": prev_source, "target": node_id, "label": "时间推进", "kind": "timeline_next"})
+    rows.append(
+        {
+            "source": node_id,
+            "target": next_target,
+            "label": ("待完善" if not next_target else "时间推进"),
+            "kind": "timeline_next",
+        }
+    )
+    save_event_relations(novel_id, rows)
+    replace_timeline_next_edges_from_state(novel_id, state)
+    return {"ok": True}
+
+
+class GraphEdgePatchRequest(BaseModel):
+    edge_type: str  # relationship | appear | timeline_next | chapter_belongs
+    source: str
+    target: str
+    new_source: Optional[str] = None
+    new_target: Optional[str] = None
+    label: Optional[str] = None
+    op: str = "set"  # set | delete
+
+
+@app.patch("/api/novels/{novel_id}/graph/edge")
+def patch_graph_edge(novel_id: str, req: GraphEdgePatchRequest):
+    """
+    图谱边编辑（基于三表真源）。
+    - relationship: 人物关系表
+    - appear: 事件关系表（char -> ev:chapter）
+    - timeline_next: 事件关系表（ev:timeline -> ev:timeline 或空 target）
+    - chapter_belongs: 章节归属事件（ev:chapter -> ev:timeline 或空表示取消）
+    """
+    state = load_state(novel_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="novel not found")
+    ensure_graph_tables(novel_id)
+
+    et = (req.edge_type or "").strip().lower()
+    src = (req.source or "").strip()
+    tgt = (req.target or "").strip()
+    nsrc = (req.new_source or src).strip()
+    ntgt = (req.new_target or tgt).strip()
+    op = (req.op or "set").strip().lower()
+    label = (req.label or "").strip()
+
+    if et == "relationship":
+        if not (src.startswith("char:") and tgt.startswith("char:") and nsrc.startswith("char:") and ntgt.startswith("char:")):
+            raise HTTPException(status_code=400, detail="relationship requires char:* -> char:*")
+        rows = load_character_relations(novel_id)
+        rows = [
+            r for r in rows
+            if not (
+                str(r.get("kind", "")).strip().lower() == "relationship"
+                and str(r.get("source", "")).strip() == src
+                and str(r.get("target", "")).strip() == tgt
+            )
+        ]
+        if op != "delete":
+            if not label:
+                raise HTTPException(status_code=400, detail="label is required for relationship set")
+            rows.append({"source": nsrc, "target": ntgt, "label": label, "kind": "relationship"})
+        save_character_relations(novel_id, rows)
+        return {"ok": True}
+
+    if et in {"appear", "timeline_next"}:
+        rows = load_event_relations(novel_id)
+        rows = [
+            r for r in rows
+            if not (
+                str(r.get("kind", "")).strip().lower() == et
+                and str(r.get("source", "")).strip() == src
+                and str(r.get("target", "")).strip() == tgt
+            )
+        ]
+        if op != "delete":
+            rows.append(
+                {
+                    "source": nsrc,
+                    "target": ntgt,
+                    "label": (label or ("待完善" if (et == "timeline_next" and (not nsrc or not ntgt)) else "")),
+                    "kind": et,
+                }
+            )
+        save_event_relations(novel_id, rows)
+        return {"ok": True}
+
+    if et == "chapter_belongs":
+        if not nsrc.startswith("ev:chapter:"):
+            raise HTTPException(status_code=400, detail="chapter_belongs source must be ev:chapter:*")
+        try:
+            chap_idx = int(nsrc.split("ev:chapter:", 1)[1].strip())
+        except Exception:
+            raise HTTPException(status_code=400, detail="invalid chapter source")
+
+        # 解绑：清理所有 timeline 事件上对该章的绑定
+        for ev in state.world.timeline or []:
+            if ev.chapter_index == chap_idx:
+                ev.chapter_index = None
+
+        if op != "delete" and ntgt:
+            if not ntgt.startswith("ev:timeline:"):
+                raise HTTPException(status_code=400, detail="chapter_belongs target must be ev:timeline:* or empty")
+            try:
+                t_idx = int(ntgt.split("ev:timeline:", 1)[1].strip())
+            except Exception:
+                raise HTTPException(status_code=400, detail="invalid timeline target")
+            if not (0 <= t_idx < len(state.world.timeline or [])):
+                raise HTTPException(status_code=404, detail="timeline event not found")
+            state.world.timeline[t_idx].chapter_index = chap_idx
+
+        save_state(novel_id, state)
+        replace_timeline_next_edges_from_state(novel_id, state)
+        chap = load_chapter(novel_id, chap_idx)
+        if chap:
+            sync_chapter_table_from_record(novel_id, chap, state=state)
+        return {"ok": True}
+
+    raise HTTPException(status_code=400, detail="unsupported edge_type")
 
 
 @app.get("/api/novels")

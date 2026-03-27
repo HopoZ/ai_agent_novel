@@ -40,6 +40,22 @@ class RunModeRequest(BaseModel):
     insert_anchor_id: Optional[str] = Field(
         default=None, description="（deprecated）旧字段：单锚点 ev:timeline:X / ev:chapter:Y"
     )
+    # 新时序语义：章节归属事件（已有/新建）
+    existing_event_id: Optional[str] = Field(
+        default=None, description="章节归属的已有事件（ev:timeline:X）"
+    )
+    new_event_time_slot: Optional[str] = Field(
+        default=None, description="新建事件的 time_slot"
+    )
+    new_event_summary: Optional[str] = Field(
+        default=None, description="新建事件的 summary"
+    )
+    new_event_prev_id: Optional[str] = Field(
+        default=None, description="新建事件的上一事件（ev:timeline:X）"
+    )
+    new_event_next_id: Optional[str] = Field(
+        default=None, description="新建事件的下一事件（ev:timeline:X）"
+    )
     time_slot_override: Optional[str] = None
     # 新字段：主视角可多选（表示与本章最相关核心人物）
     pov_character_ids_override: Optional[List[str]] = None

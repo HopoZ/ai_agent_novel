@@ -62,6 +62,23 @@ class WorldState(BaseModel):
     timeline: List[TimelineEvent] = Field(default_factory=list)
     open_questions: List[str] = Field(default_factory=list)
 
+    @field_validator("factions", mode="before")
+    @classmethod
+    def _coerce_factions(cls, v):
+        # 兼容 LLM 输出：factions: [{"name":"xx","description":"yy"}, ...]
+        if v is None:
+            return {}
+        if isinstance(v, list):
+            out: Dict[str, str] = {}
+            for item in v:
+                if isinstance(item, dict):
+                    name = str(item.get("name") or "").strip()
+                    desc = str(item.get("description") or "").strip()
+                    if name:
+                        out[name] = desc
+            return out
+        return v
+
     @field_validator("timeline", mode="before")
     @classmethod
     def _coerce_timeline(cls, v):

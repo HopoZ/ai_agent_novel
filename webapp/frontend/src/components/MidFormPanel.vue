@@ -37,59 +37,87 @@
 
           <el-form-item label="模式">
             <el-select v-model="form.mode" placeholder="选择运行模式">
-              <el-option label="生成本章初始人物/世界状态" value="init_state" />
-              <el-option label="只生成本章要点并更新世界状态" value="plan_only" />
-              <el-option label="生成正文并更新世界状态" value="write_chapter" />
-              <el-option label="修订指定章节（MVP：仍走规划+写作）" value="revise_chapter" />
+              <el-option label="初始化：生成初始状态（state.json）" value="init_state" />
+              <el-option label="只规划：生成 beats + next_state，并落盘章节记录/三表" value="plan_only" />
+              <el-option label="写正文：规划 + 写作，并落盘章节/状态/三表（推荐）" value="write_chapter" />
+              <el-option label="修订章节：按规划+写作重写指定章（MVP）" value="revise_chapter" />
             </el-select>
           </el-form-item>
         </el-collapse-item>
 
         <el-collapse-item name="timeline" title="时序">
-          <el-form-item label="插入位置 / 时间段（二选一）">
-            <el-radio-group v-model="form.insertMode" class="choice-cards">
-              <el-radio-button label="anchors">插入到事件网（选择锚点）</el-radio-button>
-              <el-radio-button label="time">手动填写时间段</el-radio-button>
+          <el-form-item label="章节归属事件（二选一）">
+            <el-radio-group v-model="form.eventMode" class="choice-cards">
+              <el-radio-button label="existing">归属到已有事件</el-radio-button>
+              <el-radio-button label="new">新建事件并归属</el-radio-button>
             </el-radio-group>
             <div class="muted" style="margin-top:6px;">
-              二选一：选“插入到事件网”则按锚点推导时间段；选“手动时间段”则忽略锚点。
+              章节必须归属一个事件：可直接选择已有事件，或新建一个事件并指定它位于哪些事件前后。
             </div>
           </el-form-item>
 
-          <template v-if="form.insertMode === 'anchors'">
-            <el-form-item label="插入在这件事之后（可选）">
+          <template v-if="form.eventMode === 'existing'">
+            <el-form-item label="选择已有事件（时间线事件）">
               <el-select
-                v-model="form.insertAfterId"
+                v-model="form.existingEventId"
                 :loading="anchorsLoading"
                 clearable
-                placeholder="选择一件“之前发生的事”作为下界（after）"
+                placeholder="选择本章归属的已有事件"
                 style="width:100%;"
               >
-                <el-option v-for="a in anchors" :key="a.id" :label="a.label" :value="a.id" />
+                <el-option
+                  v-for="a in anchors.filter((x:any) => String(x?.id || '').startsWith('ev:timeline:'))"
+                  :key="a.id"
+                  :label="a.label"
+                  :value="a.id"
+                />
               </el-select>
-            </el-form-item>
-
-            <el-form-item label="插入在这件事之前（可选）">
-              <el-select
-                v-model="form.insertBeforeId"
-                :loading="anchorsLoading"
-                clearable
-                placeholder="选择一件“之后发生的事”作为上界（before）"
-                style="width:100%;"
-              >
-                <el-option v-for="a in anchors" :key="a.id" :label="a.label" :value="a.id" />
-              </el-select>
-              <div class="muted" style="margin-top:6px;">
-                推导时间段：{{ inferredTimeSlotHint || "（未选择锚点：将自动延续到最新进度）" }}
-              </div>
             </el-form-item>
           </template>
 
           <template v-else>
-            <el-form-item label="时间段覆盖（手动）">
-              <el-input v-model="form.timeSlotOverride" placeholder="例如：第三年秋·傍晚 / 第七日清晨 / 某个具体阶段"></el-input>
+            <el-form-item label="新事件时间段（time_slot）">
+              <el-input v-model="form.newEventTimeSlot" placeholder="例如：战争后期·反攻前夜"></el-input>
+            </el-form-item>
+            <el-form-item label="新事件摘要（summary）">
+              <el-input v-model="form.newEventSummary" type="textarea" :rows="3" placeholder="一句话描述该事件"></el-input>
+            </el-form-item>
+            <el-form-item label="放在这个事件之后（可选）">
+              <el-select
+                v-model="form.newEventPrevId"
+                :loading="anchorsLoading"
+                clearable
+                placeholder="选择前置事件（prev）"
+                style="width:100%;"
+              >
+                <el-option
+                  v-for="a in anchors.filter((x:any) => String(x?.id || '').startsWith('ev:timeline:'))"
+                  :key="`prev-${a.id}`"
+                  :label="a.label"
+                  :value="a.id"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="放在这个事件之前（可选）">
+              <el-select
+                v-model="form.newEventNextId"
+                :loading="anchorsLoading"
+                clearable
+                placeholder="选择后置事件（next）"
+                style="width:100%;"
+              >
+                <el-option
+                  v-for="a in anchors.filter((x:any) => String(x?.id || '').startsWith('ev:timeline:'))"
+                  :key="`next-${a.id}`"
+                  :label="a.label"
+                  :value="a.id"
+                />
+              </el-select>
             </el-form-item>
           </template>
+          <div class="muted" style="margin-top:6px;">
+            预计本章时间段：{{ inferredTimeSlotHint || "（等待选择事件）" }}
+          </div>
         </el-collapse-item>
 
         <el-collapse-item name="roles" title="角色">
@@ -147,7 +175,7 @@
               v-model="form.userTask"
               type="textarea"
               :rows="7"
-              placeholder="例如：写第3章，主角与某势力冲突，要求推进世界线并更新人物关系。"
+              placeholder="例如：写第3章，主角与某势力冲突，要求推进世界线；系统会记录“章节归属事件”并关联相关人物。"
             ></el-input>
           </el-form-item>
         </el-collapse-item>
@@ -156,13 +184,10 @@
       <div class="mid-actions-sticky">
         <div style="display:flex; gap:8px; width:100%;">
           <el-button type="primary" style="flex:1;" @click="runMode" :loading="running">
-            {{ running ? "运行中..." : "运行模式" }}
+            {{ running ? "运行中..." : "生成内容" }}
           </el-button>
           <el-button v-if="running" type="danger" style="flex:1;" @click="abortRun">
             中止生成
-          </el-button>
-          <el-button style="flex:1;" @click="previewCurrentInput" :loading="previewingInput" :disabled="running">
-            查看当前 Input
           </el-button>
         </div>
       </div>
@@ -190,7 +215,6 @@ defineProps<{
   openRoleManager: () => void;
   runMode: () => void;
   abortRun: () => void;
-  previewCurrentInput: () => void;
 }>();
 </script>
 
