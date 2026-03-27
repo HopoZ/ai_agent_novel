@@ -1,72 +1,69 @@
-# AI Novel Agent
+## AI Novel Agent（README1）
 
-- 中文文档: [README.zh.md](./README.zh.md)
-- English docs: [README.en.md](./README.en.md)
+一个面向长篇网文/系列叙事的工程化写作系统。  
+系统以 `settings/*.md` 作为设定单一真实来源（SSOT），围绕 `plan -> write -> state update -> persist` 建立可持续迭代的创作闭环，并提供可观测、可回放、可维护的 Web 写作工作流。
 
-## AI Novel Agent
+## 1. 设计目标
 
-Lore-driven, stateful long-form fiction generation system.
+- **连续性优先**：写作不是“一次性生成”，而是状态机驱动的长期演进
+- **设定优先**：设定文件化、标签化、可控注入，避免设定漂移
+- **可观测优先**：输入预览、阶段事件、token 消耗全链路可见
+- **失败可恢复**：结构化输出 + patch 合并，减少长输出导致的崩溃
 
-面向长篇网文/系列小说，围绕 `settings/*.md`（SSOT）构建稳定写作闭环：
-`plan -> write -> state update -> persist`，并提供 Web 流式体验与图谱可视化。
+## 2. 系统能力矩阵
 
-## What It Solves
+### 2.1 叙事状态管理（Stateful Narrative Engine）
+- 通过 `NovelState` 持久化：
+  - 人物状态（关系、目标、已知事实、位置）
+  - 世界规则（规则、阵营、开放问题）
+  - 时间线（timeline）
+  - 连续性约束（time_slot / POV / 出场角色）
+- 存储路径：`storage/novels/<novel_id>/state.json`
 
-- 设定分散、反复漂移：以 `settings/` 作为统一设定源
-- 长文连续性难维护：以 `NovelState` 持久化人物/世界/时间线
-- 黑盒 prompt 难排查：支持输入预览与阶段化流式日志
-- token 失控：上下文裁剪 + lore 摘要缓存
+### 2.2 写作链路（Plan + Draft）
+- `plan_chapter` 生成结构化 `ChapterPlan`
+- `write_chapter_text(_stream)` 生成正文（支持流式输出）
+- 写作结果结构化落盘：`storage/novels/<id>/chapters/*.json`
+- 同步输出纯文本归档：`outputs/*.txt`
 
-## Core Features
+### 2.3 Lore 摘要与注入策略
+- 摘要由 LLM 生成（非规则抽取）
+- 摘要缓存按 **单 tag 粒度**：`llm_tag_v1`
+- 运行链路使用 `lore_tags`，不依赖 `lore_summary_id`
+- 注入策略：
+  1. 优先命中每个 tag 的摘要缓存
+  2. 未命中则回退该 tag 原文（信息不丢）
+- 摘要接口返回结构化结果：`tag_summaries: [{ tag, summary }]`
 
-- **Stateful writing loop**: `NovelState` 持久化并逐章演进
-- **SSE streaming**: `planning/auto_init/writing/saving/done`
-- **Structured + fault-tolerant**: JSON repair + `next_state` patch merge
-- **Lore summary pipeline**:
-  - LLM 摘要（非规则抽取）
-  - 单 tag 粒度缓存（`llm_tag_v1`）
-  - 未命中缓存自动回退原文，避免信息丢失
-- **Prompt observability**: `/preview_input` 查看真实拼装输入
-- **Graph view**: `people / events / mixed`
-- **Token usage display**: 前端显示 auto_init 与正文阶段 token
+### 2.4 上下文压缩策略
+- 默认仅注入相邻相关两章
+- 手动设置 `time_slot_override` 时，不注入章节 JSON 上下文
+- 章节 JSON `content` 不作为核心上下文输入，避免 token 爆炸
 
-## Run Modes
+### 2.5 可观测性与交互
+- SSE 阶段事件：`planning -> auto_init -> writing -> saving -> done`
+- 前端展示 auto_init 与正文 token 消耗
+- `/preview_input` 可查看本次真实拼装输入
+- 悬浮预览 `compact=1` 显示 tag 摘要（无缓存提示先生成）
+- 图谱视图：`people / events / mixed`
 
-| Mode | Description |
+## 3. 运行模式
+
+| Mode | 语义 |
 |---|---|
 | `init_state` | 初始化世界状态 |
-| `plan_only` | 只生成章节规划并更新状态 |
+| `plan_only` | 仅生成章节规划并推进状态 |
 | `write_chapter` | 规划 + 正文生成 + 落盘 |
 | `revise_chapter` | 修订（当前沿用规划+写作链路） |
 
-## Lore & Context Strategy
-
-### Lore injection
-
-- 运行链路基于 `lore_tags`（不依赖 `lore_summary_id`）
-- 每个 tag 优先读取摘要缓存；未命中回退该 tag 原文
-- “生成当前Tag摘要”按当前勾选 tags 主动生成
-- 摘要返回结构化 `tag_summaries: [{ tag, summary }]`
-
-### Chapter context
-
-- 默认仅注入相邻相关两章
-- 手动设置 `time_slot_override` 时不注入章节 JSON 上下文
-- 章节 JSON 的 `content` 不进入核心上下文，降低 token 压力
-
-### Hover preview
-
-- `compact=1` 显示 tag 摘要预览
-- 若该 tag 尚无摘要缓存，提示先生成摘要
-
-## Architecture
+## 4. 架构分层
 
 ```text
 [Presentation]
 Vue3 + Element Plus + ECharts
-  - Tag selector / Role control
-  - SSE streaming UI
-  - Graph visualization
+  - 标签树/角色选择/输入预览
+  - SSE 流式正文
+  - 图谱可视化
         |
         v
 [API]
@@ -92,360 +89,64 @@ storage/novels/<id>/{state.json, chapters/*.json}
 outputs/*.txt
 ```
 
-## Quick Start
+## 5. 关键数据资产
 
-### 1) Install
+- `settings/**/*.md`：静态设定源
+- `storage/lore_summaries/*.json`：tag 摘要缓存
+- `storage/novels/<id>/state.json`：长期叙事状态
+- `storage/novels/<id>/chapters/*.json`：章节结构化记录
+- `outputs/*.txt`：正文归档
 
+## 6. 接口总览（高频）
+
+- `POST /api/lore/summary/build`
+  - 入参：`{ tags: string[], force?: boolean }`
+  - 返回：`tag_summaries`
+- `GET /api/lore/preview?tag=...&compact=1`
+  - 返回指定 tag 摘要预览
+- `POST /api/novels/{novel_id}/run_stream`
+  - SSE 流式执行
+- `POST /api/novels/{novel_id}/preview_input`
+  - 返回本次组装输入（不调用模型）
+
+## 7. 快速开始
+
+### 7.1 安装依赖
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2) Configure key
-
-Create `.env` in project root:
-
+### 7.2 配置密钥
+在项目根目录创建 `.env`：
 ```bash
 DEEPSEEK_API_KEY=<your_api_key>
 ```
 
-### 3) Prepare lore files
+### 7.3 准备设定
+把 Markdown 设定放入 `settings/`（目录路径即标签空间）。
 
-Put markdown lore files under `settings/`:
-
-```text
-settings/
-  角色/男主.md
-  角色/女主.md
-  世界/等级设定.md
-  世界/辅助体系.md
-```
-
-### 4) Run server
-
+### 7.4 启动服务
 ```bash
 python -m uvicorn webapp.server:app --reload --port 8000
 ```
+访问：`http://127.0.0.1:8000/`
 
-Open: `http://127.0.0.1:8000/`
+## 8. 常见问题
 
-## Project Layout
+### 8.1 为什么 token 依然偏高
+- lore 体积仍可能较大（尤其未命中摘要缓存时）
+- 任务描述过长会放大 state/lore 注入体积
+- 建议先生成 tag 摘要，再执行章节生成
 
-```text
-agents/
-  novel_agent.py
-  lore_summary.py
-  storage.py
+## 9. 工程实践建议
 
-webapp/
-  server.py
-  frontend/
+- **先摘要后写作**：先执行“生成当前Tag摘要”，再运行章节生成
+- **按章控范围**：每章任务仅描述本章目标，避免跨多章超大任务
+- **周期性回看输入**：用 `/preview_input` 验证拼装内容是否超量
+- **以 state 为事实源**：避免在自由文本中重复定义核心设定
 
-storage/
-  novels/
-  lore_summaries/
+## 10. 许可证
 
-settings/
-outputs/
-```
+- AGPL-3.0-or-later（见 `LICENSE`）
+- 作者信息见 `NOTICE`
 
-## Common Issue
-
-### WinError 2 (`npm` not found on startup)
-
-Cause: uvicorn process PATH differs from interactive terminal PATH.
-
-Current behavior:
-- Windows startup build prefers `npm.cmd`
-- If not found, server logs warning and skips auto frontend build
-
-## License
-
-- AGPL-3.0-or-later (`LICENSE`)
-- Author info: `NOTICE`
-
-🚀 AI Novel Agent
-A Lore-driven, Stateful Long-form Fiction Generation System
-
-    设定驱动 · 状态持续 · 流式写作 · 可观测输入 · 图谱可视化
-
-📌 Overview（项目简介）
-
-AI Novel Agent 是一个面向长篇网文 / 系列小说的 工程化写作系统（Engineering-grade Writing System）。
-
-系统以：
-
-    settings/*.md 作为 单一真实来源（SSOT, Single Source of Truth）
-
-    构建 规划 → 写作 → 状态更新 → 持久化 的闭环
-
-    支持 长上下文稳定写作（Long-horizon consistency）
-
-并提供：
-
-    🌐 Web 流式写作体验（SSE Streaming）
-
-    🧠 状态持久化（Stateful Narrative Engine）
-
-    🕸️ 知识图谱可视化（Narrative Graph）
-
-✨ Highlights（核心亮点）
-🧠 1. Lorebook-first 架构（设定驱动）
-
-    所有设定集中在 settings/
-
-    按 tag 精确注入模型上下文
-
-    避免：
-
-    ❌ 设定散落在 prompt
-    ❌ 多轮对话导致设定漂移（Lore Drift）
-
-🔄 2. Stateful Writing Loop（状态驱动写作循环）
-
-核心状态模型：
-
-NovelState（持久化）
-├─ characters（人物状态）
-├─ world（世界设定）
-├─ timeline（时间线）
-└─ continuity（连续性约束）
-
-👉 持久化位置：
-
-storage/novels/<id>/state.json
-
-⚡ 3. 流式写作体验（SSE Streaming）
-
-后端通过 Server-Sent Events (SSE) 推送：
-
-planning → auto_init → writing → saving → done
-
-前端实时展示：
-
-    正文生成（token streaming）
-
-    阶段状态（phase-aware UI）
-
-🧱 4. 结构化输出 + 容错（Structured + Fault-tolerant）
-
-LLM 输出：
-
-JSON
-{
-  "content": "...",
-  "next_state": { "patch": ... }
-}
-
-关键机制：
-
-    ✅ JSON repair（自动修复）
-
-    ✅ patch merge（状态增量更新）
-
-    ✅ 避免长 JSON 截断崩溃
-
-🧾 5. Lore Summary Pipeline（设定摘要系统）
-核心策略：
-
-    单 tag 粒度缓存（granular caching）
-
-    LLM 生成摘要（非规则压缩）
-
-    fallback 原文（信息不丢）
-
-storage/lore_summaries/*.json
-
-👁️ 6. 输入可观测（Prompt Observability）
-
-支持：
-
-/preview_input
-
-👉 可以看到：
-
-    实际喂给模型的 prompt
-
-    lore 注入内容
-
-    上下文拼接方式
-
-🕸️ 7. Narrative Graph（知识图谱）
-
-三种视图：
-
-    👤 people（人物关系）
-
-    📜 events（事件流）
-
-    🔀 mixed（混合）
-
-技术栈：
-
-    后端：Graph Aggregation
-
-    前端：ECharts Force Graph
-
-🏗️ Architecture（系统架构）
-
-[ Presentation Layer ]
-Vue3 + Element Plus + ECharts
- ├─ Tag Selector / Role Control
- ├─ SSE Streaming UI
- └─ Graph Visualization
-
-            ↓ REST + SSE
-
-[ API Layer ]
-FastAPI (webapp/server.py)
- ├─ /api/novels/*
- ├─ /api/lore/*
- ├─ /graph
- └─ /run_stream (SSE)
-
-            ↓
-
-[ Domain Layer ]
-NovelAgent
- ├─ plan_chapter
- ├─ write_chapter_text (stream)
- ├─ merge_state (patch)
- ├─ build_lore_summary
- └─ preview_input
-
-            ↓
-
-[ Data Layer ]
-File-based Storage
- ├─ settings/*.md
- ├─ state.json
- ├─ chapters/*.json
- └─ lore summaries
-
-🔄 Core Workflow（核心执行链路）
-
-User Input
-  ↓
-run_stream (SSE)
-  ↓
-plan_chapter
-  ↓
-write_chapter (stream)
-  ↓
-merge_state
-  ↓
-save chapter + state
-  ↓
-done
-
-🧠 Lore Injection Strategy（设定注入策略）
-优先级（Priority）
-
-    tag summary（命中缓存）
-
-    fallback 原文（未命中）
-
-上下文控制（Context Control）
-
-    默认：只注入相邻两章
-
-    手动时间覆盖：不注入章节 JSON
-
-    content 不进入核心上下文（节省 token）
-
-⚙️ Run Modes（运行模式）
-Mode	Description
-init_state	初始化世界
-plan_only	仅生成章节规划
-write_chapter	完整生成
-revise_chapter	修订
-🚀 Quick Start
-1. 安装依赖
-
-Bash
-pip install -r requirements.txt
-
-2. 配置 API Key
-
-Bash
-# .env
-DEEPSEEK_API_KEY=your_key
-
-3. 准备设定
-
-settings/
- ├─ 角色/男主.md
- ├─ 角色/女主.md
- ├─ 世界/等级.md
- └─ 世界/体系.md
-
-4. 启动服务
-
-Bash
-python -m uvicorn webapp.server:app --reload --port 8000
-
-访问：
-
-http://127.0.0.1:8000/
-
-📂 Project Structure
-
-agents/
- ├─ novel_agent.py
- ├─ lore_summary.py
- └─ storage.py
-
-webapp/
- ├─ server.py
- └─ frontend/
-
-storage/
- ├─ novels/
- └─ lore_summaries/
-
-settings/
-outputs/
-
-⚠️ Common Issues（常见问题）
-❗ WinError 2（npm 找不到）
-
-原因：
-
-    PATH 不一致
-
-    uvicorn 子进程找不到 npm
-
-解决：
-
-    使用 npm.cmd（已兼容）
-
-    或手动 build frontend
-
-🧪 Engineering Highlights（工程能力考点）
-📌 核心考点（Key Points）
-
-    状态机设计（State Machine）
-
-    LLM 输出结构化（Structured Generation）
-
-    JSON 修复（JSON Repair）
-
-    流式响应（SSE Streaming）
-
-    Prompt 可观测性（Observability）
-
-    上下文压缩（Context Compression）
-
-⚠️ 易混点（Common Pitfalls）
-问题	本质
-写作不连贯	没有 state
-token 爆炸	上下文未裁剪
-JSON 崩溃	未做 repair
-设定冲突	无 SSOT
-前端卡顿	非流式
-📜 License
-
-AGPL-3.0-or-later
-👤 Author
-
-HopoZ
-📧 phmath41@gmail.com
