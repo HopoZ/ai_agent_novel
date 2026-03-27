@@ -158,6 +158,9 @@
           <el-button type="primary" style="flex:1;" @click="runMode" :loading="running">
             {{ running ? "运行中..." : "运行模式" }}
           </el-button>
+          <el-button v-if="running" type="danger" style="flex:1;" @click="abortRun">
+            中止生成
+          </el-button>
           <el-button style="flex:1;" @click="previewCurrentInput" :loading="previewingInput" :disabled="running">
             查看当前 Input
           </el-button>
@@ -186,6 +189,7 @@ defineProps<{
   onFocusChange: (v: any) => void;
   openRoleManager: () => void;
   runMode: () => void;
+  abortRun: () => void;
   previewCurrentInput: () => void;
 }>();
 </script>

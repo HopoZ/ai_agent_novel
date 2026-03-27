@@ -24,6 +24,15 @@
       <el-tab-pane label="文本输出" name="result">
         <pre class="result-pre" v-text="resultText"></pre>
       </el-tab-pane>
+      <el-tab-pane label="下章建议" name="next">
+        <pre class="result-pre" v-text="nextStatusText || '（本次运行暂无下章建议）'"></pre>
+      </el-tab-pane>
+      <el-tab-pane label="规划流" name="plan">
+        <pre class="result-pre" v-text="planStreamText || '（本次运行暂无规划流输出）'"></pre>
+      </el-tab-pane>
+      <el-tab-pane label="初始化流" name="init">
+        <pre class="result-pre" v-text="initStreamText || '（本次运行未触发初始化流）'"></pre>
+      </el-tab-pane>
       <el-tab-pane label="图谱可视化" name="graph">
         <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
           <el-button size="small" type="primary" @click="openGraphDialog" :disabled="!novelId">
@@ -47,11 +56,14 @@ defineProps<{
   tokenUsageText: string;
   initTokenUsageText: string;
   lastOutputPath: string;
-  rightTab: "result" | "graph";
+  rightTab: "result" | "next" | "plan" | "init" | "graph";
   graphView: "people" | "events" | "mixed";
   resultText: string;
+  nextStatusText: string;
+  planStreamText: string;
+  initStreamText: string;
   novelId: string;
-  onRightTabChange: (v: "result" | "graph") => void;
+  onRightTabChange: (v: "result" | "next" | "plan" | "init" | "graph") => void;
   graphViewLabel: string;
   openGraphDialog: () => void;
 }>();

@@ -85,7 +85,7 @@ def build_write_chapter_prompt(
     system = (
         "你是一个网文作家。请根据当前 NovelState 与 ChapterPlan 生成章节正文。"
         "要求：必须严格遵守设定与连续性；不要提及自己是 AI；不要输出任何多余说明。"
-        "正文直接开始叙述，至少4000字。"
+        "正文直接开始叙述，4000-5000字。"
     )
     plan_text = (
         plan.model_dump_json(ensure_ascii=False, indent=2)
@@ -105,5 +105,31 @@ def build_write_chapter_prompt(
     )
     if strict_no_supporting:
         human += "\n补充约束：未指定 supporting_character_ids，本章不要主动扩展知名配角出场。"
+    return system, human
+
+
+def build_next_status_prompt(
+    user_task: str,
+    chapter_index: int,
+    state_context: str,
+    latest_content: str,
+) -> tuple[str, str]:
+    system = (
+        "你是网文策划编辑。你要为作者输出“下一章走向建议（next_status）”。"
+        "这段建议只给作者参考，不参与当前章节生成。"
+    )
+    human = (
+        f"本章任务：{user_task}\n"
+        f"当前章节索引：{chapter_index}\n\n"
+        "当前状态（压缩）：\n"
+        f"{state_context}\n\n"
+        "本章正文（用于把握收束点）：\n"
+        f"{latest_content}\n\n"
+        "请输出 next_status（纯文本），要求：\n"
+        "- 充满想象力，有爽点，有结构化设计\n"
+        "- 给出 3~5 条“下章方向建议”\n"
+        "- 每条都包含：冲突核心 + 爽点爆发 + 章节收尾钩子\n"
+        "- 不要复述本章，不要输出 JSON，不要代码块\n"
+    )
     return system, human
 

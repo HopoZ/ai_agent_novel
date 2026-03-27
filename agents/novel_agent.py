@@ -19,6 +19,7 @@ from agents.lore_runtime import build_lore_summary_llm as build_lore_summary_llm
 from agents.lore_runtime import build_lorebook
 from agents.prompt_builders import (
     build_init_state_prompt,
+    build_next_status_prompt,
     build_plan_chapter_prompt,
     build_write_chapter_prompt,
 )
@@ -102,6 +103,7 @@ class RunResult:
     content: Optional[str] = None
     plan: Optional[ChapterPlan] = None
     usage_metadata: Optional[Dict[str, Any]] = None
+    next_status: Optional[str] = None
 
 
 class NovelAgent:
@@ -300,6 +302,55 @@ class NovelAgent:
             lore_summary_id=lore_summary_id,
         )
 
+    def init_state_stream(
+        self,
+        novel_id: str,
+        user_task: str,
+        lore_tags: Optional[list[str]] = None,
+        lore_summary_id: Optional[str] = None,
+    ) -> Iterator[Dict[str, Any]]:
+        """
+        流式生成 init_state。
+        - 每个 chunk：{"delta": str, "usage_metadata": {...}}
+        - 结束时：{"done": True, "state": {...}, "usage_metadata": {...}}
+        """
+        state = load_state(novel_id)
+        if not state:
+            raise ValueError(f"novel_id not found: {novel_id}")
+
+        lorebook = self._lorebook(lore_tags, lore_summary_id=lore_summary_id)
+        state_context = self._compact_state_for_prompt(state=state, user_task=user_task)
+        system, human = build_init_state_prompt(
+            user_task=user_task,
+            state_context=state_context,
+            lorebook=lorebook,
+        )
+
+        messages = [SystemMessage(system), HumanMessage(human)]
+        chunks: list[str] = []
+        final_usage: Dict[str, Any] = {}
+        for chunk in self._get_model().stream(messages):
+            text = parse_ai_chunk_text(chunk)
+            usage = getattr(chunk, "usage_metadata", None) or {}
+            if text:
+                chunks.append(text)
+            if isinstance(usage, dict) and usage:
+                final_usage = usage
+            if text or usage:
+                yield {"delta": text, "usage_metadata": usage}
+
+        raw_text = "".join(chunks)
+        data = json.loads(_extract_json_object(raw_text))
+        plan_json = NovelState.model_validate(data)
+        plan_json.meta.initialized = True
+        plan_json.meta.current_chapter_index = max(
+            state.meta.current_chapter_index,
+            plan_json.meta.current_chapter_index,
+        )
+        plan_json.meta.lore_tags = lore_tags or state.meta.lore_tags
+        save_state(novel_id, plan_json)
+        yield {"done": True, "state": plan_json.model_dump(mode="json"), "usage_metadata": final_usage}
+
     def plan_chapter(
         self,
         novel_id: str,
@@ -357,6 +408,98 @@ class NovelAgent:
         )
 
         return self._invoke_json(system, human, root_model=ChapterPlan)
+
+    def plan_chapter_stream(
+        self,
+        novel_id: str,
+        user_task: str,
+        chapter_index: int,
+        time_slot_override: Optional[str] = None,
+        pov_character_ids_override: Optional[list[str]] = None,
+        supporting_character_ids: Optional[list[str]] = None,
+        include_chapter_context: bool = True,
+        lore_tags: Optional[list[str]] = None,
+        lore_summary_id: Optional[str] = None,
+    ) -> Iterator[Dict[str, Any]]:
+        """
+        流式生成章节规划（原始 JSON 文本）。
+        - chunk: {"delta": str, "usage_metadata": {...}}
+        - done: {"done": True, "plan": {...}, "usage_metadata": {...}}
+        """
+        state = load_state(novel_id)
+        if not state:
+            raise ValueError(f"novel_id not found: {novel_id}")
+        if not state.meta.initialized:
+            raise ValueError("state 尚未初始化。请先用 mode=`init_state` 初始化。")
+
+        strict_no_supporting = bool(pov_character_ids_override) and not bool(supporting_character_ids)
+        picked_lore_tags = self._pick_lore_tags_for_strict_mode(
+            lore_tags=(lore_tags or state.meta.lore_tags),
+            pov_character_ids_override=pov_character_ids_override,
+            strict_no_supporting=strict_no_supporting,
+        )
+        lorebook = self._lorebook(picked_lore_tags, lore_summary_id=lore_summary_id)
+        state_context = self._compact_state_for_prompt(
+            state=state,
+            user_task=user_task,
+            time_slot_hint=time_slot_override,
+            pov_character_ids_override=pov_character_ids_override,
+            supporting_character_ids=supporting_character_ids,
+            minimal_context=(not include_chapter_context),
+            strict_no_supporting=strict_no_supporting,
+        )
+        chapter_context = self._neighbor_chapters_context(
+            novel_id=novel_id,
+            target_chapter_index=chapter_index,
+            enabled=include_chapter_context,
+        )
+        continuity_hint = {
+            "time_slot_override": time_slot_override,
+            "pov_character_ids_override": pov_character_ids_override or [],
+            "supporting_character_ids": supporting_character_ids or [],
+        }
+        system, human = build_plan_chapter_prompt(
+            user_task=user_task,
+            chapter_index=chapter_index,
+            continuity_hint=continuity_hint,
+            state_context=state_context,
+            chapter_context=chapter_context,
+            lorebook=lorebook,
+            strict_no_supporting=strict_no_supporting,
+        )
+
+        messages = [SystemMessage(system), HumanMessage(human)]
+        chunks: list[str] = []
+        final_usage: Dict[str, Any] = {}
+        for chunk in self._get_model().stream(messages):
+            text = parse_ai_chunk_text(chunk)
+            usage = getattr(chunk, "usage_metadata", None) or {}
+            if text:
+                chunks.append(text)
+            if isinstance(usage, dict) and usage:
+                final_usage = usage
+            if text or usage:
+                yield {"delta": text, "usage_metadata": usage}
+
+        raw_text = "".join(chunks)
+
+        def llm_fix_invoke(fix_prompt: str) -> str:
+            fix_messages = [SystemMessage(system), HumanMessage(fix_prompt)]
+            resp = self._get_model().invoke(fix_messages)
+            return parse_ai_text(resp)
+
+        data = _json_load_with_retry(
+            raw_text=raw_text,
+            fix_prompt=(
+                "你输出的不是合法 JSON。请仅输出一个合法 JSON 对象，内容与原意一致，"
+                "并确保结构符合 ChapterPlan（不要输出任何额外文本）。\n\n"
+                "原始输出：\n"
+                f"{raw_text}\n"
+            ),
+            llm_invoke_fn=llm_fix_invoke,
+        )
+        plan = ChapterPlan.model_validate(data)
+        yield {"done": True, "plan": plan.model_dump(mode="json"), "usage_metadata": final_usage}
 
     @staticmethod
     def merge_state(base: NovelState, patch: NovelState) -> NovelState:
@@ -476,6 +619,38 @@ class NovelAgent:
             usage = getattr(chunk, "usage_metadata", None) or {}
             if text or usage:
                 yield {"delta": text, "usage_metadata": usage}
+
+    def suggest_next_status(
+        self,
+        novel_id: str,
+        user_task: str,
+        chapter_index: int,
+        latest_content: str,
+    ) -> str:
+        """
+        独立生成“下章建议”，不参与当前章节 plan/write。
+        """
+        state = load_state(novel_id)
+        if not state:
+            return ""
+        state_context = self._compact_state_for_prompt(
+            state=state,
+            user_task=user_task,
+            time_slot_hint=state.continuity.time_slot,
+            timeline_n=4,
+            max_chars=7000,
+        )
+        content = (latest_content or "").strip()
+        if len(content) > 2500:
+            content = content[-2500:]
+        system, human = build_next_status_prompt(
+            user_task=user_task,
+            chapter_index=chapter_index,
+            state_context=state_context,
+            latest_content=content,
+        )
+        resp = self._get_model().invoke([SystemMessage(system), HumanMessage(human)])
+        return parse_ai_text(resp).strip()
 
     def run(
         self,
@@ -604,6 +779,18 @@ class NovelAgent:
             except Exception as e:
                 logger.warning("Failed to write outputs txt: %s", e)
 
+            # 独立生成“下章建议”，不回流参与本章写作
+            next_status = ""
+            try:
+                next_status = self.suggest_next_status(
+                    novel_id=novel_id,
+                    user_task=user_task,
+                    chapter_index=chapter_index,
+                    latest_content=content_text,
+                )
+            except Exception as e:
+                logger.warning("Failed to generate next_status: %s", e)
+
             return RunResult(
                 novel_id=novel_id,
                 mode=mode,
@@ -612,6 +799,7 @@ class NovelAgent:
                 content=content_text,
                 plan=plan,
                 usage_metadata=usage,
+                next_status=next_status or None,
             )
 
         raise ValueError(f"Unknown mode: {mode}")

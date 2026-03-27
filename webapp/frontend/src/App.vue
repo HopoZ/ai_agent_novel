@@ -42,6 +42,7 @@
           :on-focus-change="onFocusChange"
           :open-role-manager="openRoleManager"
           :run-mode="runMode"
+          :abort-run="abortRun"
           :preview-current-input="previewCurrentInput"
         />
       </div>
@@ -64,6 +65,9 @@
           :open-graph-dialog="openGraphDialog"
           :on-right-tab-change="onRightTabChange"
           :result-text="resultText"
+          :next-status-text="nextStatusText"
+          :plan-stream-text="planStreamText"
+          :init-stream-text="initStreamText"
           :novel-id="form.novelId"
         />
       </div>
@@ -203,7 +207,11 @@ const characterTagDraft = ref("");
 const buildingLoreSummary = ref(false);
 
 const running = ref(false);
+let runAbortController: AbortController | null = null;
 const resultText = ref("等待你的操作...");
+const nextStatusText = ref("");
+const planStreamText = ref("");
+const initStreamText = ref("");
 const runPhase = ref<"idle" | "planning" | "auto_init" | "writing" | "saving" | "outputs_written" | "done" | "error">("idle");
 const runHint = ref("");
 const lastOutputPath = ref("");
@@ -222,10 +230,10 @@ let resizingMid = false;
 let midResizeStartX = 0;
 let midResizeStartW = 0;
 
-const rightTab = ref<"result" | "graph">("result");
+const rightTab = ref<"result" | "next" | "plan" | "init" | "graph">("result");
 const graphView = ref<"people" | "events" | "mixed">("mixed");
 const graphFullscreenVisible = ref(false);
-function onRightTabChange(v: "result" | "graph") {
+function onRightTabChange(v: "result" | "next" | "plan" | "init" | "graph") {
   rightTab.value = v;
 }
 function onGraphViewChange(v: "people" | "events" | "mixed") {
@@ -454,11 +462,18 @@ async function apiJson(url: string, method: string, body: any) {
   return data;
 }
 
-async function apiSse(url: string, method: string, body: any, onEvent: (evt: { event: string; data: any }) => void) {
+async function apiSse(
+  url: string,
+  method: string,
+  body: any,
+  onEvent: (evt: { event: string; data: any }) => void,
+  signal?: AbortSignal
+) {
   const res = await fetch(url, {
     method,
     headers: { "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
+    signal,
   });
   if (!res.ok || !res.body) {
     const text = await res.text().catch(() => "");
@@ -497,6 +512,15 @@ async function apiSse(url: string, method: string, body: any, onEvent: (evt: { e
         onEvent({ event: evName, data: { raw: dataLine } });
       }
     }
+  }
+}
+
+function abortRun() {
+  if (!running.value) return;
+  try {
+    runAbortController?.abort();
+  } catch {
+    // ignore
   }
 }
 
@@ -753,13 +777,20 @@ async function runMode() {
     ElMessage.error("请输入本章任务描述（例如：写第3章 + 更新世界线/人物关系的要求）。");
     return;
   }
+  if (!validateTimePlan()) {
+    return;
+  }
 
   running.value = true;
+  runAbortController = new AbortController();
   runPhase.value = "planning";
   runHint.value = "已提交任务，正在排队/规划...";
   lastOutputPath.value = "";
   initTokenUsageText.value = "";
   tokenUsageText.value = "";
+  nextStatusText.value = "";
+  planStreamText.value = "";
+  initStreamText.value = "";
   try {
     const mergedTask = (() => {
       const base = form.userTask || "";
@@ -781,8 +812,13 @@ async function runMode() {
     // 流式输出：边生成边显示
     const startAt = Date.now();
     let logText = "（流式输出开始）\n";
+    let accInit = "";
     let accContent = "";
     let donePayload: any = null;
+    const refreshStreamText = () => {
+      const initBlock = accInit ? `\n\n[init_state]\n${accInit}` : "";
+      resultText.value = `${logText}${initBlock}\n\n[content]\n${accContent}`;
+    };
 
     await apiSse(`/api/novels/${novelId}/run_stream`, "POST", payload, (evt) => {
       if (evt.event === "phase") {
@@ -790,6 +826,10 @@ async function runMode() {
         if (name === "planning" || name === "auto_init" || name === "writing" || name === "saving" || name === "outputs_written") {
           runPhase.value = name;
         }
+        if (name === "planning") rightTab.value = "plan";
+        if (name === "auto_init") rightTab.value = "init";
+        if (name === "writing") rightTab.value = "result";
+        if (name === "next_status") rightTab.value = "next";
         const extra =
           name === "writing" && evt.data?.chapter_index ? ` chapter=${evt.data.chapter_index}` : "";
         const out =
@@ -798,6 +838,9 @@ async function runMode() {
         if (name === "auto_init") runHint.value = "检测到未初始化，正在自动初始化世界状态";
         if (name === "writing") runHint.value = "正在流式生成正文，请稍候...";
         if (name === "saving") runHint.value = "正在保存章节记录和世界状态";
+        if (name === "next_status") runHint.value = "正在生成下章建议...";
+        if (name === "next_status_done") runHint.value = "下章建议已生成";
+        if (name === "next_status_failed") runHint.value = "下章建议生成失败（可重试）";
         if (name === "auto_init" && evt.data?.usage_metadata) {
           const u = evt.data.usage_metadata || {};
           const input =
@@ -816,25 +859,41 @@ async function runMode() {
           lastOutputPath.value = String(evt.data?.path || "");
           runHint.value = "正文已归档到 outputs，可在本地打开查看";
         }
+        if (name === "next_status_failed") {
+          const msg = String(evt.data?.error || "未知错误");
+          nextStatusText.value = `（下章建议生成失败）${msg}`;
+          rightTab.value = "next";
+        }
         logText += `\n[phase] ${name}${extra}${out}\n`;
-        resultText.value = `${logText}\n\n[content]\n${accContent}`;
+        refreshStreamText();
+      } else if (evt.event === "plan_content") {
+        const delta = evt.data?.delta || "";
+        rightTab.value = "plan";
+        planStreamText.value += delta;
+      } else if (evt.event === "init_content") {
+        const delta = evt.data?.delta || "";
+        rightTab.value = "init";
+        accInit += delta;
+        initStreamText.value = accInit;
+        refreshStreamText();
       } else if (evt.event === "content") {
         const delta = evt.data?.delta || "";
+        rightTab.value = "result";
         accContent += delta;
         // 实时刷新正文，同时保留日志
-        resultText.value = `${logText}\n\n[content]\n${accContent}`;
+        refreshStreamText();
       } else if (evt.event === "error") {
         const msg = evt.data?.message || JSON.stringify(evt.data);
         runPhase.value = "error";
         runHint.value = "执行失败，请查看下方错误日志";
         logText += `\n[error]\n${msg}\n`;
-        resultText.value = `${logText}\n\n[content]\n${accContent}`;
+        refreshStreamText();
       } else if (evt.event === "done") {
         donePayload = evt.data;
         runPhase.value = "done";
         runHint.value = "本次任务已完成";
       }
-    });
+    }, runAbortController.signal);
 
     if (donePayload) {
       // 不要用结构化结果覆盖掉正文；只追加一段“完成摘要”
@@ -853,11 +912,27 @@ async function runMode() {
         tokenUsageText.value = `input=${input ?? "-"}, output=${output ?? "-"}, total=${total ?? "-"}`;
       }
       logText += `\n[done] ${ch}, ${st}, elapsed_ms=${ms}\n`;
-      resultText.value = `${logText}\n\n[content]\n${accContent}`;
+      nextStatusText.value = String(donePayload.next_status || "").trim();
+      if (nextStatusText.value) {
+        rightTab.value = "next";
+      }
+      refreshStreamText();
     }
     await loadAnchors();
+  } catch (e: any) {
+    const aborted = e?.name === "AbortError";
+    if (aborted) {
+      runPhase.value = "idle";
+      runHint.value = "已手动中止本次生成";
+      resultText.value += "\n\n[abort]\n用户已手动中止本次流式生成。\n";
+    } else {
+      runPhase.value = "error";
+      runHint.value = "执行失败，请查看错误信息";
+      ElMessage.error(`运行失败：${e?.message || String(e)}`);
+    }
   } finally {
     running.value = false;
+    runAbortController = null;
   }
 }
 
@@ -874,6 +949,9 @@ async function previewCurrentInput() {
   const loreTags = selectedTags.value || [];
   if (loreTags.length === 0) {
     ElMessage.error("请至少勾选 1 项设定。");
+    return;
+  }
+  if (!validateTimePlan()) {
     return;
   }
   previewingInput.value = true;
@@ -901,6 +979,23 @@ async function previewCurrentInput() {
   } finally {
     previewingInput.value = false;
   }
+}
+
+function validateTimePlan(): boolean {
+  if (form.insertMode === "time") {
+    if (!(form.timeSlotOverride || "").trim()) {
+      ElMessage.error("已选择手动时间段，请先填写时间段内容。");
+      return false;
+    }
+    return true;
+  }
+  const hasAfter = !!(form.insertAfterId || "").trim();
+  const hasBefore = !!(form.insertBeforeId || "").trim();
+  if (!hasAfter && !hasBefore) {
+    ElMessage.error("时间规划二选一至少完成一个：请选择手动时间段，或在事件网至少选择一个锚点（前/后其一）。");
+    return false;
+  }
+  return true;
 }
 
 function ensureGraphChart() {

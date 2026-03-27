@@ -131,6 +131,17 @@ class NovelState(BaseModel):
             return []
         return v
 
+    @field_validator("recent_summaries", mode="before")
+    @classmethod
+    def _coerce_recent_summaries(cls, v):
+        # 兼容 LLM 输出：recent_summaries: "..."（字符串）或 null
+        if v is None:
+            return []
+        if isinstance(v, str):
+            s = v.strip()
+            return [s] if s else []
+        return v
+
 
 class Beat(BaseModel):
     beat_title: str

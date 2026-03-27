@@ -14,7 +14,7 @@ from fastapi.templating import Jinja2Templates
 from agents.novel_agent import NovelAgent
 from agents.lore_summary import get_lore_summary, load_cached_summary, source_hash_from_map
 from agents.storage import load_state, load_chapter, get_chapters_dir, list_chapters
-from agents.state_models import NovelState, ChapterRecord
+from agents.state_models import NovelState, ChapterRecord, ChapterPlan
 from webapp.frontend_assets import run_frontend_startup
 from webapp.schemas import BuildLoreSummaryRequest, CreateNovelRequest, RunModeRequest
 
@@ -217,6 +217,8 @@ def run_mode(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
         resp["content"] = result.content
     if result.plan:
         resp["plan"] = result.plan.model_dump(mode="json")
+    if result.next_status:
+        resp["next_status"] = result.next_status
     state_obj = load_state(novel_id)
     resp["state"] = state_obj.model_dump(mode="json") if state_obj else None
     return resp
@@ -255,13 +257,19 @@ def _sse_pack(event: str, data: Any) -> bytes:
 
 
 @app.post("/api/novels/{novel_id}/run_stream")
-def run_mode_stream(novel_id: str, req: RunModeRequest):
+def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
     """
     流式运行：通过 SSE 持续推送阶段进度与正文片段。
     前端可实时显示，不用干等。
     """
 
-    def gen():
+    async def gen():
+        async def _disconnected() -> bool:
+            try:
+                return await request.is_disconnected()
+            except Exception:
+                return False
+
         yield _sse_pack("start", {"novel_id": novel_id, "mode": req.mode})
 
         inferred_time_slot = _infer_time_slot(novel_id, req)
@@ -273,6 +281,9 @@ def run_mode_stream(novel_id: str, req: RunModeRequest):
         try:
             # 这里对 write_chapter 做“正文流式”，其它模式走一次性结果但也会发阶段事件。
             if req.mode in {"write_chapter", "revise_chapter"}:
+                if await _disconnected():
+                    logger.info("run_stream client disconnected early. novel_id=%s mode=%s", novel_id, req.mode)
+                    return
                 yield _sse_pack("phase", {"name": "planning"})
                 # 让 agent.run() 自己处理自动 init_state；我们这里需要拿到 plan 才能流式写正文
                 # 因此：先调用 agent.run(mode=plan_only) 得到 plan+state，再流式写，然后手动落盘逻辑由 agent.run 做。
@@ -284,12 +295,25 @@ def run_mode_stream(novel_id: str, req: RunModeRequest):
                 # 确保初始化
                 st = load_state(novel_id)
                 if st and (not st.meta.initialized) and req.mode in {"write_chapter", "revise_chapter"}:
+                    if await _disconnected():
+                        logger.info("run_stream disconnected before auto_init. novel_id=%s", novel_id)
+                        return
                     yield _sse_pack("phase", {"name": "auto_init"})
-                    _, init_usage = agent.init_state_with_usage(
-                        novel_id,
+                    init_usage: Dict[str, Any] = {}
+                    for item in agent.init_state_stream(
+                        novel_id=novel_id,
                         user_task=f"（自动初始化）{req.user_task}",
                         lore_tags=req.lore_tags,
-                    )
+                    ):
+                        if await _disconnected():
+                            logger.info("run_stream disconnected during auto_init stream. novel_id=%s", novel_id)
+                            return
+                        txt = str(item.get("delta", "") or "")
+                        if txt:
+                            yield _sse_pack("init_content", {"delta": txt})
+                        um = item.get("usage_metadata") or {}
+                        if isinstance(um, dict) and um:
+                            init_usage = um
                     if init_usage:
                         yield _sse_pack("phase", {"name": "auto_init", "status": "done", "usage_metadata": init_usage})
                     st = load_state(novel_id)
@@ -298,7 +322,8 @@ def run_mode_stream(novel_id: str, req: RunModeRequest):
                     raise ValueError("novel not found")
 
                 chapter_index = req.chapter_index or (st.meta.current_chapter_index + 1)
-                plan = agent.plan_chapter(
+                plan_json: Optional[Dict[str, Any]] = None
+                for item in agent.plan_chapter_stream(
                     novel_id=novel_id,
                     user_task=req.user_task,
                     chapter_index=chapter_index,
@@ -307,7 +332,18 @@ def run_mode_stream(novel_id: str, req: RunModeRequest):
                     supporting_character_ids=(req.supporting_character_ids or []),
                     include_chapter_context=(not manual_time_slot),
                     lore_tags=req.lore_tags,
-                )
+                ):
+                    if await _disconnected():
+                        logger.info("run_stream disconnected during plan stream. novel_id=%s chapter=%s", novel_id, chapter_index)
+                        return
+                    txt = str(item.get("delta", "") or "")
+                    if txt:
+                        yield _sse_pack("plan_content", {"delta": txt})
+                    if item.get("done"):
+                        plan_json = item.get("plan") or {}
+                if not plan_json:
+                    raise ValueError("plan stream failed: empty plan")
+                plan = ChapterPlan.model_validate(plan_json)
                 # 允许 next_state 是补丁：合并成完整状态再落盘
                 try:
                     plan.next_state = NovelAgent.merge_state(st, plan.next_state)  # type: ignore
@@ -327,6 +363,9 @@ def run_mode_stream(novel_id: str, req: RunModeRequest):
                     pov_character_ids_override=pov_ids,
                     supporting_character_ids=(req.supporting_character_ids or []),
                 ):
+                    if await _disconnected():
+                        logger.info("run_stream disconnected during write stream. novel_id=%s chapter=%s", novel_id, chapter_index)
+                        return
                     txt = str(item.get("delta", "") or "")
                     if txt:
                         parts.append(txt)
@@ -337,6 +376,9 @@ def run_mode_stream(novel_id: str, req: RunModeRequest):
 
                 content_text = "".join(parts).strip()
 
+                if await _disconnected():
+                    logger.info("run_stream disconnected before saving. novel_id=%s chapter=%s", novel_id, chapter_index)
+                    return
                 yield _sse_pack("phase", {"name": "saving"})
                 record = ChapterRecord(
                     chapter_index=chapter_index,
@@ -369,6 +411,23 @@ def run_mode_stream(novel_id: str, req: RunModeRequest):
                         {"name": "outputs_write_failed", "error": str(e)},
                     )
 
+                next_status = ""
+                try:
+                    if await _disconnected():
+                        logger.info("run_stream disconnected before next_status. novel_id=%s chapter=%s", novel_id, chapter_index)
+                        return
+                    yield _sse_pack("phase", {"name": "next_status"})
+                    next_status = agent.suggest_next_status(
+                        novel_id=novel_id,
+                        user_task=req.user_task,
+                        chapter_index=chapter_index,
+                        latest_content=content_text,
+                    )
+                    yield _sse_pack("phase", {"name": "next_status_done", "has_text": bool((next_status or "").strip())})
+                except Exception as e:
+                    logger.warning("Failed to generate next_status (stream): %s", e)
+                    yield _sse_pack("phase", {"name": "next_status_failed", "error": str(e)})
+
                 yield _sse_pack(
                     "done",
                     {
@@ -379,9 +438,13 @@ def run_mode_stream(novel_id: str, req: RunModeRequest):
                         "usage_metadata": usage_meta,
                         "plan": plan.model_dump(mode="json"),
                         "state": (load_state(novel_id).model_dump(mode="json") if load_state(novel_id) else None),
+                        "next_status": next_status or None,
                     },
                 )
             else:
+                if await _disconnected():
+                    logger.info("run_stream disconnected before non-stream run. novel_id=%s mode=%s", novel_id, req.mode)
+                    return
                 yield _sse_pack("phase", {"name": "running"})
                 result = agent.run(
                     novel_id=novel_id,
@@ -411,7 +474,8 @@ def run_mode_stream(novel_id: str, req: RunModeRequest):
                 )
         except Exception as e:
             logger.exception("run_stream failed novel_id=%s mode=%s", novel_id, req.mode)
-            yield _sse_pack("error", {"message": str(e)})
+            if not await _disconnected():
+                yield _sse_pack("error", {"message": str(e)})
 
     return StreamingResponse(
         gen(),
