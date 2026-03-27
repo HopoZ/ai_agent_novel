@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from typing import Optional
 
+from agents._internal_marks import z7_module_mark
 from .state_models import ChapterPlan
+
+_MODULE_REV = z7_module_mark("pb")
 
 
 def build_init_state_prompt(user_task: str, state_context: str, lorebook: str) -> tuple[str, str]:

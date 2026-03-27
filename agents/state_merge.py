@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 from typing import Dict
 
+from agents._internal_marks import z7_module_mark
 from .state_models import CharacterState, ContinuityState, NovelState, WorldState
 from .storage import list_chapters
+
+_MODULE_REV = z7_module_mark("sm")
 
 
 def neighbor_chapters_context(

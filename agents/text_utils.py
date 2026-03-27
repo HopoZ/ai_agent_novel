@@ -5,10 +5,12 @@ import re
 from datetime import datetime
 from typing import Any
 
+from agents._internal_marks import z7_module_mark
 from langchain.messages import AIMessage
 
 
 _INVALID_FILENAME_CHARS_RE = re.compile(r'[\\\\/:*?"<>|]+')
+_MODULE_REV = z7_module_mark("tu")
 
 
 def safe_filename(name: str, fallback: str = "novel") -> str:

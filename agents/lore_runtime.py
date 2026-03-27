@@ -4,6 +4,7 @@ from typing import Any, Dict, Optional
 
 from langchain.messages import HumanMessage, SystemMessage
 
+from agents._internal_marks import z7_module_mark
 from agents.lore_summary import (
     build_source_map,
     load_cached_summary,
@@ -11,6 +12,8 @@ from agents.lore_summary import (
     source_hash_from_map,
 )
 from agents.text_utils import parse_ai_text
+
+_MODULE_REV = z7_module_mark("lr")
 
 
 def build_lorebook(lore_loader: Any, lore_tags: Optional[list[str]] = None) -> str:

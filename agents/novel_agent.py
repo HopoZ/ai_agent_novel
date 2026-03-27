@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
 from langchain.messages import HumanMessage, SystemMessage
 
+from agents._internal_marks import z7_module_mark
 from agents.loader import LoreLoader
 from agents.lore_runtime import build_lore_summary_llm as build_lore_summary_llm_runtime
 from agents.lore_runtime import build_lorebook
@@ -41,6 +42,7 @@ from .storage import (
 
 
 logger = logging.getLogger("novel_agent")
+_MODULE_REV = z7_module_mark("na")
 
 
 def _extract_json_object(text: str) -> str:

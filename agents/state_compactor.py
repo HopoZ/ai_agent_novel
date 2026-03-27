@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from typing import Dict, Optional, Set
 
+from agents._internal_marks import z7_module_mark
 from .state_models import NovelState
+
+_MODULE_REV = z7_module_mark("sc")
 
 
 def select_related_character_ids(
