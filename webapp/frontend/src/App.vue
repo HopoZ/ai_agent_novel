@@ -5,305 +5,67 @@
     <div class="main-layout">
       <!-- 左：设定标签 -->
       <div class="left-pane" :style="{ width: `${leftPanelWidth}px` }">
-        <el-card class="panel" shadow="never">
-          <div style="display:flex; justify-content:space-between; align-items:center;">
-            <div style="font-weight:600;">设定标签</div>
-            <span class="muted">可勾选 / 预览摘要</span>
-          </div>
-
-          <el-divider></el-divider>
-
-          <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
-            <el-button size="small" @click="selectAll">全选</el-button>
-            <el-button size="small" @click="invertSelect">反选</el-button>
-            <el-button size="small" type="warning" @click="clearSelect">清空</el-button>
-            <el-button size="small" type="primary" :loading="buildingLoreSummary" @click="buildCurrentLoreSummary">
-              生成当前Tag摘要
-            </el-button>
-          </div>
-
-          <div v-if="tagsLoading" style="color:#909399;">正在加载设定文件...</div>
-          <div v-else class="tag-list-scroll">
-            <el-tree
-              ref="tagTreeRef"
-              class="tag-tree"
-              node-key="id"
-              :data="tagTreeData"
-              :props="{ label: 'label', children: 'children' }"
-              show-checkbox
-              default-expand-all
-              @check="onTreeCheck"
-            >
-              <template #default="{ data }">
-                <div class="tree-node-row">
-                  <span class="tree-node-label">{{ data.label }}</span>
-                  <template v-if="data.isLeaf && data.tag">
-                    <el-popover
-                      placement="right"
-                      trigger="hover"
-                      :open-delay="2000"
-                      width="520"
-                      popper-class="tag-popover"
-                    >
-                      <template #default>
-                        <div class="preview-scroll">
-                          <pre class="tag-preview" v-text="getTagPreview(data.tag)"></pre>
-                        </div>
-                      </template>
-                      <template #reference>
-                        <el-button
-                          size="small"
-                          link
-                          type="primary"
-                          @click.stop
-                        >
-                          预览摘要
-                        </el-button>
-                      </template>
-                    </el-popover>
-                    <el-button
-                      size="small"
-                      link
-                      type="primary"
-                      @click.stop.prevent="openTagDialog(data.tag)"
-                    >
-                      详情
-                    </el-button>
-                  </template>
-                </div>
-              </template>
-            </el-tree>
-          </div>
-
-          <div class="tag-hint">
-            建议至少勾选 1 项；不勾选会导致设定为空，可能无法生成状态/正文。
-          </div>
-        </el-card>
+        <TagPanel
+          :tags-loading="tagsLoading"
+          :building-lore-summary="buildingLoreSummary"
+          :on-tag-tree-ref="onTagTreeRef"
+          :tag-tree-data="tagTreeData"
+          :on-select-all="selectAll"
+          :on-invert-select="invertSelect"
+          :on-clear-select="clearSelect"
+          :on-build-current-lore-summary="buildCurrentLoreSummary"
+          :on-tree-check="onTreeCheck"
+          :get-tag-preview="getTagPreview"
+          :on-open-tag-dialog="openTagDialog"
+        />
       </div>
 
       <div class="resize-handle" @mousedown="startResizeLeft" title="拖动调整左侧宽度"></div>
 
       <!-- 中：填写字段 -->
-      <div class="mid-pane">
-        <el-card class="panel" shadow="never">
-          <el-form label-position="top">
-            <div style="font-weight:600;">已有小说</div>
-            <div class="muted" style="margin-top:4px;">
-              选择后会切换当前上下文（锚点/图谱/运行都基于当前小说）。
-            </div>
-            <div style="height:8px;"></div>
-
-            <el-form-item label="选择已有小说">
-              <el-select
-                v-model="form.novelId"
-                :loading="novelsLoading"
-                clearable
-                placeholder="请选择已有小说（显示小说名）"
-                style="width:100%;"
-              >
-                <el-option
-                  v-for="n in novels"
-                  :key="n.novel_id"
-                  :label="n.novel_title"
-                  :value="n.novel_id"
-                />
-              </el-select>
-            </el-form-item>
-
-            <el-form-item label="当前小说名（只读）">
-              <el-input :model-value="currentNovelTitle" disabled></el-input>
-            </el-form-item>
-
-            <el-form-item>
-              <el-button style="width:100%;" @click="openCreateDialog" :disabled="running">
-                新建小说（弹窗）
-              </el-button>
-            </el-form-item>
-
-            <el-divider></el-divider>
-
-            <el-form-item label="模式">
-              <el-select v-model="form.mode" placeholder="选择运行模式">
-                <el-option label="生成本章初始人物/世界状态" value="init_state" />
-                <el-option label="只生成本章要点并更新世界状态" value="plan_only" />
-                <el-option label="生成正文并更新世界状态" value="write_chapter" />
-                <el-option label="修订指定章节（MVP：仍走规划+写作）" value="revise_chapter" />
-              </el-select>
-            </el-form-item>
-
-            <el-form-item label="插入位置 / 时间段（二选一）">
-              <el-radio-group v-model="form.insertMode" class="choice-cards">
-                <el-radio-button label="anchors">插入到事件网（选择锚点）</el-radio-button>
-                <el-radio-button label="time">手动填写时间段</el-radio-button>
-              </el-radio-group>
-              <div class="muted" style="margin-top:6px;">
-                二选一：选“插入到事件网”则按锚点推导时间段；选“手动时间段”则忽略锚点。
-              </div>
-            </el-form-item>
-
-            <template v-if="form.insertMode === 'anchors'">
-              <el-form-item label="插入在这件事之后（可选）">
-                <el-select
-                  v-model="form.insertAfterId"
-                  :loading="anchorsLoading"
-                  clearable
-                  placeholder="选择一件“之前发生的事”作为下界（after）"
-                  style="width:100%;"
-                >
-                  <el-option v-for="a in anchors" :key="a.id" :label="a.label" :value="a.id" />
-                </el-select>
-              </el-form-item>
-
-              <el-form-item label="插入在这件事之前（可选）">
-                <el-select
-                  v-model="form.insertBeforeId"
-                  :loading="anchorsLoading"
-                  clearable
-                  placeholder="选择一件“之后发生的事”作为上界（before）"
-                  style="width:100%;"
-                >
-                  <el-option v-for="a in anchors" :key="a.id" :label="a.label" :value="a.id" />
-                </el-select>
-                <div class="muted" style="margin-top:6px;">
-                  推导时间段：{{ inferredTimeSlotHint || "（未选择锚点：将自动延续到最新进度）" }}
-                </div>
-              </el-form-item>
-            </template>
-
-            <template v-else>
-              <el-form-item label="时间段覆盖（手动）">
-                <el-input v-model="form.timeSlotOverride" placeholder="例如：第三年秋·傍晚 / 第七日清晨 / 某个具体阶段"></el-input>
-              </el-form-item>
-            </template>
-
-            <el-form-item label="主视角覆盖（可多选）">
-              <el-select
-                v-model="form.povCharacterOverride"
-                multiple
-                collapse-tags
-                collapse-tags-tooltip
-                clearable
-                filterable
-                allow-create
-                default-first-option
-                placeholder="多选表示与本章最相关的核心人物"
-                style="width:100%;"
-                @change="onPovChange"
-              >
-                <el-option v-for="cid in allCharacterOptions" :key="cid" :label="cid" :value="cid" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="快速多选角色（配角设定）">
-              <el-select
-                v-model="form.focusCharacterIds"
-                multiple
-                collapse-tags
-                collapse-tags-tooltip
-                clearable
-                filterable
-                allow-create
-                default-first-option
-                placeholder="点击快速多选作为配角设定（可清空）"
-                style="width:100%;"
-                @change="onFocusChange"
-              >
-                <el-option v-for="cid in allCharacterOptions" :key="`focus-${cid}`" :label="cid" :value="cid" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="角色标签管理（本次会话）">
-              <div style="display:flex; gap:8px; width:100%;">
-                <el-input v-model="characterTagDraft" placeholder="输入角色标签后点“添加”"></el-input>
-                <el-button @click="addCharacterTag">添加</el-button>
-              </div>
-              <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap;">
-                <el-tag
-                  v-for="cid in allCharacterOptions"
-                  :key="`mg-${cid}`"
-                  closable
-                  @close="removeCharacterTag(cid)"
-                >
-                  {{ cid }}
-                </el-tag>
-              </div>
-              <div class="muted" style="margin-top:6px;">
-                支持新增/删除角色标签；如需“修改”，先删除旧标签再添加新标签。主视角可多选，快速多选用于配角设定。
-              </div>
-            </el-form-item>
-            <el-form-item label="章节预设名（可选）">
-              <el-input v-model="form.chapterPresetName" placeholder="例如：重逢夜 / 石碑共鸣 / 古墟初探"></el-input>
-            </el-form-item>
-
-            <el-form-item label="本章任务描述">
-              <el-input
-                v-model="form.userTask"
-                type="textarea"
-                :rows="7"
-                placeholder="例如：写第3章，主角与某势力冲突，要求推进世界线并更新人物关系。"
-              ></el-input>
-            </el-form-item>
-
-            <el-form-item>
-              <div style="display:flex; gap:8px; width:100%;">
-                <el-button type="primary" style="flex:1;" @click="runMode" :loading="running">
-                  {{ running ? "运行中..." : "运行模式" }}
-                </el-button>
-                <el-button style="flex:1;" @click="previewCurrentInput" :loading="previewingInput" :disabled="running">
-                  查看当前 Input
-                </el-button>
-              </div>
-            </el-form-item>
-          </el-form>
-        </el-card>
+      <div class="mid-pane" :style="{ width: `${midPanelWidth}px` }">
+        <MidFormPanel
+          :form="form"
+          :mid-active-sections="midActiveSections"
+          :on-mid-sections-change="onMidSectionsChange"
+          :novels-loading="novelsLoading"
+          :novels="novels"
+          :current-novel-title="currentNovelTitle"
+          :running="running"
+          :anchors-loading="anchorsLoading"
+          :anchors="anchors"
+          :inferred-time-slot-hint="inferredTimeSlotHint"
+          :all-character-options="allCharacterOptions"
+          :previewing-input="previewingInput"
+          :open-create-dialog="openCreateDialog"
+          :on-pov-change="onPovChange"
+          :on-focus-change="onFocusChange"
+          :open-role-manager="openRoleManager"
+          :run-mode="runMode"
+          :preview-current-input="previewCurrentInput"
+        />
       </div>
+
+      <div class="resize-handle" @mousedown="startResizeMid" title="拖动调整中间栏宽度"></div>
 
       <!-- 右：输出 -->
       <div class="right-pane">
-        <el-card shadow="never">
-          <div style="display:flex; gap:8px; align-items:baseline; flex-wrap:wrap;">
-            <div style="font-weight:600;">运行结果</div>
-            <div class="muted" style="font-size:12px;">会自动显示 state.continuity / content / plan 等</div>
-          </div>
-          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px;">
-            <el-tag size="small" :type="running ? 'warning' : (runPhase === 'error' ? 'danger' : 'success')">
-              {{ running ? `进行中：${runPhaseLabel}` : `状态：${runPhaseLabel}` }}
-            </el-tag>
-            <span class="muted" v-if="runHint">{{ runHint }}</span>
-          </div>
-          <div v-if="tokenUsageText" class="output-path-tip">
-            本次 Token：<code>{{ tokenUsageText }}</code>
-          </div>
-          <div v-if="initTokenUsageText" class="output-path-tip">
-            初始化 Token：<code>{{ initTokenUsageText }}</code>
-          </div>
-          <div v-if="lastOutputPath" class="output-path-tip">
-            输出文件：<code>{{ lastOutputPath }}</code>
-          </div>
-          <el-divider></el-divider>
-          <el-tabs v-model="rightTab" class="right-tabs">
-            <el-tab-pane label="文本输出" name="result">
-              <pre class="result-pre" v-text="resultText"></pre>
-            </el-tab-pane>
-            <el-tab-pane label="图谱可视化" name="graph">
-              <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-                <el-segmented
-                  v-model="graphView"
-                  :options="[
-                    { label: '人物关系网', value: 'people' },
-                    { label: '剧情事件网', value: 'events' },
-                    { label: '混合网', value: 'mixed' },
-                  ]"
-                />
-                <el-button size="small" :loading="graphLoading" @click="loadGraph">刷新图谱</el-button>
-                <span class="muted">点击节点可查看详情</span>
-              </div>
-              <div style="height:10px;"></div>
-              <div class="graph-box">
-                <div v-if="!form.novelId" style="color:#909399;">请先选择/创建小说，再查看图谱。</div>
-                <div v-else ref="graphEl" class="graph-canvas"></div>
-              </div>
-            </el-tab-pane>
-          </el-tabs>
-        </el-card>
+        <RightPanel
+          :running="running"
+          :run-phase="runPhase"
+          :run-phase-label="runPhaseLabel"
+          :run-hint="runHint"
+          :token-usage-text="tokenUsageText"
+          :init-token-usage-text="initTokenUsageText"
+          :last-output-path="lastOutputPath"
+          :right-tab="rightTab"
+          :graph-view="graphView"
+          :graph-view-label="graphViewLabel"
+          :open-graph-dialog="openGraphDialog"
+          :on-right-tab-change="onRightTabChange"
+          :result-text="resultText"
+          :novel-id="form.novelId"
+        />
       </div>
     </div>
   </div>
@@ -354,12 +116,68 @@
       </span>
     </template>
   </el-dialog>
+
+  <el-dialog v-model="graphFullscreenVisible" title="图谱可视化（全屏）" fullscreen append-to-body>
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+      <el-button size="small" type="warning" class="back-btn-highlight" @click="closeGraphDialog">返回</el-button>
+      <el-segmented
+        :model-value="graphView"
+        @update:model-value="onGraphViewChange"
+        :options="[
+          { label: '人物关系网', value: 'people' },
+          { label: '剧情事件网', value: 'events' },
+          { label: '混合网', value: 'mixed' },
+        ]"
+      />
+      <el-button size="small" :loading="graphLoading" @click="loadGraph">刷新图谱</el-button>
+      <span class="muted">点击节点可查看详情，滚轮可缩放，拖拽可平移。</span>
+    </div>
+    <div style="height:10px;"></div>
+    <div class="graph-box-fullscreen">
+      <div v-if="!form.novelId" style="color:#909399;">请先选择/创建小说，再查看图谱。</div>
+      <div v-else :ref="onGraphRef" class="graph-canvas-fullscreen"></div>
+    </div>
+  </el-dialog>
+
+  <el-dialog v-model="roleManagerVisible" title="角色标签管理（本次会话）" width="680px">
+    <el-form label-position="top">
+      <el-form-item label="新增角色标签">
+        <div style="display:flex; gap:8px; width:100%;">
+          <el-input v-model="characterTagDraft" placeholder="输入角色标签后点“添加”"></el-input>
+          <el-button @click="addCharacterTag">添加</el-button>
+        </div>
+      </el-form-item>
+      <el-form-item label="当前可选标签">
+        <div style="display:flex; gap:6px; flex-wrap:wrap;">
+          <el-tag
+            v-for="cid in allCharacterOptions"
+            :key="`mg-${cid}`"
+            closable
+            @close="removeCharacterTag(cid)"
+          >
+            {{ cid }}
+          </el-tag>
+        </div>
+        <div class="muted" style="margin-top:6px;">
+          支持新增/删除角色标签；如需“修改”，先删除旧标签再添加新标签。
+        </div>
+      </el-form-item>
+    </el-form>
+    <template #footer>
+      <span class="dialog-footer">
+        <el-button @click="roleManagerVisible = false">关闭</el-button>
+      </span>
+    </template>
+  </el-dialog>
 </template>
 
 <script lang="ts" setup>
 import { computed, nextTick, onMounted, onBeforeUnmount, reactive, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import * as echarts from "echarts";
+import TagPanel from "./components/TagPanel.vue";
+import MidFormPanel from "./components/MidFormPanel.vue";
+import RightPanel from "./components/RightPanel.vue";
 
 type Mode = "init_state" | "plan_only" | "write_chapter" | "revise_chapter";
 
@@ -368,6 +186,9 @@ const tags = ref<string[]>([]);
 const tagGroups = ref<Record<string, string[]>>({});
 const selectedTags = ref<string[]>([]);
 const tagTreeRef = ref<any>(null);
+function onTagTreeRef(el: any) {
+  tagTreeRef.value = el;
+}
 const novelsLoading = ref(true);
 const novels = ref<Array<{ novel_id: string; novel_title: string }>>([]);
 const previewCache = reactive<Record<string, string>>({});
@@ -394,17 +215,64 @@ const LEFT_MAX_WIDTH = 680;
 let resizingLeft = false;
 let resizeStartX = 0;
 let resizeStartW = 0;
+const midPanelWidth = ref(420);
+const MID_MIN_WIDTH = 340;
+const MID_MAX_WIDTH = 760;
+let resizingMid = false;
+let midResizeStartX = 0;
+let midResizeStartW = 0;
 
 const rightTab = ref<"result" | "graph">("result");
 const graphView = ref<"people" | "events" | "mixed">("mixed");
+const graphFullscreenVisible = ref(false);
+function onRightTabChange(v: "result" | "graph") {
+  rightTab.value = v;
+}
+function onGraphViewChange(v: "people" | "events" | "mixed") {
+  graphView.value = v;
+}
+const graphViewLabel = computed(() => {
+  if (graphView.value === "people") return "人物关系网";
+  if (graphView.value === "events") return "剧情事件网";
+  return "混合网";
+});
 const graphLoading = ref(false);
 const graphEl = ref<HTMLDivElement | null>(null);
 let graphChart: echarts.ECharts | null = null;
 const graphData = ref<{ nodes: any[]; edges: any[] } | null>(null);
+function onGraphRef(el: any) {
+  graphEl.value = el as HTMLDivElement | null;
+}
+async function openGraphDialog() {
+  const novelId = (form.novelId || "").trim();
+  if (!novelId) {
+    ElMessage.error("请先选择/创建小说。");
+    return;
+  }
+  graphFullscreenVisible.value = true;
+  await nextTick();
+  if (graphData.value) {
+    renderGraph();
+  } else {
+    await loadGraph();
+  }
+  onResize();
+}
+function closeGraphDialog() {
+  graphFullscreenVisible.value = false;
+}
 
 const dialogVisible = ref(false);
 const dialogTitle = ref("");
 const dialogText = ref("");
+const roleManagerVisible = ref(false);
+const midActiveSections = ref<Array<string>>(["basic", "timeline", "task"]);
+function onMidSectionsChange(v: string[]) {
+  midActiveSections.value = Array.isArray(v) ? v : [];
+}
+function openRoleManager() {
+  roleManagerVisible.value = true;
+}
 
 const createDialogVisible = ref(false);
 const previewingInput = ref(false);
@@ -541,6 +409,28 @@ function startResizeLeft(e: MouseEvent) {
   resizeStartW = leftPanelWidth.value;
   window.addEventListener("mousemove", onLeftResizeMove);
   window.addEventListener("mouseup", onLeftResizeUp);
+}
+
+function onMidResizeMove(e: MouseEvent) {
+  if (!resizingMid) return;
+  const delta = e.clientX - midResizeStartX;
+  const next = Math.max(MID_MIN_WIDTH, Math.min(MID_MAX_WIDTH, midResizeStartW + delta));
+  midPanelWidth.value = next;
+}
+
+function onMidResizeUp() {
+  if (!resizingMid) return;
+  resizingMid = false;
+  window.removeEventListener("mousemove", onMidResizeMove);
+  window.removeEventListener("mouseup", onMidResizeUp);
+}
+
+function startResizeMid(e: MouseEvent) {
+  resizingMid = true;
+  midResizeStartX = e.clientX;
+  midResizeStartW = midPanelWidth.value;
+  window.addEventListener("mousemove", onMidResizeMove);
+  window.addEventListener("mouseup", onMidResizeUp);
 }
 
 async function apiJson(url: string, method: string, body: any) {
@@ -1138,15 +1028,16 @@ watch(
   }
 );
 
-watch([rightTab, graphView, () => form.novelId], async ([tab]) => {
-  if (tab !== "graph") return;
+watch([graphView, () => form.novelId, graphFullscreenVisible], async ([, , opened]) => {
+  if (!opened) return;
   await nextTick();
-  // 切换视图/小说时，必须重新拉取对应 view 的数据
+  // 全屏图谱打开时，切换视图/小说会重新拉取对应数据
   await loadGraph();
 });
 
 onBeforeUnmount(() => {
   onLeftResizeUp();
+  onMidResizeUp();
   window.removeEventListener("resize", onResize);
   if (graphChart) {
     graphChart.dispose();
@@ -1174,13 +1065,10 @@ onBeforeUnmount(() => {
   min-width: 280px;
 }
 .mid-pane {
-  flex: 0 0 420px;
+  flex: 0 0 auto;
   min-width: 360px;
 }
-.right-pane {
-  flex: 1 1 auto;
-  min-width: 420px;
-}
+.right-pane { flex: 1 1 auto; min-width: 420px; }
 .resize-handle {
   width: 10px;
   cursor: col-resize;
@@ -1206,37 +1094,6 @@ onBeforeUnmount(() => {
 .muted {
   color: #909399;
   font-size: 12px;
-}
-.output-path-tip {
-  margin-top: 6px;
-  font-size: 12px;
-  color: #606266;
-  word-break: break-all;
-}
-.result-pre {
-  max-height: 48vh;
-  overflow: auto;
-  padding: 10px;
-  background: #fff;
-  border-radius: 10px;
-  border: 1px solid #ebeef5;
-  white-space: pre-wrap;
-  word-break: break-word;
-  margin: 0;
-}
-.right-tabs :deep(.el-tabs__content) {
-  padding-top: 6px;
-}
-.graph-box {
-  height: 58vh;
-  border: 1px solid #ebeef5;
-  border-radius: 10px;
-  background: #fff;
-  overflow: hidden;
-}
-.graph-canvas {
-  width: 100%;
-  height: 100%;
 }
 .tag-list {
   display: flex;
@@ -1306,6 +1163,20 @@ onBeforeUnmount(() => {
 }
 .choice-cards :deep(.el-radio-button__inner) {
   width: 100%;
+}
+.graph-box-fullscreen {
+  height: calc(100vh - 180px);
+  border: 1px solid #ebeef5;
+  border-radius: 10px;
+  background: #fff;
+  overflow: hidden;
+}
+.graph-canvas-fullscreen {
+  width: 100%;
+  height: 100%;
+}
+.back-btn-highlight {
+  font-weight: 600;
 }
 </style>
 

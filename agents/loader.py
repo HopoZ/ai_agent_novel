@@ -10,13 +10,24 @@ class LoreLoader:
         p = Path(data_path)
         self.data_path = p if p.is_absolute() else (repo_root / p)
 
+    @staticmethod
+    def _is_ignored_markdown(file_path: Path) -> bool:
+        """
+        忽略目录说明类文档，避免被当作 lore tag。
+        """
+        return file_path.stem.lower() == "readme"
+
     def _scan_markdown_files(self) -> list[Path]:
         """
-        递归扫描 settings/**/*.md，返回相对路径排序列表。
+        递归扫描 settings/**/*.md（忽略 README.md），返回相对路径排序列表。
         """
         if not self.data_path.exists():
             return []
-        files = [p for p in self.data_path.rglob("*.md") if p.is_file()]
+        files = [
+            p
+            for p in self.data_path.rglob("*.md")
+            if p.is_file() and (not self._is_ignored_markdown(p))
+        ]
         files.sort(key=lambda x: x.relative_to(self.data_path).as_posix())
         return files
 

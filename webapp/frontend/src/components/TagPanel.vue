@@ -1,0 +1,140 @@
+<template>
+  <el-card class="panel" shadow="never">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+      <div style="font-weight:600;">设定标签</div>
+      <span class="muted">可勾选 / 预览摘要</span>
+    </div>
+
+    <el-divider></el-divider>
+
+    <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
+      <el-button size="small" @click="onSelectAll">全选</el-button>
+      <el-button size="small" @click="onInvertSelect">反选</el-button>
+      <el-button size="small" type="warning" @click="onClearSelect">清空</el-button>
+      <el-button size="small" type="primary" :loading="buildingLoreSummary" @click="onBuildCurrentLoreSummary">
+        生成当前Tag摘要
+      </el-button>
+    </div>
+
+    <div v-if="tagsLoading" style="color:#909399;">正在加载设定文件...</div>
+    <div v-else class="tag-list-scroll">
+      <el-tree
+        :ref="onTagTreeRef"
+        class="tag-tree"
+        node-key="id"
+        :data="tagTreeData"
+        :props="{ label: 'label', children: 'children' }"
+        show-checkbox
+        default-expand-all
+        @check="onTreeCheck"
+      >
+        <template #default="{ data }">
+          <div class="tree-node-row">
+            <span class="tree-node-label">{{ data.label }}</span>
+            <template v-if="data.isLeaf && data.tag">
+              <el-popover
+                placement="right"
+                trigger="hover"
+                :open-delay="2000"
+                width="520"
+                popper-class="tag-popover"
+              >
+                <template #default>
+                  <div class="preview-scroll">
+                    <pre class="tag-preview" v-text="getTagPreview(data.tag)"></pre>
+                  </div>
+                </template>
+                <template #reference>
+                  <el-button
+                    size="small"
+                    link
+                    type="primary"
+                    @click.stop
+                  >
+                    预览摘要
+                  </el-button>
+                </template>
+              </el-popover>
+              <el-button
+                size="small"
+                link
+                type="primary"
+                @click.stop.prevent="onOpenTagDialog(data.tag)"
+              >
+                详情
+              </el-button>
+            </template>
+          </div>
+        </template>
+      </el-tree>
+    </div>
+
+    <div class="tag-hint">
+      建议至少勾选 1 项；不勾选会导致设定为空，可能无法生成状态/正文。
+    </div>
+  </el-card>
+</template>
+
+<script lang="ts" setup>
+defineProps<{
+  tagsLoading: boolean;
+  buildingLoreSummary: boolean;
+  onTagTreeRef: (el: any) => void;
+  tagTreeData: any[];
+  onSelectAll: () => void;
+  onInvertSelect: () => void;
+  onClearSelect: () => void;
+  onBuildCurrentLoreSummary: () => void;
+  onTreeCheck: () => void;
+  getTagPreview: (tag: string) => string;
+  onOpenTagDialog: (tag: string) => void;
+}>();
+</script>
+
+<style scoped>
+.muted {
+  color: #909399;
+  font-size: 12px;
+}
+.tag-list-scroll {
+  max-height: 72vh;
+  overflow: auto;
+  padding-right: 6px;
+}
+.tag-tree {
+  font-size: 13px;
+}
+.tree-node-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.tree-node-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tag-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #909399;
+}
+.preview-scroll {
+  max-height: 420px;
+  overflow: auto;
+  padding: 6px 2px;
+}
+.tag-preview {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+}
+.tag-popover :deep(.el-popper__content) {
+  max-height: 420px;
+  overflow: auto;
+}
+</style>
+
