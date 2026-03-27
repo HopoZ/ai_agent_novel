@@ -26,7 +26,6 @@
       </el-tab-pane>
       <el-tab-pane label="图谱可视化" name="graph">
         <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-          <span class="muted">图谱已改为全屏查看，避免画布过小。</span>
           <el-button size="small" type="primary" @click="openGraphDialog" :disabled="!novelId">
             打开全屏图谱
           </el-button>
