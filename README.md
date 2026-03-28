@@ -69,14 +69,14 @@
 
 ```text
 [Presentation]
-Vue3 + Element Plus + ECharts
+Vue3 + Element Plus + ECharts（说明见 `webapp/frontend/README.md`）
   - 标签树/角色选择/输入预览
   - SSE 流式正文
   - 图谱可视化（全屏查看 + 节点/边编辑）
         |
         v
 [API]
-FastAPI (webapp/server.py)
+FastAPI（`python -m uvicorn webapp.backend.server:app`，目录说明见 `webapp/backend/README.md`）
   - /api/novels/*
   - /api/lore/*
   - /api/novels/*/graph
@@ -141,7 +141,7 @@ DEEPSEEK_API_KEY=<your_api_key>
 
 ### 7.4 启动服务
 ```bash
-python -m uvicorn webapp.server:app --reload --port 8000
+python -m uvicorn webapp.backend.server:app --reload --port 8000
 ```
 访问：`http://127.0.0.1:8000/`
 

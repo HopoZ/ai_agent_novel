@@ -34,39 +34,12 @@ def _event_relations_path(novel_id: str) -> Path:
     return _novel_dir(novel_id) / "event_relations.json"
 
 
-def _chapter_tables_dir(novel_id: str) -> Path:
-    # 五表之一：每章一条 JSON（character_ids / event_ids），与正文目录 novel/chapters/ 分离
-    return _novel_dir(novel_id) / "chapter_tables"
-
-
-def _write_chapter_table_file(
-    novel_id: str,
-    chapter_index: int,
-    time_slot: str,
-    character_ids: List[str],
-    event_ids: List[str],
-) -> None:
-    payload = {
-        "chapter_index": chapter_index,
-        "time_slot": time_slot,
-        "character_ids": character_ids,
-        "event_ids": event_ids,
-        "updated_at": datetime.utcnow().isoformat(),
-    }
-    (_chapter_tables_dir(novel_id) / f"{chapter_index}.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-
 def ensure_graph_tables(novel_id: str) -> None:
     nd = _novel_dir(novel_id)
     nd.mkdir(parents=True, exist_ok=True)
-    _chapter_tables_dir(novel_id).mkdir(parents=True, exist_ok=True)
 
-    # 曾误写入 novel/chapters/{n}.json，与 ChapterRecord 冲突；迁入 chapter_tables/
+    # 曾误写入 novel/chapters/{n}.json 的图谱骨架（非 ChapterRecord），直接删除以免干扰加载
     content_chapters = get_chapters_dir(novel_id)
-    table_dir = _chapter_tables_dir(novel_id)
     if content_chapters.exists():
         for fp in content_chapters.glob("*.json"):
             if not fp.stem.isdigit():
@@ -79,12 +52,8 @@ def ensure_graph_tables(novel_id: str) -> None:
                 continue
             if "character_ids" not in raw or "who_is_present" in raw:
                 continue
-            dst = table_dir / fp.name
             try:
-                if dst.exists():
-                    fp.unlink()
-                else:
-                    shutil.move(str(fp), str(dst))
+                fp.unlink()
             except Exception:
                 pass
 
@@ -96,7 +65,6 @@ def ensure_graph_tables(novel_id: str) -> None:
     # 兼容迁移：从旧 graph/* 或旧 *table.json 自动迁移到新四表路径
     old_cpath = _graph_dir(novel_id) / "character_relations.json"
     old_epath = _graph_dir(novel_id) / "event_relations.json"
-    old_ch_dir = _graph_dir(novel_id) / "chapters"
     old_character_table = _novel_dir(novel_id) / "character_table.json"
     old_event_table = _novel_dir(novel_id) / "event_table.json"
 
@@ -136,25 +104,8 @@ def ensure_graph_tables(novel_id: str) -> None:
                 )
         except Exception:
             pass
-    if old_ch_dir.exists() and old_ch_dir.resolve() != _chapter_tables_dir(novel_id).resolve():
-        for fp in old_ch_dir.glob("*.json"):
-            dst = _chapter_tables_dir(novel_id) / fp.name
-            if not dst.exists():
-                shutil.copy2(fp, dst)
 
     if ce_path.exists() and cpath.exists() and ee_path.exists() and epath.exists():
-        # 已迁移时，补齐“每章一表”缺失文件（增量）
-        for chap in list_chapters(novel_id):
-            fp = _chapter_tables_dir(novel_id) / f"{chap.chapter_index}.json"
-            if not fp.exists():
-                state = load_state(novel_id)
-                _write_chapter_table_file(
-                    novel_id=novel_id,
-                    chapter_index=chap.chapter_index,
-                    time_slot=chap.time_slot,
-                    character_ids=[f"char:{p.character_id}" for p in (chap.who_is_present or [])],
-                    event_ids=(resolve_chapter_event_ids(state, chap.chapter_index, chap.time_slot) if state else []),
-                )
         return
 
     state = load_state(novel_id)
@@ -219,10 +170,8 @@ def ensure_graph_tables(novel_id: str) -> None:
 
     for chap in list_chapters(novel_id):
         cid = f"ev:chapter:{chap.chapter_index}"
-        char_ids: List[str] = []
         for p in chap.who_is_present or []:
             ch = f"char:{p.character_id}"
-            char_ids.append(ch)
             event_relations.append(
                 {
                     "source": ch,
@@ -231,17 +180,6 @@ def ensure_graph_tables(novel_id: str) -> None:
                     "kind": "appear",
                 }
             )
-        chapter_payload = {
-            "chapter_index": chap.chapter_index,
-            "time_slot": chap.time_slot,
-            "character_ids": char_ids,
-            "event_ids": resolve_chapter_event_ids(state, chap.chapter_index, chap.time_slot),
-            "updated_at": datetime.utcnow().isoformat(),
-        }
-        (_chapter_tables_dir(novel_id) / f"{chap.chapter_index}.json").write_text(
-            json.dumps(chapter_payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
 
     ce_path.write_text(
         json.dumps({"characters": char_entities, "updated_at": datetime.utcnow().isoformat()}, ensure_ascii=False, indent=2),
@@ -381,23 +319,6 @@ def remap_timeline_numeric_edges_after_delete(rows: List[Dict[str, Any]], delete
     return out
 
 
-def update_chapter_table(
-    novel_id: str,
-    chapter_index: int,
-    time_slot: str,
-    character_ids: List[str],
-    event_ids: List[str],
-) -> None:
-    ensure_graph_tables(novel_id)
-    _write_chapter_table_file(
-        novel_id=novel_id,
-        chapter_index=chapter_index,
-        time_slot=time_slot,
-        character_ids=character_ids,
-        event_ids=event_ids,
-    )
-
-
 def parse_timeline_index_from_event_id(event_id: str) -> Optional[int]:
     """解析 ev:timeline:{int}；草稿 id（非纯数字后缀）返回 None。"""
     raw = str(event_id or "").strip()
@@ -459,19 +380,6 @@ def resolve_chapter_event_ids(state: NovelState, chapter_index: int, time_slot: 
         if by_slot:
             return by_slot
     return []
-
-
-def sync_chapter_table_from_record(novel_id: str, chapter: ChapterRecord, state: Optional[NovelState] = None) -> None:
-    if state is None:
-        state = load_state(novel_id)
-    event_ids = resolve_chapter_event_ids(state, chapter.chapter_index, chapter.time_slot) if state else []
-    update_chapter_table(
-        novel_id=novel_id,
-        chapter_index=chapter.chapter_index,
-        time_slot=chapter.time_slot,
-        character_ids=[f"char:{p.character_id}" for p in (chapter.who_is_present or [])],
-        event_ids=event_ids,
-    )
 
 
 def replace_appear_edges_for_chapter(novel_id: str, chapter: ChapterRecord) -> None:
@@ -592,7 +500,7 @@ def persist_chapter_artifacts(
     正文 API 的统一落盘入口：
     1) 保存章节
     2) 保存 next_state（state.json 不含 relationships 真源）
-    3) 同步三表（章节单表、appear 边、timeline_next 边）
+    3) 同步四表侧：人物/事件实体行、appear 边、timeline_next 边
     """
     save_chapter(novel_id, chapter, chapter_preset_name=chapter_preset_name)
 
@@ -628,7 +536,6 @@ def persist_chapter_artifacts(
             for i, ev in enumerate(next_state.world.timeline or [])
         ],
     )
-    sync_chapter_table_from_record(novel_id, chapter, state=next_state)
     replace_appear_edges_for_chapter(novel_id, chapter)
     replace_timeline_next_edges_from_state(novel_id, next_state)
 
@@ -636,7 +543,7 @@ def persist_chapter_artifacts(
 def hydrate_state_character_relationships(novel_id: str, state: NovelState) -> NovelState:
     """
     将 state.characters[*].relationships 由 character_relations 表实时回填。
-    该函数不落盘，只用于运行期读取，确保“人物关系仅三表真源”。
+    该函数不落盘，只用于运行期读取，确保人物关系以 character_relations 为真源。
     """
     rows = load_character_relations(novel_id)
     rel_map: Dict[str, Dict[str, str]] = {}

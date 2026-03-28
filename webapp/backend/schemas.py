@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -83,4 +83,46 @@ class RunModeRequest(BaseModel):
         le=200000,
         description="max_tokens（单次生成上限，依供应商支持为准）",
     )
+
+
+# --- 图谱 API 请求体（原 server.py 内联模型） ---
+
+
+class GraphNodePatchRequest(BaseModel):
+    node_id: str
+    patch: Dict[str, Any]
+
+
+class GraphNodeCreateRequest(BaseModel):
+    node_type: str  # character | timeline_event | faction
+    character_id: Optional[str] = None
+    description: Optional[str] = None
+    current_location: Optional[str] = None
+    time_slot: Optional[str] = None
+    summary: Optional[str] = None
+    faction_name: Optional[str] = None
+    chapter_index: Optional[int] = None
+
+
+class GraphRelationshipRequest(BaseModel):
+    source: str
+    target: str
+    label: str = ""
+    op: str = "set"  # set | delete
+
+
+class TimelineNeighborsRequest(BaseModel):
+    node_id: str
+    prev_source: Optional[str] = None
+    next_target: Optional[str] = None
+
+
+class GraphEdgePatchRequest(BaseModel):
+    edge_type: str  # relationship | appear | timeline_next | chapter_belongs
+    source: str
+    target: str
+    new_source: Optional[str] = None
+    new_target: Optional[str] = None
+    label: Optional[str] = None
+    op: str = "set"  # set | delete
 

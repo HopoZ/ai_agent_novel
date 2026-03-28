@@ -3,7 +3,6 @@
     <h2 class="header">AI 小说创作代理（稳定写小说）</h2>
 
     <div class="main-layout">
-      <!-- 左：设定标签 -->
       <div class="left-pane" :style="{ width: `${leftPanelWidth}px` }">
         <TagPanel
           :tags-loading="tagsLoading"
@@ -22,7 +21,6 @@
 
       <div class="resize-handle" @mousedown="startResizeLeft" title="拖动调整左侧宽度"></div>
 
-      <!-- 中：填写字段 -->
       <div class="mid-pane" :style="{ width: `${midPanelWidth}px` }">
         <MidFormPanel
           :form="form"
@@ -50,7 +48,6 @@
 
       <div class="resize-handle" @mousedown="startResizeMid" title="拖动调整中间栏宽度"></div>
 
-      <!-- 右：输出 -->
       <div class="right-pane">
         <RightPanel
           :running="running"
@@ -60,9 +57,9 @@
           :token-usage-text="tokenUsageText"
           :last-output-path="lastOutputPath"
           :right-tab="rightTab"
-          :graph-view="graphView"
-          :graph-view-label="graphViewLabel"
-          :open-graph-dialog="openGraphDialog"
+          :graph-view="graph.graphView"
+          :graph-view-label="graph.graphViewLabel"
+          :open-graph-dialog="graph.openGraphDialog"
           :on-right-tab-change="onRightTabChange"
           :result-text="resultText"
           :next-status-text="nextStatusText"
@@ -73,437 +70,65 @@
     </div>
   </div>
 
-  <el-dialog v-model="dialogVisible" :title="dialogTitle" width="70%">
-    <div class="dialog-body">
-      <pre class="dialog-pre" v-text="dialogText"></pre>
-    </div>
-    <template #footer>
-      <span class="dialog-footer">
-        <el-button @click="dialogVisible = false">关闭</el-button>
-      </span>
-    </template>
-  </el-dialog>
+  <TextPreviewDialog v-model="dialogVisible" :title="dialogTitle" :text="dialogText" />
 
-  <el-dialog v-model="createDialogVisible" title="创建新小说" width="560px">
-    <el-form label-position="top">
-      <el-form-item label="新小说名">
-        <el-input v-model="createForm.novelTitle" placeholder="例如：无尽深渊纪事"></el-input>
-      </el-form-item>
-      <el-form-item label="起始时间段（可选）">
-        <el-input v-model="createForm.startTimeSlot" placeholder="例如：第三年秋·傍晚 / 第七日清晨"></el-input>
-      </el-form-item>
-      <el-form-item label="起始视角角色（可选）">
-        <el-input v-model="createForm.povCharacterId" placeholder="例如：主角名/角色ID（按你的设定文本）"></el-input>
-      </el-form-item>
-      <div class="muted" style="margin-top:6px;">
-        使用左侧“设定标签”的当前勾选作为本小说 lorebook。
-      </div>
-    </el-form>
-    <template #footer>
-      <span class="dialog-footer">
-        <el-button @click="createDialogVisible = false" :disabled="running">取消</el-button>
-        <el-button type="primary" @click="createNovel" :loading="running">
-          {{ running ? "创建中..." : "创建并切换" }}
-        </el-button>
-      </span>
-    </template>
-  </el-dialog>
+  <CreateNovelDialog
+    v-model="createDialogVisible"
+    v-model:novel-title="createForm.novelTitle"
+    v-model:start-time-slot="createForm.startTimeSlot"
+    v-model:pov-character-id="createForm.povCharacterId"
+    :running="running"
+    @create="createNovel"
+  />
 
-  <el-dialog
+  <InputPreviewDialog
     v-model="inputPreviewVisible"
-    class="input-preview-dialog"
-    title="模型 Input 预览"
-    width="85%"
-    destroy-on-close
-  >
-    <p class="input-preview-lead muted">
-      以下为即将发给模型的分阶段提示词。确认无误后点击「确认并运行」；需要排查问题时可用「复制完整 JSON」。
-    </p>
-    <div v-if="inputPreviewData" class="input-preview-body">
-      <el-descriptions :column="2" border size="small" class="input-meta-desc">
-        <el-descriptions-item label="小说 ID" :span="2">
-          <code class="input-code-inline">{{ inputPreviewData.novel_id || "—" }}</code>
-        </el-descriptions-item>
-        <el-descriptions-item label="模式">
-          <el-tag size="small" type="primary">{{ inputPreviewData.mode || "—" }}</el-tag>
-        </el-descriptions-item>
-        <el-descriptions-item label="手动时间段">
-          {{ inputPreviewData.manual_time_slot ? "是" : "否" }}
-        </el-descriptions-item>
-      </el-descriptions>
+    v-model:open-stages="inputPreviewOpenStages"
+    :input-preview-data="inputPreviewData"
+    :running="running"
+    :pending-run-starting="pendingRunStarting"
+    :pending-run-payload="pendingRunPayload"
+    @copy-json="copyInputPreviewJson"
+    @confirm="confirmRunFromPreview"
+  />
 
-      <el-collapse v-model="inputPreviewOpenStages" class="input-stages-collapse">
-        <el-collapse-item
-          v-for="(st, idx) in inputPreviewStages"
-          :key="`st-${idx}-${st.name}`"
-          :name="String(idx)"
-        >
-          <template #title>
-            <span class="stage-title-row">
-              <span class="stage-title-text">{{ stageDisplayTitle(st.name) }}</span>
-              <el-tag size="small" effect="plain" class="stage-name-tag">{{ st.name }}</el-tag>
-            </span>
-          </template>
-          <div class="stage-panels">
-            <section class="prompt-block">
-              <header class="prompt-block-label">System</header>
-              <div class="prompt-block-body">{{ st.system || "（空）" }}</div>
-            </section>
-            <section class="prompt-block prompt-block--human">
-              <header class="prompt-block-label">Human / User</header>
-              <div class="prompt-block-body">{{ st.human || "（空）" }}</div>
-            </section>
-          </div>
-        </el-collapse-item>
-      </el-collapse>
-    </div>
-    <div v-else class="muted">暂无预览数据，请关闭后重试。</div>
-    <template #footer>
-      <span class="dialog-footer input-preview-footer">
-        <el-button @click="copyInputPreviewJson" :disabled="!inputPreviewData">复制完整 JSON</el-button>
-        <el-button @click="inputPreviewVisible = false">关闭</el-button>
-        <el-button
-          type="primary"
-          :disabled="running || !pendingRunPayload"
-          :loading="pendingRunStarting"
-          @click="confirmRunFromPreview"
-        >
-          确认并运行
-        </el-button>
-      </span>
-    </template>
-  </el-dialog>
+  <GraphDialogs :novel-id="form.novelId" />
 
-  <el-dialog v-model="graphFullscreenVisible" title="图谱可视化（全屏）" fullscreen append-to-body>
-    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-      <el-button size="small" type="warning" class="back-btn-highlight" @click="closeGraphDialog">返回</el-button>
-      <el-segmented
-        :model-value="graphView"
-        @update:model-value="onGraphViewChange"
-        :options="[
-          { label: '人物关系网', value: 'people' },
-          { label: '剧情事件网', value: 'events' },
-          { label: '混合网', value: 'mixed' },
-        ]"
-      />
-      <el-button size="small" :loading="graphLoading" @click="loadGraph">刷新图谱</el-button>
-      <el-button size="small" type="success" plain @click="openGraphNodeCreate" :disabled="!form.novelId">
-        新建节点
-      </el-button>
-      <span class="muted">点击节点可编辑/删除；滚轮缩放，拖拽平移。</span>
-    </div>
-    <div style="height:10px;"></div>
-    <div class="graph-box-fullscreen">
-      <div v-if="!form.novelId" style="color:#909399;">请先选择/创建小说，再查看图谱。</div>
-      <div v-else :ref="onGraphRef" class="graph-canvas-fullscreen"></div>
-    </div>
-  </el-dialog>
-
-  <el-dialog v-model="graphCreateVisible" title="新建图谱节点" width="480px" append-to-body destroy-on-close>
-    <el-form label-position="top">
-      <el-form-item label="节点类型">
-        <el-select v-model="graphCreateType" style="width:100%;">
-          <el-option label="人物（character）" value="character" />
-          <el-option label="时间线事件（timeline_event）" value="timeline_event" />
-          <el-option label="势力（faction）" value="faction" />
-        </el-select>
-      </el-form-item>
-      <template v-if="graphCreateType === 'character'">
-        <el-form-item label="角色 ID（唯一）" required>
-          <el-input v-model="graphCreateCharId" placeholder="例如：苏瑶 / 虚宇" />
-        </el-form-item>
-        <el-form-item label="简介（可选）">
-          <el-input v-model="graphCreateCharDesc" type="textarea" :rows="3" />
-        </el-form-item>
-        <el-form-item label="当前位置（可选）">
-          <el-input v-model="graphCreateCharLoc" />
-        </el-form-item>
-      </template>
-      <template v-else-if="graphCreateType === 'timeline_event'">
-        <div class="muted" style="margin-bottom:12px; line-height:1.55;">
-          时间线是<strong>两层</strong>：<strong>①</strong> 每条事件的文案与可选章节绑定存在小说
-          <code>state.json</code> 的 <code>world.timeline</code>（本表单即写入这里）；
-          <strong>②</strong> 事件谁先谁后、如何跳转，由图谱关系真源
-          <code>event_relations.json</code> 里的 <code>timeline_next</code> 边表示。
-          新建后请<strong>在图谱中点开该节点</strong>，用「上一跳 / 下一跳」保存与前后事件的连接。
-        </div>
-        <el-form-item label="time_slot" required>
-          <el-input v-model="graphCreateTlSlot" placeholder="例如：战争后期·反攻前夜" />
-        </el-form-item>
-        <el-form-item label="summary" required>
-          <el-input v-model="graphCreateTlSummary" type="textarea" :rows="3" placeholder="一句话概括该事件" />
-        </el-form-item>
-        <el-form-item label="绑定章节号 chapter_index（可选）">
-          <el-input v-model="graphCreateTlChapterIndexStr" placeholder="留空不绑定；填正整数" />
-          <div class="muted" style="margin-top:6px;">
-            写入 <code>world.timeline[].chapter_index</code>，与已有章节号对齐时用于归属/检索；与 <code>timeline_next</code> 边无关。
-          </div>
-        </el-form-item>
-      </template>
-      <template v-else>
-        <el-form-item label="势力名称（唯一）" required>
-          <el-input v-model="graphCreateFacName" placeholder="例如：天机阁" />
-        </el-form-item>
-        <el-form-item label="描述">
-          <el-input v-model="graphCreateFacDesc" type="textarea" :rows="4" />
-        </el-form-item>
-      </template>
-    </el-form>
-    <template #footer>
-      <el-button @click="graphCreateVisible = false">取消</el-button>
-      <el-button type="primary" :loading="graphCreateSubmitting" @click="submitGraphNodeCreate">创建</el-button>
-    </template>
-  </el-dialog>
-
-  <el-drawer v-model="graphEditVisible" title="图谱编辑" size="520px" append-to-body>
-    <div v-if="!graphEditNode && !graphEditEdge" class="graph-drawer-empty muted">
-      <p>请先在图谱中点击一个节点或一条边。</p>
-      <el-button type="success" plain size="small" @click="openGraphNodeCreate" :disabled="!form.novelId">
-        新建节点
-      </el-button>
-    </div>
-    <template v-else-if="graphEditEdge">
-      <div class="muted">边：<code>{{ graphEditEdge.source }}</code> -> <code>{{ graphEditEdge.target }}</code></div>
-      <div class="muted" style="margin-top:4px;">类型：{{ graphEditEdge.type || "relationship" }}</div>
-      <div style="height:10px;"></div>
-      <template v-if="String(graphEditEdge.type || '').toLowerCase() === 'relationship'">
-        <el-form label-position="top">
-          <el-form-item label="source">
-            <el-select v-model="edgeSourceDraft" filterable placeholder="选择 source">
-              <el-option v-for="c in graphCharacterNodeIds" :key="`es-${c}`" :label="c" :value="`char:${c}`" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="target">
-            <el-select v-model="edgeTargetDraft" filterable placeholder="选择 target">
-              <el-option v-for="c in graphCharacterNodeIds" :key="`et-${c}`" :label="c" :value="`char:${c}`" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="怎么关联（label）">
-            <el-input v-model="edgeRelLabel" placeholder="例如：师徒 / 敌对 / 欠人情 / 互相利用" />
-          </el-form-item>
-          <div style="display:flex; gap:8px;">
-            <el-button type="primary" @click="saveEdgeRelationship">保存边关系</el-button>
-            <el-button type="danger" plain @click="deleteEdgeRelationship">删除这条边</el-button>
-          </div>
-        </el-form>
-      </template>
-      <template v-else-if="String(graphEditEdge.type || '').toLowerCase() === 'appear'">
-        <el-form label-position="top">
-          <el-form-item label="source（角色）">
-            <el-select v-model="edgeSourceDraft" filterable placeholder="选择角色">
-              <el-option v-for="c in graphCharacterNodeIds" :key="`as-${c}`" :label="c" :value="`char:${c}`" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="target（章节事件）">
-            <el-select v-model="edgeTargetDraft" filterable placeholder="选择章节事件">
-              <el-option v-for="c in graphChapterNodeIds" :key="`at-${c}`" :label="c" :value="c" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="出场/角色定位（label）">
-            <el-input v-model="edgeRelLabel" placeholder="例如：出场 / 指挥 / 旁观 / 受伤撤离" />
-          </el-form-item>
-          <div style="display:flex; gap:8px;">
-            <el-button type="primary" @click="saveEdgeRelationship">保存边</el-button>
-            <el-button type="danger" plain @click="deleteEdgeRelationship">删除这条边</el-button>
-          </div>
-        </el-form>
-      </template>
-      <template v-else-if="String(graphEditEdge.type || '').toLowerCase() === 'timeline_next'">
-        <el-form label-position="top">
-          <el-form-item label="source（时间线事件）">
-            <el-select v-model="edgeSourceDraft" filterable placeholder="选择 source">
-              <el-option label="（未安排）当前时间线暂无起始事件" value="" />
-              <el-option v-for="t in graphTimelineOptions" :key="`ts-${t.id}`" :label="t.label" :value="t.id" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="target（下一跳）">
-            <el-select v-model="edgeTargetDraft" filterable placeholder="选择 target">
-              <el-option label="（未安排）当前时间线暂无下个事件" value="" />
-              <el-option v-for="t in graphTimelineOptions" :key="`tt-${t.id}`" :label="t.label" :value="t.id" />
-            </el-select>
-          </el-form-item>
-          <div style="display:flex; gap:8px;">
-            <el-button type="primary" @click="saveEdgeRelationship">保存边</el-button>
-            <el-button type="danger" plain @click="deleteEdgeRelationship">删除当前边</el-button>
-          </div>
-          <div class="muted" style="margin-top:8px;">提示：timeline_next 现在直接写入“事件关系表”；手工编辑的连线会保留，未定义下跳才会自动补默认顺序边。</div>
-        </el-form>
-      </template>
-      <template v-else-if="String(graphEditEdge.type || '').toLowerCase() === 'chapter_belongs'">
-        <el-form label-position="top">
-          <el-form-item label="source（章节事件）">
-            <el-select v-model="edgeSourceDraft" filterable placeholder="选择章节事件">
-              <el-option v-for="c in graphChapterNodeIds" :key="`cb-s-${c}`" :label="c" :value="c" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="target（归属的时间线事件）">
-            <el-select v-model="edgeTargetDraft" filterable clearable placeholder="选择时间线事件（可清空表示取消归属）">
-              <el-option label="（取消归属）" value="" />
-              <el-option v-for="t in graphTimelineOptions" :key="`cb-t-${t.id}`" :label="t.label" :value="t.id" />
-            </el-select>
-          </el-form-item>
-          <div style="display:flex; gap:8px;">
-            <el-button type="primary" @click="saveEdgeRelationship">保存归属</el-button>
-            <el-button type="danger" plain @click="deleteEdgeRelationship">删除当前边</el-button>
-          </div>
-          <div class="muted" style="margin-top:8px;">提示：章节归属会写回时间线事件的 chapter_index，并同步三表。</div>
-        </el-form>
-      </template>
-      <template v-else>
-        <div class="muted">该类型边暂不支持修改（可修改 relationship 边）。</div>
-      </template>
-    </template>
-    <template v-else>
-      <div class="muted">节点：<code>{{ graphEditNode.id }}</code>（{{ graphEditNode.type }}）</div>
-      <div style="height:10px;"></div>
-
-      <template v-if="graphEditNode.type === 'character'">
-        <el-form label-position="top">
-          <el-form-item label="description">
-            <el-input v-model="graphCharDesc" type="textarea" :rows="3" />
-          </el-form-item>
-          <el-form-item label="current_location">
-            <el-input v-model="graphCharLoc" />
-          </el-form-item>
-          <el-form-item label="goals（每行一条）">
-            <el-input v-model="graphCharGoals" type="textarea" :rows="4" />
-          </el-form-item>
-          <el-form-item label="known_facts（每行一条）">
-            <el-input v-model="graphCharFacts" type="textarea" :rows="4" />
-          </el-form-item>
-          <div style="display:flex; gap:8px; flex-wrap:wrap;">
-            <el-button type="primary" @click="saveGraphNodePatch" :disabled="!form.novelId">保存节点</el-button>
-            <el-button type="danger" plain @click="deleteCurrentGraphNode" :disabled="!form.novelId">删除节点</el-button>
-          </div>
-        </el-form>
-
-        <el-divider />
-        <div style="font-weight:600; margin-bottom:6px;">人物关系（relationship）</div>
-        <div class="muted" style="margin-bottom:10px;">修改 source 角色 -> target 角色 的关系描述。</div>
-        <el-form label-position="top">
-          <el-form-item label="关联到哪个角色（target）">
-            <el-select v-model="relTarget" filterable clearable placeholder="选择一个角色">
-              <el-option v-for="c in graphCharacterNodeIds" :key="c" :label="c" :value="c" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="怎么关联（label）">
-            <el-input v-model="relLabel" placeholder="例如：师徒 / 敌对 / 欠人情 / 互相利用" />
-          </el-form-item>
-          <div style="display:flex; gap:8px;">
-            <el-button type="primary" @click="setRelationship">新增/更新关系</el-button>
-            <el-button type="danger" plain @click="deleteRelationship">删除关系</el-button>
-          </div>
-        </el-form>
-      </template>
-
-      <template v-else-if="graphEditNode.type === 'faction'">
-        <el-form label-position="top">
-          <el-form-item label="description">
-            <el-input v-model="graphFacDesc" type="textarea" :rows="6" />
-          </el-form-item>
-          <div style="display:flex; gap:8px; flex-wrap:wrap;">
-            <el-button type="primary" @click="saveGraphNodePatch" :disabled="!form.novelId">保存节点</el-button>
-            <el-button type="danger" plain @click="deleteCurrentGraphNode" :disabled="!form.novelId">删除节点</el-button>
-          </div>
-        </el-form>
-      </template>
-
-      <template v-else-if="graphEditNode.type === 'timeline_event'">
-        <el-form label-position="top">
-          <el-form-item label="time_slot">
-            <el-input v-model="graphTlSlot" />
-          </el-form-item>
-          <el-form-item label="summary">
-            <el-input v-model="graphTlSummary" type="textarea" :rows="4" />
-          </el-form-item>
-          <el-form-item label="上一跳（谁指向当前事件）">
-            <el-select v-model="timelinePrevDraft" filterable clearable placeholder="选择上一事件（可空）">
-              <el-option label="（未安排）暂无上一事件" value="" />
-              <el-option
-                v-for="t in graphTimelineOptions"
-                :key="`prev-${t.id}`"
-                :label="t.label"
-                :value="t.id"
-              />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="下一跳（当前事件指向谁）">
-            <el-select v-model="timelineNextDraft" filterable clearable placeholder="选择下一事件（可空）">
-              <el-option label="（未安排）暂无下一事件" value="" />
-              <el-option
-                v-for="t in graphTimelineOptions"
-                :key="`next-${t.id}`"
-                :label="t.label"
-                :value="t.id"
-              />
-            </el-select>
-          </el-form-item>
-          <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-            <el-button @click="saveTimelineNeighbors" :disabled="!form.novelId">保存上下关系</el-button>
-            <el-button type="primary" @click="saveGraphNodePatch" :disabled="!form.novelId">保存节点</el-button>
-            <el-button type="danger" plain @click="deleteCurrentGraphNode" :disabled="!form.novelId">删除节点</el-button>
-          </div>
-          <div class="muted" style="margin-top:10px;">
-            删除时间线事件会重排后续 ev:timeline 下标，并清理指向该点的时间推进边。
-          </div>
-        </el-form>
-      </template>
-
-      <template v-else>
-        <div class="muted">该类型节点暂不支持在图谱内编辑或删除。</div>
-      </template>
-    </template>
-  </el-drawer>
-
-  <el-dialog v-model="roleManagerVisible" title="角色标签管理（本次会话）" width="680px">
-    <el-form label-position="top">
-      <el-form-item label="新增角色标签">
-        <div style="display:flex; gap:8px; width:100%;">
-          <el-input v-model="characterTagDraft" placeholder="输入角色标签后点“添加”"></el-input>
-          <el-button @click="addCharacterTag">添加</el-button>
-        </div>
-      </el-form-item>
-      <el-form-item label="当前可选标签">
-        <div style="display:flex; gap:6px; flex-wrap:wrap;">
-          <el-tag
-            v-for="cid in allCharacterOptions"
-            :key="`mg-${cid}`"
-            closable
-            @close="removeCharacterTag(cid)"
-          >
-            {{ cid }}
-          </el-tag>
-        </div>
-        <div class="muted" style="margin-top:6px;">
-          支持新增/删除角色标签；如需“修改”，先删除旧标签再添加新标签。
-        </div>
-      </el-form-item>
-    </el-form>
-    <template #footer>
-      <span class="dialog-footer">
-        <el-button @click="roleManagerVisible = false">关闭</el-button>
-      </span>
-    </template>
-  </el-dialog>
+  <RoleManagerDialog
+    v-model="roleManagerVisible"
+    v-model:character-tag-draft="characterTagDraft"
+    :all-character-options="allCharacterOptions"
+    @add="addCharacterTag"
+    @remove="removeCharacterTag"
+  />
 </template>
 
 <script lang="ts" setup>
-import { computed, nextTick, onMounted, onBeforeUnmount, reactive, ref, watch } from "vue";
-import { ElMessage, ElMessageBox } from "element-plus";
-import * as echarts from "echarts";
+import { computed, nextTick, onMounted, provide, reactive, ref, toRef, watch } from "vue";
+import { ElMessage } from "element-plus";
+import { apiJson, apiSse, logDebug } from "./api/client";
+import { usePanelResize } from "./composables/usePanelResize";
+import { GRAPH_INJECTION_KEY, useGraph } from "./composables/useGraph";
 import TagPanel from "./components/TagPanel.vue";
 import MidFormPanel from "./components/MidFormPanel.vue";
 import RightPanel from "./components/RightPanel.vue";
+import GraphDialogs from "./components/graph/GraphDialogs.vue";
+import TextPreviewDialog from "./components/dialogs/TextPreviewDialog.vue";
+import CreateNovelDialog from "./components/dialogs/CreateNovelDialog.vue";
+import InputPreviewDialog from "./components/dialogs/InputPreviewDialog.vue";
+import RoleManagerDialog from "./components/dialogs/RoleManagerDialog.vue";
 
 type Mode = "init_state" | "plan_only" | "write_chapter" | "revise_chapter";
+
+const { leftPanelWidth, midPanelWidth, startResizeLeft, startResizeMid } = usePanelResize();
 
 const tagsLoading = ref(true);
 const tags = ref<string[]>([]);
 const tagGroups = ref<Record<string, string[]>>({});
 const selectedTags = ref<string[]>([]);
-const tagTreeRef = ref<any>(null);
-function onTagTreeRef(el: any) {
-  tagTreeRef.value = el;
+const tagTreeRef = ref<{ setCheckedKeys: (k: unknown[], leafOnly?: boolean) => void; getCheckedKeys: (leafOnly?: boolean) => unknown[]; getHalfCheckedKeys: () => unknown[] } | null>(null);
+function onTagTreeRef(el: unknown) {
+  tagTreeRef.value = el as typeof tagTreeRef.value;
 }
 const novelsLoading = ref(true);
 const novels = ref<Array<{ novel_id: string; novel_title: string }>>([]);
@@ -527,407 +152,10 @@ const runPhase = ref<"idle" | "planning" | "writing" | "saving" | "outputs_writt
 const runHint = ref("");
 const lastOutputPath = ref("");
 const tokenUsageText = ref("");
-const leftPanelWidth = ref(360);
-const LEFT_MIN_WIDTH = 280;
-const LEFT_MAX_WIDTH = 680;
-let resizingLeft = false;
-let resizeStartX = 0;
-let resizeStartW = 0;
-const midPanelWidth = ref(420);
-const MID_MIN_WIDTH = 340;
-const MID_MAX_WIDTH = 760;
-let resizingMid = false;
-let midResizeStartX = 0;
-let midResizeStartW = 0;
 
 const rightTab = ref<"result" | "next" | "plan" | "graph">("result");
-const graphView = ref<"people" | "events" | "mixed">("mixed");
-const graphFullscreenVisible = ref(false);
 function onRightTabChange(v: "result" | "next" | "plan" | "graph") {
   rightTab.value = v;
-}
-function onGraphViewChange(v: "people" | "events" | "mixed") {
-  graphView.value = v;
-}
-const graphViewLabel = computed(() => {
-  if (graphView.value === "people") return "人物关系网";
-  if (graphView.value === "events") return "剧情事件网";
-  return "混合网";
-});
-const graphLoading = ref(false);
-const graphEl = ref<HTMLDivElement | null>(null);
-let graphChart: echarts.ECharts | null = null;
-const graphData = ref<{ nodes: any[]; edges: any[] } | null>(null);
-function onGraphRef(el: any) {
-  graphEl.value = el as HTMLDivElement | null;
-}
-
-const graphEditVisible = ref(false);
-const graphEditNode = ref<any>(null);
-const graphEditEdge = ref<any>(null);
-const graphCharDesc = ref("");
-const graphCharLoc = ref("");
-const graphCharGoals = ref("");
-const graphCharFacts = ref("");
-const graphFacDesc = ref("");
-const graphTlSlot = ref("");
-const graphTlSummary = ref("");
-const timelinePrevDraft = ref("");
-const timelineNextDraft = ref("");
-const relTarget = ref("");
-const relLabel = ref("");
-const edgeRelLabel = ref("");
-const edgeSourceDraft = ref("");
-const edgeTargetDraft = ref("");
-
-const graphCreateVisible = ref(false);
-const graphCreateSubmitting = ref(false);
-const graphCreateType = ref<"character" | "timeline_event" | "faction">("timeline_event");
-const graphCreateCharId = ref("");
-const graphCreateCharDesc = ref("");
-const graphCreateCharLoc = ref("");
-const graphCreateTlSlot = ref("");
-const graphCreateTlSummary = ref("");
-const graphCreateTlChapterIndexStr = ref("");
-const graphCreateFacName = ref("");
-const graphCreateFacDesc = ref("");
-
-const graphCharacterNodeIds = computed(() => {
-  const nodes = graphData.value?.nodes || [];
-  return nodes
-    .filter((n: any) => n && n.type === "character" && typeof n.id === "string" && n.id.startsWith("char:"))
-    .map((n: any) => String(n.id).slice("char:".length))
-    .filter(Boolean);
-});
-
-const graphTimelineNodeIds = computed(() => {
-  const nodes = graphData.value?.nodes || [];
-  return nodes
-    .filter((n: any) => n && n.type === "timeline_event" && typeof n.id === "string" && n.id.startsWith("ev:timeline:"))
-    .map((n: any) => String(n.id))
-    .filter(Boolean);
-});
-
-const graphTimelineOptions = computed(() => {
-  const nodes = graphData.value?.nodes || [];
-  return nodes
-    .filter((n: any) => n && n.type === "timeline_event" && typeof n.id === "string" && n.id.startsWith("ev:timeline:"))
-    .map((n: any) => ({
-      id: String(n.id),
-      label: String(n.label || n.id),
-    }));
-});
-
-const graphChapterNodeIds = computed(() => {
-  const nodes = graphData.value?.nodes || [];
-  return nodes
-    .filter((n: any) => n && n.type === "chapter_event" && typeof n.id === "string" && n.id.startsWith("ev:chapter:"))
-    .map((n: any) => String(n.id))
-    .filter(Boolean);
-});
-
-function openGraphEditor(node: any) {
-  graphEditEdge.value = null;
-  graphEditNode.value = node;
-  graphEditVisible.value = true;
-  const data = node?.data || {};
-  if (node?.type === "character") {
-    graphCharDesc.value = String(data?.description || "");
-    graphCharLoc.value = String(data?.current_location || "");
-    graphCharGoals.value = Array.isArray(data?.goals) ? data.goals.join("\n") : String(data?.goals || "");
-    graphCharFacts.value = Array.isArray(data?.known_facts) ? data.known_facts.join("\n") : String(data?.known_facts || "");
-  } else if (node?.type === "faction") {
-    graphFacDesc.value = String(data?.description || "");
-  } else if (node?.type === "timeline_event") {
-    graphTlSlot.value = String(data?.time_slot || "");
-    graphTlSummary.value = String(data?.summary || "");
-    const edges = (graphData.value?.edges || []).filter((e: any) => (e?.type || "") === "timeline_next");
-    const nodeId = String(node?.id || "");
-    const incoming = edges.find((e: any) => String(e?.target || "") === nodeId);
-    const outgoing = edges.find((e: any) => String(e?.source || "") === nodeId);
-    timelinePrevDraft.value = String(incoming?.source || "");
-    timelineNextDraft.value = String(outgoing?.target || "");
-  }
-  relTarget.value = "";
-  relLabel.value = "";
-}
-
-async function saveTimelineNeighbors() {
-  const novelId = (form.novelId || "").trim();
-  const node = graphEditNode.value;
-  if (!novelId || !node || node.type !== "timeline_event") return;
-  const nodeId = String(node.id || "");
-  if (!nodeId.startsWith("ev:timeline:")) {
-    ElMessage.error("当前节点不是可编辑的时间线事件。");
-    return;
-  }
-  if (timelinePrevDraft.value && timelinePrevDraft.value === nodeId) {
-    ElMessage.error("上一跳不能指向自己。");
-    return;
-  }
-  if (timelineNextDraft.value && timelineNextDraft.value === nodeId) {
-    ElMessage.error("下一跳不能指向自己。");
-    return;
-  }
-
-  const newPrev = (timelinePrevDraft.value || "").trim();
-  const newNext = (timelineNextDraft.value || "").trim();
-  await apiJson(`/api/novels/${encodeURIComponent(novelId)}/graph/timeline-neighbors`, "PATCH", {
-    node_id: nodeId,
-    prev_source: newPrev || "",
-    next_target: newNext || "",
-  });
-
-  ElMessage.success("已保存事件节点的上/下关系");
-  await loadGraph();
-}
-
-function openGraphEdgeEditor(edge: any) {
-  graphEditNode.value = null;
-  graphEditEdge.value = edge;
-  graphEditVisible.value = true;
-  edgeRelLabel.value = String(edge?.rel_label || (typeof edge?.label === "string" ? edge.label : ""));
-  edgeSourceDraft.value = String(edge?.source || "");
-  edgeTargetDraft.value = String(edge?.target || "");
-}
-
-async function saveGraphNodePatch() {
-  const novelId = (form.novelId || "").trim();
-  if (!novelId || !graphEditNode.value) return;
-  const node = graphEditNode.value;
-  let patch: any = {};
-  if (node.type === "character") {
-    patch = {
-      description: graphCharDesc.value,
-      current_location: graphCharLoc.value,
-      goals: graphCharGoals.value,
-      known_facts: graphCharFacts.value,
-    };
-  } else if (node.type === "faction") {
-    patch = { description: graphFacDesc.value };
-  } else if (node.type === "timeline_event") {
-    patch = { time_slot: graphTlSlot.value, summary: graphTlSummary.value };
-  } else {
-    ElMessage.warning("该节点类型暂不支持保存。");
-    return;
-  }
-  await apiJson(`/api/novels/${encodeURIComponent(novelId)}/graph/node`, "PATCH", {
-    node_id: node.id,
-    patch,
-  });
-  ElMessage.success("已保存节点修改");
-  await loadGraph();
-}
-
-async function setRelationship() {
-  const novelId = (form.novelId || "").trim();
-  const node = graphEditNode.value;
-  if (!novelId || !node || node.type !== "character") return;
-  const srcId = String(node.id || "");
-  const tgtId = (relTarget.value || "").trim();
-  const label = (relLabel.value || "").trim();
-  if (!tgtId || !label) {
-    ElMessage.error("请选择 target 并填写关系 label。");
-    return;
-  }
-  await apiJson(`/api/novels/${encodeURIComponent(novelId)}/graph/relationship`, "POST", {
-    source: srcId,
-    target: `char:${tgtId}`,
-    label,
-    op: "set",
-  });
-  ElMessage.success("已更新关系");
-  await loadGraph();
-}
-
-async function deleteRelationship() {
-  const novelId = (form.novelId || "").trim();
-  const node = graphEditNode.value;
-  if (!novelId || !node || node.type !== "character") return;
-  const srcId = String(node.id || "");
-  const tgtId = (relTarget.value || "").trim();
-  if (!tgtId) {
-    ElMessage.error("请选择要删除的 target。");
-    return;
-  }
-  await apiJson(`/api/novels/${encodeURIComponent(novelId)}/graph/relationship`, "POST", {
-    source: srcId,
-    target: `char:${tgtId}`,
-    label: "",
-    op: "delete",
-  });
-  ElMessage.success("已删除关系");
-  await loadGraph();
-}
-
-async function saveEdgeRelationship() {
-  const novelId = (form.novelId || "").trim();
-  const e = graphEditEdge.value;
-  if (!novelId || !e) return;
-  const source = String(e.source || "");
-  const target = String(e.target || "");
-  const new_source = (edgeSourceDraft.value || source).trim();
-  const new_target = (edgeTargetDraft.value || target).trim();
-  const label = (edgeRelLabel.value || "").trim();
-  const edge_type = String(e.type || "relationship");
-  if (edge_type.toLowerCase() === "relationship" && !label) {
-    ElMessage.error("请先填写关系 label。");
-    return;
-  }
-  await apiJson(`/api/novels/${encodeURIComponent(novelId)}/graph/edge`, "PATCH", {
-    edge_type,
-    source,
-    target,
-    new_source,
-    new_target,
-    label,
-    op: "set",
-  });
-  ElMessage.success("已保存边修改");
-  await loadGraph();
-}
-
-async function deleteEdgeRelationship() {
-  const novelId = (form.novelId || "").trim();
-  const e = graphEditEdge.value;
-  if (!novelId || !e) return;
-  const source = String(e.source || "");
-  const target = String(e.target || "");
-  const edge_type = String(e.type || "relationship");
-  await apiJson(`/api/novels/${encodeURIComponent(novelId)}/graph/edge`, "PATCH", {
-    edge_type,
-    source,
-    target,
-    op: "delete",
-  });
-  ElMessage.success("已删除边");
-  await loadGraph();
-}
-
-function resetGraphCreateForm() {
-  graphCreateCharId.value = "";
-  graphCreateCharDesc.value = "";
-  graphCreateCharLoc.value = "";
-  graphCreateTlSlot.value = "";
-  graphCreateTlSummary.value = "";
-  graphCreateTlChapterIndexStr.value = "";
-  graphCreateFacName.value = "";
-  graphCreateFacDesc.value = "";
-}
-
-function openGraphNodeCreate() {
-  if (!(form.novelId || "").trim()) {
-    ElMessage.error("请先选择小说。");
-    return;
-  }
-  resetGraphCreateForm();
-  const v = graphView.value;
-  if (v === "people") graphCreateType.value = "character";
-  else if (v === "events") graphCreateType.value = "timeline_event";
-  else graphCreateType.value = "character";
-  graphCreateVisible.value = true;
-}
-
-async function submitGraphNodeCreate() {
-  const novelId = (form.novelId || "").trim();
-  if (!novelId) return;
-  const t = graphCreateType.value;
-  let body: any = { node_type: t };
-  if (t === "character") {
-    const cid = (graphCreateCharId.value || "").trim();
-    if (!cid) {
-      ElMessage.error("请填写角色 ID。");
-      return;
-    }
-    body.character_id = cid;
-    body.description = (graphCreateCharDesc.value || "").trim() || null;
-    body.current_location = (graphCreateCharLoc.value || "").trim() || null;
-  } else if (t === "timeline_event") {
-    const slot = (graphCreateTlSlot.value || "").trim();
-    const summ = (graphCreateTlSummary.value || "").trim();
-    if (!slot || !summ) {
-      ElMessage.error("请填写 time_slot 与 summary。");
-      return;
-    }
-    body.time_slot = slot;
-    body.summary = summ;
-    const ci = parseInt(String(graphCreateTlChapterIndexStr.value || "").trim(), 10);
-    if (!Number.isNaN(ci) && ci >= 1) {
-      body.chapter_index = ci;
-    }
-  } else {
-    const fn = (graphCreateFacName.value || "").trim();
-    if (!fn) {
-      ElMessage.error("请填写势力名称。");
-      return;
-    }
-    body.faction_name = fn;
-    body.description = (graphCreateFacDesc.value || "").trim() || "";
-  }
-  graphCreateSubmitting.value = true;
-  try {
-    await apiJson(`/api/novels/${encodeURIComponent(novelId)}/graph/nodes`, "POST", body);
-    ElMessage.success("已创建节点");
-    graphCreateVisible.value = false;
-    await loadGraph();
-    if (graphFullscreenVisible.value) renderGraph();
-  } catch (e: any) {
-    ElMessage.error(e?.message || String(e));
-  } finally {
-    graphCreateSubmitting.value = false;
-  }
-}
-
-async function deleteCurrentGraphNode() {
-  const novelId = (form.novelId || "").trim();
-  const node = graphEditNode.value;
-  if (!novelId || !node?.id) return;
-  const nid = String(node.id || "");
-  if (nid.startsWith("ev:chapter:")) {
-    ElMessage.warning("章节节点不能在图谱内删除，请使用章节/正文管理。");
-    return;
-  }
-  try {
-    await ElMessageBox.confirm(
-      `确定删除节点「${nid}」？人物会清理相关关系边与出场边；时间线删除会重排后续 ev:timeline 下标。`,
-      "删除节点",
-      { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" },
-    );
-  } catch {
-    return;
-  }
-  try {
-    await apiJson(
-      `/api/novels/${encodeURIComponent(novelId)}/graph/nodes?node_id=${encodeURIComponent(nid)}`,
-      "DELETE",
-      undefined,
-    );
-    ElMessage.success("已删除节点");
-    graphEditVisible.value = false;
-    graphEditNode.value = null;
-    await loadGraph();
-    if (graphFullscreenVisible.value) renderGraph();
-  } catch (e: any) {
-    ElMessage.error(e?.message || String(e));
-  }
-}
-async function openGraphDialog() {
-  const novelId = (form.novelId || "").trim();
-  if (!novelId) {
-    ElMessage.error("请先选择/创建小说。");
-    return;
-  }
-  graphFullscreenVisible.value = true;
-  await nextTick();
-  if (graphData.value) {
-    renderGraph();
-  } else {
-    await loadGraph();
-  }
-  onResize();
-}
-function closeGraphDialog() {
-  graphFullscreenVisible.value = false;
 }
 
 const dialogVisible = ref(false);
@@ -945,30 +173,11 @@ function openRoleManager() {
 const createDialogVisible = ref(false);
 const previewingInput = ref(false);
 const inputPreviewVisible = ref(false);
-const inputPreviewData = ref<any>(null);
+const inputPreviewData = ref<Record<string, unknown> | null>(null);
 const inputPreviewOpenStages = ref<string[]>([]);
 
-const inputPreviewStages = computed(() => {
-  const d = inputPreviewData.value;
-  const raw = d && Array.isArray(d.stages) ? d.stages : [];
-  return raw.map((s: any) => ({
-    name: String(s?.name ?? ""),
-    system: typeof s?.system === "string" ? s.system : "",
-    human: typeof s?.human === "string" ? s.human : "",
-  }));
-});
-
-function stageDisplayTitle(name: string): string {
-  const m: Record<string, string> = {
-    init_state: "初始化 · 世界状态",
-    plan_chapter: "规划 · 章节结构",
-    write_chapter_text: "写作 · 正文生成",
-  };
-  return m[name] || name || "阶段";
-}
-
-function setInputPreviewFromApi(data: any) {
-  inputPreviewData.value = data && typeof data === "object" ? data : null;
+function setInputPreviewFromApi(data: unknown) {
+  inputPreviewData.value = data && typeof data === "object" ? (data as Record<string, unknown>) : null;
   const stages = inputPreviewData.value?.stages;
   const n = Array.isArray(stages) ? stages.length : 0;
   inputPreviewOpenStages.value = n ? Array.from({ length: n }, (_, i) => String(i)) : [];
@@ -984,7 +193,7 @@ async function copyInputPreviewJson() {
     ElMessage.error("复制失败，请手动选择文本或检查浏览器权限");
   }
 }
-const pendingRunPayload = ref<any | null>(null);
+const pendingRunPayload = ref<unknown>(null);
 const pendingRunNovelId = ref("");
 const pendingRunStarting = ref(false);
 
@@ -1039,6 +248,9 @@ const form = reactive<{
   llmTopP: null,
   llmMaxTokens: DEFAULT_LLM_MAX_TOKENS,
 });
+
+const graph = useGraph(toRef(form, "novelId"));
+provide(GRAPH_INJECTION_KEY, graph);
 
 const inferredTimeSlotHint = computed(() => {
   const byId = new Map((anchors.value || []).map((a) => [a.id, a]));
@@ -1112,129 +324,6 @@ const tagTreeData = computed<TagTreeNode[]>(() => {
   return roots;
 });
 
-function logDebug(msg: string) {
-  // 不在页面展示，仅输出到控制台便于排查
-  console.log("[debug]", msg);
-}
-
-function onLeftResizeMove(e: MouseEvent) {
-  if (!resizingLeft) return;
-  const delta = e.clientX - resizeStartX;
-  const next = Math.max(LEFT_MIN_WIDTH, Math.min(LEFT_MAX_WIDTH, resizeStartW + delta));
-  leftPanelWidth.value = next;
-}
-
-function onLeftResizeUp() {
-  if (!resizingLeft) return;
-  resizingLeft = false;
-  window.removeEventListener("mousemove", onLeftResizeMove);
-  window.removeEventListener("mouseup", onLeftResizeUp);
-}
-
-function startResizeLeft(e: MouseEvent) {
-  resizingLeft = true;
-  resizeStartX = e.clientX;
-  resizeStartW = leftPanelWidth.value;
-  window.addEventListener("mousemove", onLeftResizeMove);
-  window.addEventListener("mouseup", onLeftResizeUp);
-}
-
-function onMidResizeMove(e: MouseEvent) {
-  if (!resizingMid) return;
-  const delta = e.clientX - midResizeStartX;
-  const next = Math.max(MID_MIN_WIDTH, Math.min(MID_MAX_WIDTH, midResizeStartW + delta));
-  midPanelWidth.value = next;
-}
-
-function onMidResizeUp() {
-  if (!resizingMid) return;
-  resizingMid = false;
-  window.removeEventListener("mousemove", onMidResizeMove);
-  window.removeEventListener("mouseup", onMidResizeUp);
-}
-
-function startResizeMid(e: MouseEvent) {
-  resizingMid = true;
-  midResizeStartX = e.clientX;
-  midResizeStartW = midPanelWidth.value;
-  window.addEventListener("mousemove", onMidResizeMove);
-  window.addEventListener("mouseup", onMidResizeUp);
-}
-
-async function apiJson(url: string, method: string, body: any) {
-  const res = await fetch(url, {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const text = await res.text();
-  let data: any = null;
-  try {
-    data = JSON.parse(text);
-  } catch {
-    data = { raw: text };
-  }
-  if (!res.ok) {
-    const msg = data && data.detail ? data.detail : JSON.stringify(data);
-    logDebug(`API error: ${method} ${url} -> ${res.status} ${msg}`);
-    throw new Error(msg);
-  }
-  return data;
-}
-
-async function apiSse(
-  url: string,
-  method: string,
-  body: any,
-  onEvent: (evt: { event: string; data: any }) => void,
-  signal?: AbortSignal
-) {
-  const res = await fetch(url, {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: body ? JSON.stringify(body) : undefined,
-    signal,
-  });
-  if (!res.ok || !res.body) {
-    const text = await res.text().catch(() => "");
-    throw new Error(text || `HTTP ${res.status}`);
-  }
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder("utf-8");
-  let buf = "";
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    buf = buf.replace(/\r\n/g, "\n");
-
-    // SSE events are separated by \n\n
-    while (true) {
-      const idx = buf.indexOf("\n\n");
-      if (idx === -1) break;
-      const raw = buf.slice(0, idx);
-      buf = buf.slice(idx + 2);
-
-      const lines = raw.split("\n").map((l) => l.trimEnd());
-      let evName = "message";
-      let dataLine = "";
-      for (const ln of lines) {
-        if (ln.startsWith("event:")) evName = ln.slice("event:".length).trim();
-        if (ln.startsWith("data:")) dataLine += ln.slice("data:".length).trim();
-      }
-      if (!dataLine) continue;
-      try {
-        const parsed = JSON.parse(dataLine);
-        onEvent({ event: evName, data: parsed?.data });
-      } catch {
-        onEvent({ event: evName, data: { raw: dataLine } });
-      }
-    }
-  }
-}
-
 function abortRun() {
   if (!running.value) return;
   try {
@@ -1273,7 +362,7 @@ function onTreeCheck() {
 
 async function loadTags() {
   tagsLoading.value = true;
-  const res = await apiJson("/api/lore/tags", "GET", null);
+  const res = (await apiJson("/api/lore/tags", "GET", null)) as { tags?: string[]; groups?: Record<string, string[]> };
   tags.value = res.tags || [];
   tagGroups.value = res.groups || {};
   selectedTags.value = [...tags.value];
@@ -1293,11 +382,17 @@ async function buildCurrentLoreSummary() {
   }
   buildingLoreSummary.value = true;
   try {
-    const res = await apiJson("/api/lore/summary/build", "POST", { tags: tagsNow, force: true });
+    const res = (await apiJson("/api/lore/summary/build", "POST", { tags: tagsNow, force: true })) as {
+      tag_summaries?: unknown[];
+      summary_text?: string;
+    };
     const rows = Array.isArray(res?.tag_summaries) ? res.tag_summaries : [];
     const text = rows.length
       ? rows
-          .map((x: any) => `【${String(x?.tag || "")}】\n${String(x?.summary || "")}`)
+          .map((x: unknown) => {
+            const o = x as { tag?: string; summary?: string };
+            return `【${String(o?.tag || "")}】\n${String(o?.summary || "")}`;
+          })
           .join("\n\n")
       : String(res?.summary_text || "");
     dialogTitle.value = "Tag摘要预览";
@@ -1312,10 +407,9 @@ async function buildCurrentLoreSummary() {
 async function loadNovels() {
   novelsLoading.value = true;
   try {
-    const res = await apiJson("/api/novels", "GET", null);
+    const res = (await apiJson("/api/novels", "GET", null)) as { novels?: Array<{ novel_id: string; novel_title: string }> };
     novels.value = res.novels || [];
 
-    // 没选中的情况下，自动选中最新一部
     if (!form.novelId && novels.value.length > 0) {
       form.novelId = novels.value[0].novel_id;
     }
@@ -1336,10 +430,13 @@ async function loadAnchors() {
   if (!novelId) return;
   anchorsLoading.value = true;
   try {
-    const res = await apiJson(`/api/novels/${encodeURIComponent(novelId)}/anchors`, "GET", null);
+    const res = (await apiJson(`/api/novels/${encodeURIComponent(novelId)}/anchors`, "GET", null)) as {
+      anchors?: Array<{ id: string; label: string; type: string; time_slot: string }>;
+    };
     anchors.value = res.anchors || [];
-  } catch (e: any) {
-    logDebug("loadAnchors failed: " + (e?.message || String(e)));
+  } catch (e: unknown) {
+    const err = e as { message?: string };
+    logDebug("loadAnchors failed: " + (err?.message || String(e)));
   } finally {
     anchorsLoading.value = false;
   }
@@ -1355,14 +452,15 @@ async function loadCharacterOptions() {
   form.focusCharacterIds = [];
   if (!novelId) return;
   try {
-    const st = await apiJson(`/api/novels/${encodeURIComponent(novelId)}/state`, "GET", null);
+    const st = (await apiJson(`/api/novels/${encodeURIComponent(novelId)}/state`, "GET", null)) as { characters?: unknown[] };
     const list = Array.isArray(st?.characters) ? st.characters : [];
     const ids = list
-      .map((c: any) => String(c?.character_id || "").trim())
+      .map((c: unknown) => String((c as { character_id?: string })?.character_id || "").trim())
       .filter((x: string) => !!x);
     characterOptions.value = Array.from(new Set(ids));
-  } catch (e: any) {
-    logDebug("loadCharacterOptions failed: " + (e?.message || String(e)));
+  } catch (e: unknown) {
+    const err = e as { message?: string };
+    logDebug("loadCharacterOptions failed: " + (err?.message || String(e)));
   }
 }
 
@@ -1385,7 +483,7 @@ function removeCharacterTag(cid: string) {
   form.focusCharacterIds = (form.focusCharacterIds || []).filter((x) => x !== key);
 }
 
-function onPovChange(v: any) {
+function onPovChange(v: unknown) {
   const arr = Array.isArray(v) ? v : [];
   for (const item of arr) {
     const key = String(item || "").trim();
@@ -1395,7 +493,7 @@ function onPovChange(v: any) {
   }
 }
 
-function onFocusChange(v: any) {
+function onFocusChange(v: unknown) {
   const arr = Array.isArray(v) ? v : [];
   for (const item of arr) {
     const key = String(item || "").trim();
@@ -1408,16 +506,16 @@ function onFocusChange(v: any) {
 async function loadPreview(tag: string) {
   if (Object.prototype.hasOwnProperty.call(previewCache, tag)) return;
   const url = `/api/lore/preview?tag=${encodeURIComponent(tag)}&max_chars=0&compact=1`;
-  const res = await apiJson(url, "GET", null);
-  previewCache[tag] = (res && res.preview) ? res.preview : "";
+  const res = (await apiJson(url, "GET", null)) as { preview?: string };
+  previewCache[tag] = res && res.preview ? res.preview : "";
   logDebug(`Loaded preview tag=${tag} len=${previewCache[tag].length}`);
 }
 
 async function loadPreviewFull(tag: string) {
   if (Object.prototype.hasOwnProperty.call(previewFullCache, tag)) return;
   const url = `/api/lore/preview?tag=${encodeURIComponent(tag)}&max_chars=0&compact=0`;
-  const res = await apiJson(url, "GET", null);
-  previewFullCache[tag] = (res && res.preview) ? res.preview : "";
+  const res = (await apiJson(url, "GET", null)) as { preview?: string };
+  previewFullCache[tag] = res && res.preview ? res.preview : "";
 }
 
 async function preloadAllPreviews() {
@@ -1444,22 +542,6 @@ async function openTagDialog(tag: string) {
   dialogVisible.value = true;
 }
 
-function formatResponse(data: any) {
-  const header = [
-    `mode=${data.mode}, chapter_index=${data.chapter_index}`,
-    `state_updated=${data.state_updated}`,
-    data.usage_metadata ? `usage=${JSON.stringify(data.usage_metadata)}` : "",
-  ].filter(Boolean).join("\n");
-
-  const continuity =
-    data.state && data.state.continuity ? JSON.stringify(data.state.continuity, null, 2) : "";
-  const stateTail = continuity ? `\n\n[continuity]\n${continuity}` : "";
-
-  const content = data.content ? `\n\n[content]\n${data.content}` : "";
-  const plan = data.plan ? `\n\n[plan]\n${JSON.stringify(data.plan, null, 2)}` : "";
-  return header + stateTail + content + plan;
-}
-
 async function createNovel() {
   resultText.value = "创建中...";
   const payload = {
@@ -1469,13 +551,11 @@ async function createNovel() {
     initial_user_task: null,
     lore_tags: selectedTags.value,
   };
-  const res = await apiJson("/api/novels", "POST", payload);
+  const res = (await apiJson("/api/novels", "POST", payload)) as { novel_id: string };
   form.novelId = res.novel_id;
-  // 清空创建表单，避免与“已有小说”混淆
   createForm.novelTitle = "";
   createForm.startTimeSlot = "";
   createForm.povCharacterId = "";
-  // 刷新已有小说列表，确保下拉框能看到新建结果
   await loadNovels();
   await loadAnchors();
   resultText.value = `创建成功！\n\n现在选择运行模式并点击“运行模式”。`;
@@ -1488,8 +568,6 @@ function buildRunPayload() {
     ElMessage.error("请先创建新小说或填写小说编号。");
     return null;
   }
-
-  // 不再强制要求手动 init_state：后端会在需要时自动初始化
 
   const loreTags = selectedTags.value || [];
   if (loreTags.length === 0) {
@@ -1539,8 +617,7 @@ function buildRunPayload() {
   return { novelId, payload };
 }
 
-async function executeRun(novelId: string, payload: any) {
-
+async function executeRun(novelId: string, payload: Record<string, unknown>) {
   running.value = true;
   runAbortController = new AbortController();
   runPhase.value = "planning";
@@ -1550,28 +627,26 @@ async function executeRun(novelId: string, payload: any) {
   nextStatusText.value = "";
   planStreamText.value = "";
   try {
-    // 流式输出：边生成边显示
     const startAt = Date.now();
     let logText = "（流式输出开始）\n";
     let accContent = "";
-    let donePayload: any = null;
+    let donePayload: Record<string, unknown> | null = null;
     const refreshStreamText = () => {
       resultText.value = `${logText}\n\n[content]\n${accContent}`;
     };
 
     await apiSse(`/api/novels/${novelId}/run_stream`, "POST", payload, (evt) => {
+      const d = evt.data as Record<string, unknown> | null | undefined;
       if (evt.event === "phase") {
-        const name = String(evt.data?.name || "running");
+        const name = String(d?.name || "running");
         if (name === "planning" || name === "writing" || name === "saving" || name === "outputs_written") {
           runPhase.value = name;
         }
         if (name === "planning") rightTab.value = "plan";
         if (name === "writing") rightTab.value = "result";
         if (name === "next_status") rightTab.value = "next";
-        const extra =
-          name === "writing" && evt.data?.chapter_index ? ` chapter=${evt.data.chapter_index}` : "";
-        const out =
-          name === "outputs_written" && evt.data?.path ? ` path=${evt.data.path}` : "";
+        const extra = name === "writing" && d?.chapter_index ? ` chapter=${d.chapter_index}` : "";
+        const out = name === "outputs_written" && d?.path ? ` path=${d.path}` : "";
         if (name === "planning") runHint.value = "正在生成章节规划（beats + next_state）";
         if (name === "writing") runHint.value = "正在流式生成正文，请稍候...";
         if (name === "saving") runHint.value = "正在保存章节记录、世界状态和图谱三表";
@@ -1579,52 +654,49 @@ async function executeRun(novelId: string, payload: any) {
         if (name === "next_status_done") runHint.value = "下章建议已生成";
         if (name === "next_status_failed") runHint.value = "下章建议生成失败（可重试）";
         if (name === "outputs_written") {
-          lastOutputPath.value = String(evt.data?.path || "");
+          lastOutputPath.value = String(d?.path || "");
           runHint.value = "正文已归档到 outputs，可在本地打开查看";
         }
         if (name === "next_status_failed") {
-          const msg = String(evt.data?.error || "未知错误");
+          const msg = String(d?.error || "未知错误");
           nextStatusText.value = `（下章建议生成失败）${msg}`;
           rightTab.value = "next";
         }
         logText += `\n[phase] ${name}${extra}${out}\n`;
         refreshStreamText();
       } else if (evt.event === "plan_content") {
-        const delta = evt.data?.delta || "";
+        const delta = d?.delta || "";
         rightTab.value = "plan";
-        planStreamText.value += delta;
+        planStreamText.value += String(delta);
       } else if (evt.event === "content") {
-        const delta = evt.data?.delta || "";
+        const delta = d?.delta || "";
         rightTab.value = "result";
-        accContent += delta;
-        // 实时刷新正文，同时保留日志
+        accContent += String(delta);
         refreshStreamText();
       } else if (evt.event === "error") {
-        const msg = evt.data?.message || JSON.stringify(evt.data);
+        const msg = d?.message || JSON.stringify(d);
         runPhase.value = "error";
         runHint.value = "执行失败，请查看下方错误日志";
         logText += `\n[error]\n${msg}\n`;
         refreshStreamText();
       } else if (evt.event === "done") {
-        donePayload = evt.data;
+        donePayload = (d || null) as Record<string, unknown> | null;
         runPhase.value = "done";
         runHint.value = "本次任务已完成";
       }
     }, runAbortController.signal);
 
     if (donePayload) {
-      // 不要用结构化结果覆盖掉正文；只追加一段“完成摘要”
       const ms = Date.now() - startAt;
       const ch = donePayload.chapter_index ? `chapter_index=${donePayload.chapter_index}` : "chapter_index=(auto)";
       const st = donePayload.state_updated ? "state_updated=true" : "state_updated=false";
-      const u = donePayload.usage_metadata || {};
-      const input =
-        u.input_tokens ?? u.prompt_tokens ?? u.input_token_count ?? null;
-      const output =
-        u.output_tokens ?? u.completion_tokens ?? u.output_token_count ?? null;
+      const u = (donePayload.usage_metadata || {}) as Record<string, unknown>;
+      const input = u.input_tokens ?? u.prompt_tokens ?? u.input_token_count ?? null;
+      const output = u.output_tokens ?? u.completion_tokens ?? u.output_token_count ?? null;
       const total =
-        u.total_tokens ?? u.total_token_count ??
-        ((typeof input === "number" && typeof output === "number") ? (input + output) : null);
+        u.total_tokens ??
+        u.total_token_count ??
+        (typeof input === "number" && typeof output === "number" ? input + output : null);
       if (input !== null || output !== null || total !== null) {
         tokenUsageText.value = `input=${input ?? "-"}, output=${output ?? "-"}, total=${total ?? "-"}`;
       }
@@ -1636,11 +708,12 @@ async function executeRun(novelId: string, payload: any) {
       refreshStreamText();
     }
     await loadAnchors();
-    if (graphFullscreenVisible.value || rightTab.value === "graph") {
-      await loadGraph();
+    if (graph.graphFullscreenVisible || rightTab.value === "graph") {
+      await graph.loadGraph();
     }
-  } catch (e: any) {
-    const aborted = e?.name === "AbortError";
+  } catch (e: unknown) {
+    const err = e as { name?: string; message?: string };
+    const aborted = err?.name === "AbortError";
     if (aborted) {
       runPhase.value = "idle";
       runHint.value = "已手动中止本次生成";
@@ -1648,7 +721,7 @@ async function executeRun(novelId: string, payload: any) {
     } else {
       runPhase.value = "error";
       runHint.value = "执行失败，请查看错误信息";
-      ElMessage.error(`运行失败：${e?.message || String(e)}`);
+      ElMessage.error(`运行失败：${err?.message || String(e)}`);
     }
   } finally {
     running.value = false;
@@ -1663,7 +736,11 @@ async function runMode() {
   runPhase.value = "idle";
   runHint.value = "正在生成本次 Input 预览...";
   try {
-    const data = await apiJson(`/api/novels/${encodeURIComponent(built.novelId)}/preview_input`, "POST", built.payload);
+    const data = await apiJson(
+      `/api/novels/${encodeURIComponent(built.novelId)}/preview_input`,
+      "POST",
+      built.payload
+    );
     setInputPreviewFromApi(data);
     pendingRunPayload.value = built.payload;
     pendingRunNovelId.value = built.novelId;
@@ -1683,24 +760,12 @@ async function confirmRunFromPreview() {
   runHint.value = "已确认，准备开始运行...";
   inputPreviewVisible.value = false;
   try {
-    await executeRun(pendingRunNovelId.value, pendingRunPayload.value);
+    await executeRun(
+      pendingRunNovelId.value,
+      pendingRunPayload.value as Record<string, unknown>
+    );
   } finally {
     pendingRunStarting.value = false;
-  }
-}
-
-async function previewCurrentInput() {
-  const built = buildRunPayload();
-  if (!built) return;
-  previewingInput.value = true;
-  try {
-    const data = await apiJson(`/api/novels/${encodeURIComponent(built.novelId)}/preview_input`, "POST", built.payload);
-    setInputPreviewFromApi(data);
-    pendingRunPayload.value = built.payload;
-    pendingRunNovelId.value = built.novelId;
-    inputPreviewVisible.value = true;
-  } finally {
-    previewingInput.value = false;
   }
 }
 
@@ -1727,158 +792,6 @@ function validateTimePlan(): boolean {
   return true;
 }
 
-function ensureGraphChart() {
-  if (!graphEl.value) return;
-  if (graphChart) return;
-  graphChart = echarts.init(graphEl.value, undefined, { renderer: "canvas" });
-  window.addEventListener("resize", onResize);
-  graphChart.on("click", (params: any) => {
-    if (params?.dataType === "node" && params?.data) {
-      const n = params.data;
-      // 节点点击：进入可编辑面板
-      openGraphEditor(n);
-    }
-    if (params?.dataType === "edge" && params?.data) {
-      // 边点击：进入边编辑面板
-      openGraphEdgeEditor(params.data);
-    }
-  });
-}
-
-function onResize() {
-  if (graphChart) graphChart.resize();
-}
-
-function typeColor(t: string) {
-  if (t === "character") return "#5B8FF9";
-  if (t === "chapter_event") return "#61DDAA";
-  if (t === "timeline_event") return "#F6BD16";
-  if (t === "faction") return "#E8684A";
-  return "#A3B1BF";
-}
-
-function renderGraph() {
-  ensureGraphChart();
-  if (!graphChart) return;
-  const payload = graphData.value;
-  if (!payload) {
-    graphChart.clear();
-    return;
-  }
-
-  const nodes = (payload.nodes || []).map((n: any) => ({
-    ...n,
-    name: n.label || n.id,
-    symbolSize: n.type === "character" ? 28 : (n.type === "faction" ? 22 : 18),
-    itemStyle: { color: typeColor(n.type) },
-    draggable: true,
-    value: n.type,
-  }));
-  const links = (payload.edges || []).map((e: any) => ({
-    ...e,
-    rel_label: (typeof e?.label === "string" ? e.label : ""),
-    lineStyle: { opacity: 0.7, width: 1.2, curveness: 0.18 },
-    label: {
-      show: !!(typeof e?.label === "string" ? e.label : ""),
-      formatter: (typeof e?.label === "string" ? e.label : ""),
-    },
-  }));
-
-  // 给“未安排上/下一跳”的时间线节点打黄色角标
-  const timelineIds = new Set(
-    nodes
-      .map((n: any) => String(n?.id || ""))
-      .filter((id: string) => id.startsWith("ev:timeline:") && !id.includes(":draft_"))
-  );
-  const inCnt = new Map<string, number>();
-  const outCnt = new Map<string, number>();
-  for (const id of timelineIds) {
-    inCnt.set(id, 0);
-    outCnt.set(id, 0);
-  }
-  for (const e of links) {
-    if ((e?.type || "") !== "timeline_next") continue;
-    const s = String(e?.source || "");
-    const t = String(e?.target || "");
-    if (outCnt.has(s)) outCnt.set(s, (outCnt.get(s) || 0) + 1);
-    if (inCnt.has(t)) inCnt.set(t, (inCnt.get(t) || 0) + 1);
-  }
-  for (const n of nodes as any[]) {
-    const id = String(n?.id || "");
-    if (!timelineIds.has(id)) continue;
-    const noPrev = (inCnt.get(id) || 0) === 0;
-    const noNext = (outCnt.get(id) || 0) === 0;
-    // 同时没有上下跳的一般是孤立点，不做“待定”提示，避免噪音
-    if (!(noPrev || noNext) || (noPrev && noNext)) continue;
-    const flag = noPrev && !noNext ? "待定(上)" : "待定(下)";
-    n.label = {
-      show: true,
-      position: "right",
-      formatter: `{b}\n{flag|${flag}}`,
-      rich: {
-        flag: {
-          color: "#8a5a00",
-          backgroundColor: "#fff7cc",
-          borderColor: "#f5c542",
-          borderWidth: 1,
-          borderRadius: 3,
-          padding: [1, 4],
-          fontSize: 11,
-          lineHeight: 16,
-        },
-      },
-    };
-  }
-
-  graphChart.setOption(
-    {
-      tooltip: {
-        trigger: "item",
-        formatter: (p: any) => {
-          if (p.dataType === "node") return `${p.data?.type || ""}：${p.data?.label || p.data?.id}`;
-          if (p.dataType === "edge") return `${p.data?.type || ""}：${p.data?.label || ""}`;
-          return "";
-        },
-      },
-      animationDurationUpdate: 300,
-      series: [
-        {
-          type: "graph",
-          layout: "force",
-          roam: true,
-          data: nodes,
-          links,
-          edgeSymbol: ["none", "arrow"],
-          edgeSymbolSize: 6,
-          label: { show: true, position: "right", formatter: "{b}" },
-          force: { repulsion: 220, edgeLength: [60, 140], gravity: 0.06 },
-        },
-      ],
-    },
-    true
-  );
-}
-
-async function loadGraph() {
-  const novelId = (form.novelId || "").trim();
-  if (!novelId) {
-    ElMessage.error("请先选择/创建小说。");
-    return;
-  }
-  graphLoading.value = true;
-  try {
-    const url = `/api/novels/${encodeURIComponent(novelId)}/graph?view=${encodeURIComponent(graphView.value)}`;
-    const res = await apiJson(url, "GET", null);
-    graphData.value = { nodes: res.nodes || [], edges: res.edges || [] };
-    await nextTick();
-    renderGraph();
-  } catch (e: any) {
-    ElMessage.error("加载图谱失败：" + (e?.message || String(e)));
-  } finally {
-    graphLoading.value = false;
-  }
-}
-
 onMounted(async () => {
   try {
     await loadTags();
@@ -1886,9 +799,10 @@ onMounted(async () => {
     await loadAnchors();
     await loadCharacterOptions();
     await preloadAllPreviews();
-  } catch (e: any) {
+  } catch (e: unknown) {
+    const err = e as { message?: string };
     tagsLoading.value = false;
-    logDebug("loadTags/preload failed: " + (e?.message || String(e)));
+    logDebug("loadTags/preload failed: " + (err?.message || String(e)));
   }
 });
 
@@ -1899,23 +813,6 @@ watch(
     await loadCharacterOptions();
   }
 );
-
-watch([graphView, () => form.novelId, graphFullscreenVisible], async ([, , opened]) => {
-  if (!opened) return;
-  await nextTick();
-  // 全屏图谱打开时，切换视图/小说会重新拉取对应数据
-  await loadGraph();
-});
-
-onBeforeUnmount(() => {
-  onLeftResizeUp();
-  onMidResizeUp();
-  window.removeEventListener("resize", onResize);
-  if (graphChart) {
-    graphChart.dispose();
-    graphChart = null;
-  }
-});
 </script>
 
 <style scoped>
@@ -1940,7 +837,10 @@ onBeforeUnmount(() => {
   flex: 0 0 auto;
   min-width: 360px;
 }
-.right-pane { flex: 1 1 auto; min-width: 420px; }
+.right-pane {
+  flex: 1 1 auto;
+  min-width: 420px;
+}
 .resize-handle {
   width: 10px;
   cursor: col-resize;
@@ -1955,7 +855,9 @@ onBeforeUnmount(() => {
     transparent 62%,
     transparent 100%
   );
-  transition: filter 0.2s, background-color 0.2s;
+  transition:
+    filter 0.2s,
+    background-color 0.2s;
   position: relative;
   z-index: 10;
   flex: 0 0 10px;
@@ -2015,134 +917,10 @@ onBeforeUnmount(() => {
   max-height: 420px;
   overflow: auto;
 }
-.dialog-body {
-  max-height: 70vh;
-  overflow: auto;
-  background: #fff;
-  padding: 10px;
-  border: 1px solid #ebeef5;
-  border-radius: 10px;
-}
-.dialog-pre {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-size: 12px;
-}
-
-.input-preview-dialog :deep(.el-dialog) {
-  max-width: 960px;
-}
-.input-preview-lead {
-  margin: 0 0 14px;
-  line-height: 1.5;
-  font-size: 13px;
-}
-.input-preview-body {
-  max-height: min(68vh, 720px);
-  overflow: auto;
-  padding-right: 4px;
-}
-.input-meta-desc {
-  margin-bottom: 14px;
-}
-.input-code-inline {
-  font-size: 12px;
-  word-break: break-all;
-}
-.input-stages-collapse {
-  border: none;
-}
-.input-stages-collapse :deep(.el-collapse-item__header) {
-  font-weight: 600;
-  padding-left: 4px;
-}
-.input-stages-collapse :deep(.el-collapse-item__wrap) {
-  border-bottom: 1px solid var(--el-border-color-lighter);
-}
-.stage-title-row {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-.stage-title-text {
-  font-size: 14px;
-}
-.stage-name-tag {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-}
-.stage-panels {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 4px 0 8px;
-}
-.prompt-block {
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 10px;
-  overflow: hidden;
-  background: var(--el-bg-color);
-}
-.prompt-block-label {
-  display: block;
-  padding: 8px 12px;
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--el-text-color-secondary);
-  background: var(--el-fill-color-light);
-  border-bottom: 1px solid var(--el-border-color-lighter);
-}
-.prompt-block-body {
-  margin: 0;
-  padding: 12px 14px;
-  max-height: min(32vh, 280px);
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
-  line-height: 1.55;
-  color: var(--el-text-color-primary);
-}
-.prompt-block--human .prompt-block-body {
-  max-height: min(40vh, 360px);
-}
-.input-preview-footer {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  justify-content: flex-end;
-  width: 100%;
-}
-
-.graph-drawer-empty {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 12px;
-}
-
 .choice-cards {
   width: 100%;
 }
 .choice-cards :deep(.el-radio-button__inner) {
   width: 100%;
 }
-.graph-box-fullscreen {
-  height: calc(100vh - 180px);
-  border: 1px solid #ebeef5;
-  border-radius: 10px;
-  background: #fff;
-  overflow: hidden;
-}
-.graph-canvas-fullscreen {
-  width: 100%;
-  height: 100%;
-}
-.back-btn-highlight {
-  font-weight: 600;
-}
 </style>
-

@@ -17,7 +17,7 @@ def test_infer_time_slot_interval_and_legacy(tmp_path, monkeypatch):
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
 
-    from webapp.server import RunModeRequest, _infer_time_slot
+    from webapp.backend.server import RunModeRequest, _infer_time_slot
 
     # Run in isolated temp cwd so server.py uses temp ./storage
     monkeypatch.chdir(tmp_path)
