@@ -6,7 +6,8 @@ from typing import Dict, List
 class LoreLoader:
     def __init__(self, data_path="settings"):
         # Web 启动时工作目录可能变化；把相对路径固定到仓库根目录
-        repo_root = Path(__file__).resolve().parents[1]
+        # agents/lore/loader.py -> 仓库根为向上两级
+        repo_root = Path(__file__).resolve().parents[2]
         p = Path(data_path)
         self.data_path = p if p.is_absolute() else (repo_root / p)
 

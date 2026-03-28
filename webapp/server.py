@@ -5,16 +5,18 @@ from typing import Any, Dict, List, Optional
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from agents.graph_tables import (
+from agents.persistence.graph_tables import (
     ensure_graph_tables,
     load_character_relations,
     load_event_relations,
+    remap_timeline_numeric_edges_after_delete,
+    timeline_next_graph_neighbors,
     persist_chapter_artifacts,
     resolve_chapter_event_ids,
     replace_appear_edges_for_chapter,
@@ -24,12 +26,13 @@ from agents.graph_tables import (
     save_event_rows,
     save_event_relations,
     sync_chapter_table_from_record,
+    sync_timeline_event_entity_rows,
     update_chapter_table,
 )
-from agents.novel_agent import NovelAgent
-from agents.lore_summary import get_lore_summary, load_cached_summary, source_hash_from_map
-from agents.storage import load_state, save_state, load_chapter, save_chapter, get_chapters_dir, list_chapters
-from agents.state_models import NovelState, ChapterRecord, ChapterPlan
+from agents.novel import NovelAgent
+from agents.lore.lore_summary import get_lore_summary, load_cached_summary, source_hash_from_map
+from agents.persistence.storage import load_state, save_state, load_chapter, save_chapter, get_chapters_dir, list_chapters
+from agents.state.state_models import CharacterState, ChapterPlan, ChapterRecord, NovelState, TimelineEvent
 from webapp.frontend_assets import run_frontend_startup
 from webapp.schemas import BuildLoreSummaryRequest, CreateNovelRequest, RunModeRequest
 
@@ -199,7 +202,7 @@ def _apply_chapter_event_selection(next_state: NovelState, chapter_index: int, r
         insert_at = min(insert_at, next_idx)
     insert_at = max(0, min(insert_at, len(tl)))
 
-    from agents.state_models import TimelineEvent
+    from agents.state.state_models import TimelineEvent
 
     tl.insert(
         insert_at,
@@ -245,12 +248,22 @@ def _build_llm_user_task(
         if idx is not None and 0 <= idx < len(timeline):
             ev = timeline[idx]
             lines.append(f"章节归属时间线：{existing_id}（{ev.time_slot}｜{ev.summary}）")
-            if idx > 0:
-                prev_ev = timeline[idx - 1]
-                lines.append(f"该事件前一事件：ev:timeline:{idx-1}（{prev_ev.time_slot}｜{prev_ev.summary}）")
-            if idx + 1 < len(timeline):
-                next_ev = timeline[idx + 1]
-                lines.append(f"该事件后一事件：ev:timeline:{idx+1}（{next_ev.time_slot}｜{next_ev.summary}）")
+            preds, succs = timeline_next_graph_neighbors(novel_id, existing_id)
+            if preds or succs:
+                for pid in preds:
+                    pi = _timeline_idx(pid)
+                    if pi is not None and 0 <= pi < len(timeline):
+                        pev = timeline[pi]
+                        lines.append(
+                            f"关系图前置事件（timeline_next）：{pid}（{pev.time_slot}｜{pev.summary}）"
+                        )
+                for sid in succs:
+                    si = _timeline_idx(sid)
+                    if si is not None and 0 <= si < len(timeline):
+                        sev = timeline[si]
+                        lines.append(
+                            f"关系图后置事件（timeline_next）：{sid}（{sev.time_slot}｜{sev.summary}）"
+                        )
         else:
             lines.append(f"章节归属时间线：{existing_id}")
     elif (req.new_event_time_slot or "").strip() and (req.new_event_summary or "").strip():
@@ -288,6 +301,11 @@ def _build_llm_user_task(
     return f"{base}\n\n[系统注入约束]\n{suffix}".strip()
 
 
+def _req_timeline_focus_id(req: RunModeRequest) -> Optional[str]:
+    x = (req.existing_event_id or "").strip()
+    return x if x.startswith("ev:timeline:") else None
+
+
 def _prebuild_chapter_graph_records(
     novel_id: str,
     req: RunModeRequest,
@@ -297,7 +315,7 @@ def _prebuild_chapter_graph_records(
 ) -> None:
     """
     生成前预构建三表中的“本章骨架”：
-    - graph/chapters/{chapter}.json：先落 chapter_index/time_slot/character_ids/event_ids
+    - storage/novels/{id}/chapter_tables/{chapter}.json：章节表骨架（勿写入正文 chapters/）
     - graph/event_relations.json：先落主要人物 -> 本章 的 appear 边
     - 若已选择章节归属事件（已有/新建），先把 chapter_index 绑定到 timeline 事件
     """
@@ -491,6 +509,7 @@ def run_mode(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
             supporting_character_ids=(req.supporting_character_ids or []),
             lore_tags=req.lore_tags,
             llm_options=_llm_call_options(req),
+            timeline_event_focus_id=_req_timeline_focus_id(req),
         )
     except Exception as e:
         logger.exception("run_mode failed novel_id=%s mode=%s", novel_id, req.mode)
@@ -548,6 +567,7 @@ def preview_mode_input(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
             pov_character_ids_override=pov_ids,
             supporting_character_ids=(req.supporting_character_ids or []),
             lore_tags=req.lore_tags,
+            timeline_event_focus_id=_req_timeline_focus_id(req),
         )
     except Exception as e:
         logger.exception("preview_input failed novel_id=%s mode=%s", novel_id, req.mode)
@@ -596,8 +616,8 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                 # 让 agent.run() 自己处理自动 init_state；我们这里需要拿到 plan 才能流式写正文
                 # 因此：先调用 agent.run(mode=plan_only) 得到 plan+state，再流式写，然后手动落盘逻辑由 agent.run 做。
                 # 但为了复用现有落盘，我们改成：直接复用 agent.plan_chapter + agent.write_chapter_text_stream + 手动保存，与 agent.run 保持一致。
-                from agents.storage import load_state
-                from agents.state_models import ChapterRecord
+                from agents.persistence.storage import load_state
+                from agents.state.state_models import ChapterRecord
 
                 st = load_state(novel_id)
                 if not st:
@@ -624,9 +644,10 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     time_slot_override=inferred_time_slot,
                     pov_character_ids_override=pov_ids,
                     supporting_character_ids=(req.supporting_character_ids or []),
-                    include_chapter_context=(not manual_time_slot),
+                    minimal_state_for_prompt=manual_time_slot,
                     lore_tags=req.lore_tags,
                     llm_options=llm_opts,
+                    timeline_event_focus_id=_req_timeline_focus_id(req),
                 ):
                     if await _disconnected():
                         logger.info("run_stream disconnected during plan stream. novel_id=%s chapter=%s", novel_id, chapter_index)
@@ -653,12 +674,13 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     novel_id=novel_id,
                     plan=plan,
                     user_task=llm_user_task,
-                    include_chapter_context=(not manual_time_slot),
+                    minimal_state_for_prompt=manual_time_slot,
                     lore_tags=req.lore_tags,
                     time_slot_hint=inferred_time_slot,
                     pov_character_ids_override=pov_ids,
                     supporting_character_ids=(req.supporting_character_ids or []),
                     llm_options=llm_opts,
+                    timeline_event_focus_id=_req_timeline_focus_id(req),
                 ):
                     if await _disconnected():
                         logger.info("run_stream disconnected during write stream. novel_id=%s chapter=%s", novel_id, chapter_index)
@@ -721,6 +743,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                         chapter_index=chapter_index,
                         latest_content=content_text,
                         llm_options=llm_opts,
+                        timeline_event_focus_id=_req_timeline_focus_id(req),
                     )
                     yield _sse_pack("phase", {"name": "next_status_done", "has_text": bool((next_status or "").strip())})
                 except Exception as e:
@@ -769,6 +792,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     supporting_character_ids=(req.supporting_character_ids or []),
                     lore_tags=req.lore_tags,
                     llm_options=llm_opts,
+                    timeline_event_focus_id=_req_timeline_focus_id(req),
                 )
                 if req.mode in {"plan_only", "write_chapter", "revise_chapter"} and result.chapter_index is not None:
                     has_event_selection = bool(
@@ -1028,6 +1052,21 @@ def patch_graph_node(novel_id: str, req: GraphNodePatchRequest):
                 txt = str(v or "").strip()
                 hit.known_facts = [s.strip() for s in txt.splitlines() if s.strip()] if txt else []
         save_state(novel_id, state)
+        ensure_graph_tables(novel_id)
+        save_character_entities(
+            novel_id,
+            [
+                {
+                    "character_id": c.character_id,
+                    "description": c.description,
+                    "current_location": c.current_location,
+                    "alive": c.alive,
+                    "goals": list(c.goals or []),
+                    "known_facts": list(c.known_facts or []),
+                }
+                for c in (state.characters or [])
+            ],
+        )
         return {"ok": True, "node_id": node_id}
 
     if node_id.startswith("fac:"):
@@ -1056,8 +1095,195 @@ def patch_graph_node(novel_id: str, req: GraphNodePatchRequest):
             ev.summary = str(patch.get("summary") or "").strip() or ev.summary
         save_state(novel_id, state)
         ensure_graph_tables(novel_id)
+        sync_timeline_event_entity_rows(novel_id, state)
         replace_timeline_next_edges_from_state(novel_id, state)
         return {"ok": True, "node_id": node_id}
+
+    raise HTTPException(status_code=400, detail="unsupported node_id")
+
+
+class GraphNodeCreateRequest(BaseModel):
+    node_type: str  # character | timeline_event | faction
+    character_id: Optional[str] = None
+    description: Optional[str] = None
+    current_location: Optional[str] = None
+    time_slot: Optional[str] = None
+    summary: Optional[str] = None
+    faction_name: Optional[str] = None
+    chapter_index: Optional[int] = None
+
+
+@app.post("/api/novels/{novel_id}/graph/nodes")
+def create_graph_node(novel_id: str, req: GraphNodeCreateRequest):
+    state = load_state(novel_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="novel not found")
+    ensure_graph_tables(novel_id)
+    nt = (req.node_type or "").strip().lower()
+
+    if nt == "character":
+        cid = str(req.character_id or "").strip()
+        if not cid:
+            raise HTTPException(status_code=400, detail="character_id is required")
+        for c in state.characters or []:
+            if c.character_id == cid:
+                raise HTTPException(status_code=400, detail="character_id already exists")
+        state.characters = list(state.characters or [])
+        state.characters.append(
+            CharacterState(
+                character_id=cid,
+                description=str(req.description or "").strip() or None,
+                current_location=str(req.current_location or "").strip() or None,
+                goals=[],
+                known_facts=[],
+                relationships={},
+            )
+        )
+        save_state(novel_id, state)
+        save_character_entities(
+            novel_id,
+            [
+                {
+                    "character_id": c.character_id,
+                    "description": c.description,
+                    "current_location": c.current_location,
+                    "alive": c.alive,
+                    "goals": list(c.goals or []),
+                    "known_facts": list(c.known_facts or []),
+                }
+                for c in (state.characters or [])
+            ],
+        )
+        return {"ok": True, "node_id": f"char:{cid}"}
+
+    if nt == "timeline_event":
+        slot = str(req.time_slot or "").strip()
+        summ = str(req.summary or "").strip()
+        if not slot or not summ:
+            raise HTTPException(status_code=400, detail="time_slot and summary are required")
+        tl = list(state.world.timeline or [])
+        tl.append(
+            TimelineEvent(
+                time_slot=slot,
+                summary=summ,
+                chapter_index=req.chapter_index,
+            )
+        )
+        state.world.timeline = tl
+        save_state(novel_id, state)
+        sync_timeline_event_entity_rows(novel_id, state)
+        replace_timeline_next_edges_from_state(novel_id, state)
+        new_idx = len(tl) - 1
+        return {"ok": True, "node_id": f"ev:timeline:{new_idx}"}
+
+    if nt == "faction":
+        fname = str(req.faction_name or "").strip()
+        if not fname:
+            raise HTTPException(status_code=400, detail="faction_name is required")
+        if state.world.factions is None:
+            state.world.factions = {}
+        if fname in state.world.factions:
+            raise HTTPException(status_code=400, detail="faction_name already exists")
+        state.world.factions[fname] = str(req.description or "").strip()
+        save_state(novel_id, state)
+        return {"ok": True, "node_id": f"fac:{fname}"}
+
+    raise HTTPException(status_code=400, detail="node_type must be character | timeline_event | faction")
+
+
+@app.delete("/api/novels/{novel_id}/graph/nodes")
+def delete_graph_node(novel_id: str, node_id: str = Query(..., description="char:* | ev:timeline:N | fac:*")):
+    state = load_state(novel_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="novel not found")
+    ensure_graph_tables(novel_id)
+    nid = (node_id or "").strip()
+
+    if nid.startswith("ev:chapter:"):
+        raise HTTPException(status_code=400, detail="章节节点来自已保存章节，请使用章节管理删除正文（当前未提供图谱内删除）")
+
+    if nid.startswith("char:"):
+        cid = nid.split("char:", 1)[1].strip()
+        if not cid:
+            raise HTTPException(status_code=400, detail="invalid character id")
+        before = len(state.characters or [])
+        state.characters = [c for c in (state.characters or []) if c.character_id != cid]
+        if len(state.characters) == before:
+            raise HTTPException(status_code=404, detail="character not found")
+        for c in state.characters or []:
+            c.relationships = {k: v for k, v in (c.relationships or {}).items() if k != cid}
+        wp = state.continuity.who_is_present or []
+        state.continuity.who_is_present = [p for p in wp if p.character_id != cid]
+        if (state.continuity.pov_character_id or "") == cid:
+            state.continuity.pov_character_id = None
+        crows = load_character_relations(novel_id)
+        crows = [
+            r
+            for r in crows
+            if not (
+                str(r.get("kind", "")).strip().lower() == "relationship"
+                and (
+                    str(r.get("source", "")).strip() == nid
+                    or str(r.get("target", "")).strip() == nid
+                )
+            )
+        ]
+        save_character_relations(novel_id, crows)
+        erows = load_event_relations(novel_id)
+        erows = [
+            r
+            for r in erows
+            if not (
+                str(r.get("kind", "")).strip().lower() == "appear"
+                and str(r.get("source", "")).strip() == nid
+            )
+        ]
+        save_event_relations(novel_id, erows)
+        save_state(novel_id, state)
+        save_character_entities(
+            novel_id,
+            [
+                {
+                    "character_id": c.character_id,
+                    "description": c.description,
+                    "current_location": c.current_location,
+                    "alive": c.alive,
+                    "goals": list(c.goals or []),
+                    "known_facts": list(c.known_facts or []),
+                }
+                for c in (state.characters or [])
+            ],
+        )
+        return {"ok": True, "node_id": nid}
+
+    if nid.startswith("fac:"):
+        fname = nid.split("fac:", 1)[1].strip()
+        if not fname or state.world.factions is None or fname not in state.world.factions:
+            raise HTTPException(status_code=404, detail="faction not found")
+        del state.world.factions[fname]
+        save_state(novel_id, state)
+        return {"ok": True, "node_id": nid}
+
+    if nid.startswith("ev:timeline:"):
+        raw = nid.split("ev:timeline:", 1)[1].strip()
+        if not raw.isdigit():
+            raise HTTPException(status_code=400, detail="只能删除正式时间线索引节点（非草稿 id）")
+        try:
+            idx = int(raw)
+        except Exception:
+            raise HTTPException(status_code=400, detail="invalid timeline index")
+        tl = list(state.world.timeline or [])
+        if not (0 <= idx < len(tl)):
+            raise HTTPException(status_code=404, detail="timeline event not found")
+        tl.pop(idx)
+        state.world.timeline = tl
+        er = load_event_relations(novel_id)
+        er = remap_timeline_numeric_edges_after_delete(er, idx)
+        save_event_relations(novel_id, er)
+        save_state(novel_id, state)
+        sync_timeline_event_entity_rows(novel_id, state)
+        replace_timeline_next_edges_from_state(novel_id, state)
+        return {"ok": True, "node_id": nid}
 
     raise HTTPException(status_code=400, detail="unsupported node_id")
 
@@ -1118,6 +1344,17 @@ def patch_timeline_neighbors(novel_id: str, req: TimelineNeighborsRequest):
     prev_source = (req.prev_source or "").strip()
     next_target = (req.next_target or "").strip()
 
+    def _must_timeline_ref(label: str, v: str) -> None:
+        if not v.startswith("ev:timeline:"):
+            raise HTTPException(status_code=400, detail=f"{label} must be ev:timeline:* when set")
+        if v == node_id:
+            raise HTTPException(status_code=400, detail=f"{label} cannot equal node_id")
+
+    if prev_source:
+        _must_timeline_ref("prev_source", prev_source)
+    if next_target:
+        _must_timeline_ref("next_target", next_target)
+
     rows = load_event_relations(novel_id)
     rows = [
         r for r in rows
@@ -1128,16 +1365,17 @@ def patch_timeline_neighbors(novel_id: str, req: TimelineNeighborsRequest):
     ]
     if prev_source:
         rows.append({"source": prev_source, "target": node_id, "label": "时间推进", "kind": "timeline_next"})
-    rows.append(
-        {
-            "source": node_id,
-            "target": next_target,
-            "label": ("待完善" if not next_target else "时间推进"),
-            "kind": "timeline_next",
-        }
-    )
+    # 无下一跳时不写入 target 为空的行：get_graph 会把空 target 画成 draft 占位节点
+    if next_target:
+        rows.append({"source": node_id, "target": next_target, "label": "时间推进", "kind": "timeline_next"})
     save_event_relations(novel_id, rows)
-    replace_timeline_next_edges_from_state(novel_id, state)
+    logger.info(
+        "patch_timeline_neighbors novel_id=%s node_id=%s prev_source=%r next_target=%r",
+        novel_id,
+        node_id,
+        prev_source,
+        next_target,
+    )
     return {"ok": True}
 
 
@@ -1154,7 +1392,7 @@ class GraphEdgePatchRequest(BaseModel):
 @app.patch("/api/novels/{novel_id}/graph/edge")
 def patch_graph_edge(novel_id: str, req: GraphEdgePatchRequest):
     """
-    图谱边编辑（基于三表真源）。
+    图谱边编辑（基于五表真源：人物/事件实体与关系表 + 章节表；章节归属还写 state.timeline）。
     - relationship: 人物关系表
     - appear: 事件关系表（char -> ev:chapter）
     - timeline_next: 事件关系表（ev:timeline -> ev:timeline 或空 target）
@@ -1239,6 +1477,7 @@ def patch_graph_edge(novel_id: str, req: GraphEdgePatchRequest):
             state.world.timeline[t_idx].chapter_index = chap_idx
 
         save_state(novel_id, state)
+        sync_timeline_event_entity_rows(novel_id, state)
         replace_timeline_next_edges_from_state(novel_id, state)
         chap = load_chapter(novel_id, chap_idx)
         if chap:

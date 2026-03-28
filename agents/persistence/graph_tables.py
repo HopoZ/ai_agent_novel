@@ -6,8 +6,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from agents.storage import list_chapters, load_state, save_chapter, save_state
-from agents.state_models import ChapterRecord, NovelState
+from agents.persistence.storage import get_chapters_dir, list_chapters, load_state, save_chapter, save_state
+from agents.state.state_models import ChapterRecord, NovelState
 
 
 def _novel_dir(novel_id: str) -> Path:
@@ -35,8 +35,8 @@ def _event_relations_path(novel_id: str) -> Path:
 
 
 def _chapter_tables_dir(novel_id: str) -> Path:
-    # 新结构：章节表直接落在 /chapters/{chapter_index}.json
-    return _novel_dir(novel_id) / "chapters"
+    # 五表之一：每章一条 JSON（character_ids / event_ids），与正文目录 novel/chapters/ 分离
+    return _novel_dir(novel_id) / "chapter_tables"
 
 
 def _write_chapter_table_file(
@@ -63,6 +63,30 @@ def ensure_graph_tables(novel_id: str) -> None:
     nd = _novel_dir(novel_id)
     nd.mkdir(parents=True, exist_ok=True)
     _chapter_tables_dir(novel_id).mkdir(parents=True, exist_ok=True)
+
+    # 曾误写入 novel/chapters/{n}.json，与 ChapterRecord 冲突；迁入 chapter_tables/
+    content_chapters = get_chapters_dir(novel_id)
+    table_dir = _chapter_tables_dir(novel_id)
+    if content_chapters.exists():
+        for fp in content_chapters.glob("*.json"):
+            if not fp.stem.isdigit():
+                continue
+            try:
+                raw = json.loads(fp.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(raw, dict):
+                continue
+            if "character_ids" not in raw or "who_is_present" in raw:
+                continue
+            dst = table_dir / fp.name
+            try:
+                if dst.exists():
+                    fp.unlink()
+                else:
+                    shutil.move(str(fp), str(dst))
+            except Exception:
+                pass
 
     ce_path = _character_entities_path(novel_id)
     cpath = _character_relations_path(novel_id)
@@ -112,7 +136,7 @@ def ensure_graph_tables(novel_id: str) -> None:
                 )
         except Exception:
             pass
-    if old_ch_dir.exists():
+    if old_ch_dir.exists() and old_ch_dir.resolve() != _chapter_tables_dir(novel_id).resolve():
         for fp in old_ch_dir.glob("*.json"):
             dst = _chapter_tables_dir(novel_id) / fp.name
             if not dst.exists():
@@ -309,6 +333,54 @@ def save_event_relations(novel_id: str, rows: List[Dict[str, Any]]) -> None:
     )
 
 
+def sync_timeline_event_entity_rows(novel_id: str, state: NovelState) -> None:
+    """事件实体表与 state.world.timeline 下标对齐。"""
+    ensure_graph_tables(novel_id)
+    save_event_rows(
+        novel_id,
+        [
+            {
+                "event_id": f"ev:timeline:{i}",
+                "time_slot": str(ev.time_slot or "").strip(),
+                "summary": str(ev.summary or "").strip(),
+                "chapter_index": ev.chapter_index,
+            }
+            for i, ev in enumerate(state.world.timeline or [])
+        ],
+    )
+
+
+def remap_timeline_numeric_edges_after_delete(rows: List[Dict[str, Any]], deleted_idx: int) -> List[Dict[str, Any]]:
+    """
+    删除 timeline[deleted_idx] 后重写事件关系表中 ev:timeline:{n}：
+    n == deleted_idx 的端点所在行删除；n > deleted_idx 变为 n-1；草稿 id（非纯数字）不变。
+    """
+
+    def map_node(nid: str) -> Optional[str]:
+        if not nid.startswith("ev:timeline:"):
+            return nid
+        rest = nid.split("ev:timeline:", 1)[1].strip()
+        if not rest.isdigit():
+            return nid
+        n = int(rest)
+        if n == deleted_idx:
+            return None
+        if n > deleted_idx:
+            return f"ev:timeline:{n - 1}"
+        return nid
+
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        src = str(r.get("source", "") or "").strip()
+        tgt = str(r.get("target", "") or "").strip()
+        ns = map_node(src) if src.startswith("ev:timeline:") else src
+        nt = map_node(tgt) if tgt.startswith("ev:timeline:") else tgt
+        if ns is None or nt is None:
+            continue
+        out.append({**r, "source": ns, "target": nt})
+    return out
+
+
 def update_chapter_table(
     novel_id: str,
     chapter_index: int,
@@ -324,6 +396,46 @@ def update_chapter_table(
         character_ids=character_ids,
         event_ids=event_ids,
     )
+
+
+def parse_timeline_index_from_event_id(event_id: str) -> Optional[int]:
+    """解析 ev:timeline:{int}；草稿 id（非纯数字后缀）返回 None。"""
+    raw = str(event_id or "").strip()
+    if not raw.startswith("ev:timeline:"):
+        return None
+    rest = raw.split("ev:timeline:", 1)[1].strip()
+    try:
+        return int(rest)
+    except ValueError:
+        return None
+
+
+def timeline_next_graph_neighbors(novel_id: str, focus_event_id: str) -> Tuple[List[str], List[str]]:
+    """
+    基于 event_relations 中 kind=timeline_next 的边：
+    - 前置：target == focus 的 source（合法 ev:timeline 索引节点）
+    - 后置：source == focus 的 target（合法 ev:timeline 索引节点）
+    保持首次遍历顺序，不去重跨类重复（同一 id 只出现一次于各自列表内）。
+    """
+    focus = str(focus_event_id or "").strip()
+    preds: List[str] = []
+    succs: List[str] = []
+    seen_p: set[str] = set()
+    seen_s: set[str] = set()
+    for r in load_event_relations(novel_id):
+        if str(r.get("kind", "")).strip().lower() != "timeline_next":
+            continue
+        src = str(r.get("source", "")).strip()
+        tgt = str(r.get("target", "")).strip()
+        if src == focus and tgt:
+            if parse_timeline_index_from_event_id(tgt) is not None and tgt not in seen_s:
+                seen_s.add(tgt)
+                succs.append(tgt)
+        if tgt == focus and src:
+            if parse_timeline_index_from_event_id(src) is not None and src not in seen_p:
+                seen_p.add(src)
+                preds.append(src)
+    return preds, succs
 
 
 def resolve_chapter_event_ids(state: NovelState, chapter_index: int, time_slot: str) -> List[str]:

@@ -11,6 +11,11 @@ _TABLE = {
     "sm": "6de2fb",
     "pb": "73ac0d",
     "tu": "15d9be",
+    "lc": "a1b2c3",
+    "lj": "b2c3d4",
+    "tf": "c3d4e5",
+    "si": "d4e5f6",
+    "md": "e5f6a7",
 }
 
 

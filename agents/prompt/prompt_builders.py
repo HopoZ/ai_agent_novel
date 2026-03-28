@@ -1,10 +1,12 @@
+"""提示词拼装。包结构与职责见 `agents/README.md`。"""
+
 from __future__ import annotations
 
 import json
 from typing import Optional
 
 from agents._internal_marks import z7_module_mark
-from .state_models import ChapterPlan
+from agents.state.state_models import ChapterPlan
 
 _MODULE_REV = z7_module_mark("pb")
 
@@ -38,19 +40,17 @@ def build_plan_chapter_prompt(
     chapter_index: int,
     continuity_hint: dict,
     state_context: str,
-    chapter_context: str,
     lorebook: str,
     strict_no_supporting: bool = False,
 ) -> tuple[str, str]:
-    system = "你是一个“网文章节规划器”。你必须输出严格 JSON（只包含一个 JSON 对象），用于生成下一章。"
+    system = "你是一个“网文章节规划器”。你必须输出严格 JSON（只包含一个 JSON 对象），用于生成本章。"
     human = (
         f"用户本章提示：{user_task}\n\n"
         f"目标 chapter_index：{chapter_index}\n"
         f"连续性提示：{json.dumps(continuity_hint, ensure_ascii=False)}\n\n"
         "当前 NovelState（压缩注入）：\n"
         f"{state_context}\n\n"
-        "上下文章节（仅相邻两章；若为空表示本次不注入章节 JSON）：\n"
-        f"{chapter_context}\n\n"
+        "说明：时序与因果以 world.timeline 及用户任务中的「章节归属/关系图前后事件」为准；"
         "lorebook（静态设定）：\n"
         f"{lorebook}\n\n"
         "你要输出一个 ChapterPlan：\n"
@@ -78,7 +78,6 @@ def build_plan_chapter_prompt(
 def build_write_chapter_prompt(
     user_task: str,
     state_context: str,
-    chapter_context: str,
     lorebook: str,
     plan: Optional[ChapterPlan] = None,
     strict_no_supporting: bool = False,
@@ -96,8 +95,8 @@ def build_write_chapter_prompt(
     human = (
         f"用户本章提示：{user_task}\n\n"
         f"当前状态（压缩）：\n{state_context}\n\n"
-        "上下文章节（仅相邻两章；若为空表示本次不注入章节 JSON）：\n"
-        f"{chapter_context}\n\n"
+        "说明：时序与因果以 world.timeline 及用户任务中的「章节归属/关系图前后事件」为准；"
+        "正文写作不额外注入相邻章节的章节 JSON。\n\n"
         "ChapterPlan（用于写作）：\n"
         f"{plan_text}\n\n"
         "lorebook（静态设定）：\n"
@@ -134,4 +133,3 @@ def build_next_status_prompt(
         "- 不要复述本章，不要输出 JSON，不要代码块\n"
     )
     return system, human
-

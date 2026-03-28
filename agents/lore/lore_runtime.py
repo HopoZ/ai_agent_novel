@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 from langchain.messages import HumanMessage, SystemMessage
 
 from agents._internal_marks import z7_module_mark
-from agents.lore_summary import (
+from agents.lore.lore_summary import (
     build_source_map,
     load_cached_summary,
     save_summary,

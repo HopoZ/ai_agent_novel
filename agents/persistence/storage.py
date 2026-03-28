@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import List, Optional
 from uuid import UUID
 
-from .state_models import ChapterRecord, ContinuityState, NovelMeta, NovelState, WorldState
+from agents.state.state_models import ChapterRecord, ContinuityState, NovelMeta, NovelState, WorldState
 
 
 APP_STORAGE_DIR = Path("storage")
@@ -45,6 +45,17 @@ def ensure_novel_dirs(novel_id: str) -> None:
     d = _novel_dir(novel_id)
     d.mkdir(parents=True, exist_ok=True)
     get_chapters_dir(novel_id).mkdir(parents=True, exist_ok=True)
+
+
+def _is_graph_chapter_table_stub(data: object) -> bool:
+    """图谱章节表骨架（误入 chapters/ 目录时勿当 ChapterRecord 解析）。"""
+    if not isinstance(data, dict):
+        return False
+    if "character_ids" not in data:
+        return False
+    if "who_is_present" in data:
+        return False
+    return True
 
 
 def load_state(novel_id: str) -> Optional[NovelState]:
@@ -103,20 +114,29 @@ def save_state(novel_id: str, state: NovelState) -> None:
 
 
 def load_chapter(novel_id: str, chapter_index: int) -> Optional[ChapterRecord]:
-    p = get_chapter_path(novel_id, chapter_index)
-    if not p.exists():
-        # 兼容新文件命名：扫描 chapters 下任意文件，按 chapter_index 匹配
+    def _scan_dir() -> Optional[ChapterRecord]:
         for fp in get_chapters_dir(novel_id).glob("*.json"):
             try:
                 data = json.loads(fp.read_text(encoding="utf-8"))
+                if _is_graph_chapter_table_stub(data):
+                    continue
                 rec = ChapterRecord.model_validate(data)
             except Exception:
                 continue
             if rec.chapter_index == chapter_index:
                 return rec
         return None
-    data = json.loads(p.read_text(encoding="utf-8"))
-    return ChapterRecord.model_validate(data)
+
+    p = get_chapter_path(novel_id, chapter_index)
+    if p.exists():
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if not _is_graph_chapter_table_stub(data):
+                return ChapterRecord.model_validate(data)
+        except Exception:
+            pass
+        return _scan_dir()
+    return _scan_dir()
 
 
 def list_chapters(novel_id: str) -> List[ChapterRecord]:
@@ -127,6 +147,8 @@ def list_chapters(novel_id: str) -> List[ChapterRecord]:
     for fp in chapters_dir.glob("*.json"):
         try:
             data = json.loads(fp.read_text(encoding="utf-8"))
+            if _is_graph_chapter_table_stub(data):
+                continue
             out.append(ChapterRecord.model_validate(data))
         except Exception:
             continue

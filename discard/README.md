@@ -7,6 +7,6 @@
 
 当前主流程（仍在使用）：
 - 后端 API：`webapp/server.py`
-- 核心引擎：`agents/novel_agent.py`、`agents/state_models.py`、`agents/storage.py`、`agents/loader.py`
+- 核心引擎：`agents/novel/`、`agents/state/`、`agents/prompt/`；持久化 `agents/persistence/`；设定 `agents/lore/`
 - 前端（Vite/Vue）：`webapp/frontend/src/*`（build 到 `webapp/frontend/dist` 并由后端托管）
 

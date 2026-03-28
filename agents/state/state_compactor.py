@@ -1,9 +1,13 @@
+"""状态压缩注入。包结构与职责见 `agents/README.md`。"""
+
 from __future__ import annotations
 
 import json
 from typing import Dict, Optional, Set
 
 from agents._internal_marks import z7_module_mark
+from agents.persistence.graph_tables import parse_timeline_index_from_event_id, timeline_next_graph_neighbors
+
 from .state_models import NovelState
 
 _MODULE_REV = z7_module_mark("sc")
@@ -47,6 +51,8 @@ def compact_state_for_prompt(
     strict_no_supporting: bool = False,
     timeline_n: int = 6,
     max_chars: int = 9000,
+    novel_id: Optional[str] = None,
+    focus_timeline_event_id: Optional[str] = None,
 ) -> str:
     rel_ids = select_related_character_ids(
         state=state,
@@ -83,7 +89,30 @@ def compact_state_for_prompt(
             picked_rules[k] = v
 
     timeline = list(state.world.timeline or [])
-    picked_tl = [] if minimal_context else timeline[-max(1, timeline_n) :]
+    picked_tl: list = []
+    if not minimal_context:
+        used_focus_slice = False
+        if novel_id and focus_timeline_event_id:
+            fid = str(focus_timeline_event_id).strip()
+            fi = parse_timeline_index_from_event_id(fid)
+            if fi is not None and 0 <= fi < len(timeline):
+                used_focus_slice = True
+                preds, succs = timeline_next_graph_neighbors(novel_id, fid)
+                idx_set: Set[int] = {fi}
+                for pid in preds:
+                    j = parse_timeline_index_from_event_id(pid)
+                    if j is not None and 0 <= j < len(timeline):
+                        idx_set.add(j)
+                for sid in succs:
+                    j = parse_timeline_index_from_event_id(sid)
+                    if j is not None and 0 <= j < len(timeline):
+                        idx_set.add(j)
+                if len(idx_set) == 1:
+                    for k in range(max(0, len(timeline) - max(1, timeline_n)), len(timeline)):
+                        idx_set.add(k)
+                picked_tl = [timeline[i] for i in sorted(idx_set)]
+        if not used_focus_slice:
+            picked_tl = timeline[-max(1, timeline_n) :]
     if (not minimal_context) and time_slot_hint:
         for t in timeline:
             if time_slot_hint in (t.time_slot or "") and t not in picked_tl:
@@ -141,4 +170,3 @@ def format_state_for_prompt(state: NovelState, max_chars: int = 12000) -> str:
     if len(s) > max_chars:
         return s[:max_chars] + "\n...[truncated]"
     return s
-

@@ -2,96 +2,47 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import re
-import uuid
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Dict, Iterator, Optional, Set, Tuple, Type
+from typing import Any, Dict, Iterator, Optional, Set, Tuple
 
-from dotenv import load_dotenv
-from langchain.chat_models import init_chat_model
 from langchain.messages import HumanMessage, SystemMessage
 
 from agents._internal_marks import z7_module_mark
-from agents.loader import LoreLoader
-from agents.lore_runtime import build_lore_summary_llm as build_lore_summary_llm_runtime
-from agents.lore_runtime import build_lorebook
-from agents.prompt_builders import (
+from agents.persistence.graph_tables import (
+    hydrate_state_character_relationships,
+    persist_chapter_artifacts,
+)
+from agents.lore.loader import LoreLoader
+from agents.lore.lore_runtime import build_lore_summary_llm as build_lore_summary_llm_runtime
+from agents.lore.lore_runtime import build_lorebook
+from agents.prompt.prompt_builders import (
     build_init_state_prompt,
     build_next_status_prompt,
     build_plan_chapter_prompt,
     build_write_chapter_prompt,
 )
-from agents.state_compactor import (
+from agents.state.state_compactor import (
     compact_state_for_prompt as compact_state_for_prompt_runtime,
     format_state_for_prompt as format_state_for_prompt_runtime,
     select_related_character_ids as select_related_character_ids_runtime,
 )
-from agents.state_merge import (
-    merge_state as merge_state_runtime,
-    neighbor_chapters_context as neighbor_chapters_context_runtime,
-)
-from agents.text_utils import parse_ai_chunk_text, parse_ai_text, write_outputs_txt
-from agents.graph_tables import hydrate_state_character_relationships, persist_chapter_artifacts
-from .state_models import ChapterPlan, ChapterRecord, ContinuityState, NovelMeta, NovelState
-from .storage import (
+from agents.state.state_merge import merge_state as merge_state_runtime
+from agents.state.state_models import ChapterPlan, ChapterRecord, ContinuityState, NovelMeta, NovelState
+from agents.persistence.storage import (
     ensure_novel_dirs,
     load_state,
     save_state,
 )
+from agents.text_utils import parse_ai_chunk_text, parse_ai_text, write_outputs_txt
+
+from .llm_client import bind_llm_options, init_deepseek_chat
+from .llm_json import extract_json_object, json_load_with_retry
+from .structured_invoke import invoke_pydantic_json
+from .timeline_focus import resolve_timeline_focus_event_id
 
 
 logger = logging.getLogger("novel_agent")
 _MODULE_REV = z7_module_mark("na")
-
-
-def _extract_json_object(text: str) -> str:
-    """
-    从一段可能带多余内容的文本里，提取第一个 {...} 作为 JSON。
-    """
-    # 优先找代码块里的 JSON
-    fenced = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text)
-    if fenced:
-        return fenced.group(1)
-
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise ValueError("No JSON object found in model output.")
-    return text[start : end + 1]
-
-
-def _json_load_with_retry(raw_text: str, fix_prompt: str, llm_invoke_fn) -> dict:
-    """
-    将模型输出 JSON 解析失败时，进行一次“修复 JSON”的重试。
-    """
-    try:
-        candidate = _extract_json_object(raw_text)
-        return json.loads(candidate)
-    except Exception as e:
-        logger.warning("JSON parse failed, retrying. err=%s", e)
-        fixed_res = llm_invoke_fn(fix_prompt)
-        fixed_text = fixed_res
-        candidate = _extract_json_object(fixed_text)
-        return json.loads(candidate)
-
-
-def _init_llm():
-    load_dotenv()
-    api_key = os.getenv("DEEPSEEK_API_KEY")
-    if not api_key:
-        raise ValueError("请在 .env 文件中添加 DEEPSEEK_API_KEY")
-
-    return init_chat_model(
-        "deepseek-chat",
-        model_provider="openai",
-        api_key=api_key,
-        base_url="https://api.deepseek.com/v1",
-        temperature=0.7,
-        output_version="v1",
-        max_tokens=20000,
-    )
 
 
 @dataclass
@@ -124,31 +75,11 @@ class NovelAgent:
 
     def _get_model(self):
         if self.model is None:
-            self.model = _init_llm()
+            self.model = init_deepseek_chat()
         return self.model
 
     def _model_for_call(self, llm_options: Optional[Dict[str, Any]] = None):
-        """
-        按单次请求覆盖 sampling 参数（temperature / top_p / max_tokens）。
-        未传或全为空时使用全局默认模型配置。
-        """
-        base = self._get_model()
-        if not llm_options:
-            return base
-        kwargs: Dict[str, Any] = {}
-        for key in ("temperature", "top_p", "max_tokens"):
-            v = llm_options.get(key)
-            if v is not None:
-                kwargs[key] = v
-        if not kwargs:
-            return base
-        bind = getattr(base, "bind", None)
-        if callable(bind):
-            try:
-                return bind(**kwargs)
-            except Exception as e:
-                logger.warning("model.bind(%s) failed, using base model: %s", kwargs, e)
-        return base
+        return bind_llm_options(self._get_model(), llm_options)
 
     def _load_state_hydrated(self, novel_id: str) -> Optional[NovelState]:
         state = load_state(novel_id)
@@ -159,24 +90,6 @@ class NovelAgent:
     def _lorebook(self, lore_tags: Optional[list[str]] = None, lore_summary_id: Optional[str] = None) -> str:
         # lore_summary_id 已废弃；按 tags + 单 tag 缓存读取 lorebook
         return build_lorebook(self.lore_loader, lore_tags=lore_tags)
-
-    def _pick_lore_tags_for_strict_mode(
-        self,
-        lore_tags: Optional[list[str]],
-        pov_character_ids_override: Optional[list[str]],
-        strict_no_supporting: bool,
-    ) -> Optional[list[str]]:
-        if (not strict_no_supporting) or (not lore_tags):
-            return lore_tags
-        povs = [str(x).strip() for x in (pov_character_ids_override or []) if str(x).strip()]
-        if not povs:
-            return lore_tags
-        picked: list[str] = []
-        for tag in lore_tags:
-            t = str(tag or "")
-            if any(pov in t for pov in povs):
-                picked.append(t)
-        return picked or lore_tags
 
     def build_lore_summary_llm(self, tags: list[str], force: bool = False) -> Dict[str, Any]:
         return build_lore_summary_llm_runtime(
@@ -211,6 +124,8 @@ class NovelAgent:
         strict_no_supporting: bool = False,
         timeline_n: int = 6,
         max_chars: int = 9000,
+        novel_id: Optional[str] = None,
+        focus_timeline_event_id: Optional[str] = None,
     ) -> str:
         return compact_state_for_prompt_runtime(
             state=state,
@@ -222,22 +137,12 @@ class NovelAgent:
             strict_no_supporting=strict_no_supporting,
             timeline_n=timeline_n,
             max_chars=max_chars,
+            novel_id=novel_id,
+            focus_timeline_event_id=focus_timeline_event_id,
         )
 
     def _format_state_for_prompt(self, state: NovelState, max_chars: int = 12000) -> str:
         return format_state_for_prompt_runtime(state=state, max_chars=max_chars)
-
-    def _neighbor_chapters_context(
-        self,
-        novel_id: str,
-        target_chapter_index: int,
-        enabled: bool = True,
-    ) -> str:
-        return neighbor_chapters_context_runtime(
-            novel_id=novel_id,
-            target_chapter_index=target_chapter_index,
-            enabled=enabled,
-        )
 
     def create_novel_stub(
         self,
@@ -382,7 +287,7 @@ class NovelAgent:
                 yield {"delta": text, "usage_metadata": usage}
 
         raw_text = "".join(chunks)
-        data = json.loads(_extract_json_object(raw_text))
+        data = json.loads(extract_json_object(raw_text))
         plan_json = NovelState.model_validate(data)
         plan_json.meta.initialized = True
         plan_json.meta.current_chapter_index = max(
@@ -401,10 +306,11 @@ class NovelAgent:
         time_slot_override: Optional[str] = None,
         pov_character_ids_override: Optional[list[str]] = None,
         supporting_character_ids: Optional[list[str]] = None,
-        include_chapter_context: bool = True,
+        minimal_state_for_prompt: bool = False,
         lore_tags: Optional[list[str]] = None,
         lore_summary_id: Optional[str] = None,
         llm_options: Optional[Dict[str, Any]] = None,
+        timeline_event_focus_id: Optional[str] = None,
     ) -> ChapterPlan:
         state = self._load_state_hydrated(novel_id)
         if not state:
@@ -413,27 +319,25 @@ class NovelAgent:
             raise ValueError("state 尚未初始化。请先用 mode=`init_state` 初始化。")
 
         strict_no_supporting = bool(pov_character_ids_override) and not bool(supporting_character_ids)
-        picked_lore_tags = self._pick_lore_tags_for_strict_mode(
-            lore_tags=(lore_tags or state.meta.lore_tags),
-            pov_character_ids_override=pov_character_ids_override,
-            strict_no_supporting=strict_no_supporting,
+        lorebook = self._lorebook(lore_tags or state.meta.lore_tags, lore_summary_id=lore_summary_id)
+        focus_eid = resolve_timeline_focus_event_id(
+            novel_id,
+            state,
+            chapter_index,
+            time_slot_override,
+            timeline_event_focus_id,
         )
-        lorebook = self._lorebook(picked_lore_tags, lore_summary_id=lore_summary_id)
         state_context = self._compact_state_for_prompt(
             state=state,
             user_task=user_task,
             time_slot_hint=time_slot_override,
             pov_character_ids_override=pov_character_ids_override,
             supporting_character_ids=supporting_character_ids,
-            minimal_context=(not include_chapter_context),
+            minimal_context=minimal_state_for_prompt,
             strict_no_supporting=strict_no_supporting,
-        )
-        chapter_context = self._neighbor_chapters_context(
             novel_id=novel_id,
-            target_chapter_index=chapter_index,
-            enabled=include_chapter_context,
+            focus_timeline_event_id=focus_eid,
         )
-
         continuity_hint = {
             "time_slot_override": time_slot_override,
             "pov_character_ids_override": pov_character_ids_override or [],
@@ -445,7 +349,6 @@ class NovelAgent:
             chapter_index=chapter_index,
             continuity_hint=continuity_hint,
             state_context=state_context,
-            chapter_context=chapter_context,
             lorebook=lorebook,
             strict_no_supporting=strict_no_supporting,
         )
@@ -460,10 +363,11 @@ class NovelAgent:
         time_slot_override: Optional[str] = None,
         pov_character_ids_override: Optional[list[str]] = None,
         supporting_character_ids: Optional[list[str]] = None,
-        include_chapter_context: bool = True,
+        minimal_state_for_prompt: bool = False,
         lore_tags: Optional[list[str]] = None,
         lore_summary_id: Optional[str] = None,
         llm_options: Optional[Dict[str, Any]] = None,
+        timeline_event_focus_id: Optional[str] = None,
     ) -> Iterator[Dict[str, Any]]:
         """
         流式生成章节规划（原始 JSON 文本）。
@@ -477,25 +381,24 @@ class NovelAgent:
             raise ValueError("state 尚未初始化。请先用 mode=`init_state` 初始化。")
 
         strict_no_supporting = bool(pov_character_ids_override) and not bool(supporting_character_ids)
-        picked_lore_tags = self._pick_lore_tags_for_strict_mode(
-            lore_tags=(lore_tags or state.meta.lore_tags),
-            pov_character_ids_override=pov_character_ids_override,
-            strict_no_supporting=strict_no_supporting,
+        lorebook = self._lorebook(lore_tags or state.meta.lore_tags, lore_summary_id=lore_summary_id)
+        focus_eid = resolve_timeline_focus_event_id(
+            novel_id,
+            state,
+            chapter_index,
+            time_slot_override,
+            timeline_event_focus_id,
         )
-        lorebook = self._lorebook(picked_lore_tags, lore_summary_id=lore_summary_id)
         state_context = self._compact_state_for_prompt(
             state=state,
             user_task=user_task,
             time_slot_hint=time_slot_override,
             pov_character_ids_override=pov_character_ids_override,
             supporting_character_ids=supporting_character_ids,
-            minimal_context=(not include_chapter_context),
+            minimal_context=minimal_state_for_prompt,
             strict_no_supporting=strict_no_supporting,
-        )
-        chapter_context = self._neighbor_chapters_context(
             novel_id=novel_id,
-            target_chapter_index=chapter_index,
-            enabled=include_chapter_context,
+            focus_timeline_event_id=focus_eid,
         )
         continuity_hint = {
             "time_slot_override": time_slot_override,
@@ -507,7 +410,6 @@ class NovelAgent:
             chapter_index=chapter_index,
             continuity_hint=continuity_hint,
             state_context=state_context,
-            chapter_context=chapter_context,
             lorebook=lorebook,
             strict_no_supporting=strict_no_supporting,
         )
@@ -533,7 +435,7 @@ class NovelAgent:
             resp = model.invoke(fix_messages)
             return parse_ai_text(resp)
 
-        data = _json_load_with_retry(
+        data = json_load_with_retry(
             raw_text=raw_text,
             fix_prompt=(
                 "你输出的不是合法 JSON。请仅输出一个合法 JSON 对象，内容与原意一致，"
@@ -542,6 +444,7 @@ class NovelAgent:
                 f"{raw_text}\n"
             ),
             llm_invoke_fn=llm_fix_invoke,
+            logger=logger,
         )
         plan = ChapterPlan.model_validate(data)
         yield {"done": True, "plan": plan.model_dump(mode="json"), "usage_metadata": final_usage}
@@ -555,44 +458,42 @@ class NovelAgent:
         novel_id: str,
         plan: ChapterPlan,
         user_task: str,
-        include_chapter_context: bool = True,
+        minimal_state_for_prompt: bool = False,
         lore_tags: Optional[list[str]] = None,
         lore_summary_id: Optional[str] = None,
         time_slot_hint: Optional[str] = None,
         pov_character_ids_override: Optional[list[str]] = None,
         supporting_character_ids: Optional[list[str]] = None,
         llm_options: Optional[Dict[str, Any]] = None,
+        timeline_event_focus_id: Optional[str] = None,
     ) -> Tuple[str, Dict[str, Any]]:
         state = self._load_state_hydrated(novel_id)
         if not state:
             raise ValueError(f"novel_id not found: {novel_id}")
 
         strict_no_supporting = bool(pov_character_ids_override) and not bool(supporting_character_ids)
-        picked_lore_tags = self._pick_lore_tags_for_strict_mode(
-            lore_tags=(lore_tags or state.meta.lore_tags),
-            pov_character_ids_override=pov_character_ids_override,
-            strict_no_supporting=strict_no_supporting,
+        lorebook = self._lorebook(lore_tags or state.meta.lore_tags, lore_summary_id=lore_summary_id)
+        focus_eid = resolve_timeline_focus_event_id(
+            novel_id,
+            state,
+            plan.chapter_index,
+            time_slot_hint or plan.time_slot,
+            timeline_event_focus_id,
         )
-        lorebook = self._lorebook(picked_lore_tags, lore_summary_id=lore_summary_id)
         state_context = self._compact_state_for_prompt(
             state=state,
             user_task=user_task,
             time_slot_hint=time_slot_hint,
             pov_character_ids_override=pov_character_ids_override,
             supporting_character_ids=supporting_character_ids,
-            minimal_context=(not include_chapter_context),
+            minimal_context=minimal_state_for_prompt,
             strict_no_supporting=strict_no_supporting,
-        )
-        chapter_context = self._neighbor_chapters_context(
             novel_id=novel_id,
-            target_chapter_index=plan.chapter_index,
-            enabled=include_chapter_context,
+            focus_timeline_event_id=focus_eid,
         )
-
         system, human = build_write_chapter_prompt(
             user_task=user_task,
             state_context=state_context,
-            chapter_context=chapter_context,
             lorebook=lorebook,
             plan=plan,
             strict_no_supporting=strict_no_supporting,
@@ -611,13 +512,14 @@ class NovelAgent:
         novel_id: str,
         plan: ChapterPlan,
         user_task: str,
-        include_chapter_context: bool = True,
+        minimal_state_for_prompt: bool = False,
         lore_tags: Optional[list[str]] = None,
         lore_summary_id: Optional[str] = None,
         time_slot_hint: Optional[str] = None,
         pov_character_ids_override: Optional[list[str]] = None,
         supporting_character_ids: Optional[list[str]] = None,
         llm_options: Optional[Dict[str, Any]] = None,
+        timeline_event_focus_id: Optional[str] = None,
     ) -> Iterator[Dict[str, Any]]:
         """
         流式生成章节正文。
@@ -630,31 +532,28 @@ class NovelAgent:
             raise ValueError(f"novel_id not found: {novel_id}")
 
         strict_no_supporting = bool(pov_character_ids_override) and not bool(supporting_character_ids)
-        picked_lore_tags = self._pick_lore_tags_for_strict_mode(
-            lore_tags=(lore_tags or state.meta.lore_tags),
-            pov_character_ids_override=pov_character_ids_override,
-            strict_no_supporting=strict_no_supporting,
+        lorebook = self._lorebook(lore_tags or state.meta.lore_tags, lore_summary_id=lore_summary_id)
+        focus_eid = resolve_timeline_focus_event_id(
+            novel_id,
+            state,
+            plan.chapter_index,
+            time_slot_hint or plan.time_slot,
+            timeline_event_focus_id,
         )
-        lorebook = self._lorebook(picked_lore_tags, lore_summary_id=lore_summary_id)
         state_context = self._compact_state_for_prompt(
             state=state,
             user_task=user_task,
             time_slot_hint=time_slot_hint,
             pov_character_ids_override=pov_character_ids_override,
             supporting_character_ids=supporting_character_ids,
-            minimal_context=(not include_chapter_context),
+            minimal_context=minimal_state_for_prompt,
             strict_no_supporting=strict_no_supporting,
-        )
-        chapter_context = self._neighbor_chapters_context(
             novel_id=novel_id,
-            target_chapter_index=plan.chapter_index,
-            enabled=include_chapter_context,
+            focus_timeline_event_id=focus_eid,
         )
-
         system, human = build_write_chapter_prompt(
             user_task=user_task,
             state_context=state_context,
-            chapter_context=chapter_context,
             lorebook=lorebook,
             plan=plan,
             strict_no_supporting=strict_no_supporting,
@@ -676,6 +575,7 @@ class NovelAgent:
         chapter_index: int,
         latest_content: str,
         llm_options: Optional[Dict[str, Any]] = None,
+        timeline_event_focus_id: Optional[str] = None,
     ) -> str:
         """
         独立生成“下章建议”，不参与当前章节 plan/write。
@@ -683,12 +583,21 @@ class NovelAgent:
         state = self._load_state_hydrated(novel_id)
         if not state:
             return ""
+        focus_eid = resolve_timeline_focus_event_id(
+            novel_id,
+            state,
+            chapter_index,
+            state.continuity.time_slot,
+            timeline_event_focus_id,
+        )
         state_context = self._compact_state_for_prompt(
             state=state,
             user_task=user_task,
             time_slot_hint=state.continuity.time_slot,
             timeline_n=4,
             max_chars=7000,
+            novel_id=novel_id,
+            focus_timeline_event_id=focus_eid,
         )
         content = (latest_content or "").strip()
         if len(content) > 2500:
@@ -717,6 +626,7 @@ class NovelAgent:
         lore_tags: Optional[list[str]] = None,
         lore_summary_id: Optional[str] = None,
         llm_options: Optional[Dict[str, Any]] = None,
+        timeline_event_focus_id: Optional[str] = None,
     ) -> RunResult:
         state = self._load_state_hydrated(novel_id)
         if not state:
@@ -746,10 +656,11 @@ class NovelAgent:
                 time_slot_override=time_slot_override,
                 pov_character_ids_override=pov_character_ids_override,
                 supporting_character_ids=supporting_character_ids,
-                include_chapter_context=(not manual_time_slot),
+                minimal_state_for_prompt=manual_time_slot,
                 lore_tags=lore_tags,
                 lore_summary_id=lore_summary_id,
                 llm_options=llm_options,
+                timeline_event_focus_id=timeline_event_focus_id,
             )
             # 允许 plan.next_state 是“补丁”，这里合并成完整状态再落盘
             try:
@@ -789,13 +700,14 @@ class NovelAgent:
                 novel_id=novel_id,
                 plan=plan,
                 user_task=user_task,
-                include_chapter_context=(not manual_time_slot),
+                minimal_state_for_prompt=manual_time_slot,
                 lore_tags=lore_tags,
                 lore_summary_id=lore_summary_id,
                 time_slot_hint=time_slot_override,
                 pov_character_ids_override=pov_character_ids_override,
                 supporting_character_ids=supporting_character_ids,
                 llm_options=llm_options,
+                timeline_event_focus_id=timeline_event_focus_id,
             )
 
             if mode == "revise_chapter":
@@ -837,6 +749,7 @@ class NovelAgent:
                     chapter_index=chapter_index,
                     latest_content=content_text,
                     llm_options=llm_options,
+                    timeline_event_focus_id=timeline_event_focus_id,
                 )
             except Exception as e:
                 logger.warning("Failed to generate next_status: %s", e)
@@ -866,6 +779,7 @@ class NovelAgent:
         supporting_character_ids: Optional[list[str]] = None,
         lore_tags: Optional[list[str]] = None,
         lore_summary_id: Optional[str] = None,
+        timeline_event_focus_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         返回“本次运行将喂给模型的输入”预览，不调用模型、无落盘副作用。
@@ -904,12 +818,14 @@ class NovelAgent:
             chapter_index = state.meta.current_chapter_index + 1
 
         strict_no_supporting = bool(pov_character_ids_override) and not bool(supporting_character_ids)
-        picked_lore_tags = self._pick_lore_tags_for_strict_mode(
-            lore_tags=(lore_tags or state.meta.lore_tags),
-            pov_character_ids_override=pov_character_ids_override,
-            strict_no_supporting=strict_no_supporting,
+        lorebook = self._lorebook(lore_tags or state.meta.lore_tags, lore_summary_id=lore_summary_id)
+        focus_eid = resolve_timeline_focus_event_id(
+            novel_id,
+            state,
+            chapter_index,
+            time_slot_override,
+            timeline_event_focus_id,
         )
-        lorebook = self._lorebook(picked_lore_tags, lore_summary_id=lore_summary_id)
         state_context = self._compact_state_for_prompt(
             state=state,
             user_task=user_task,
@@ -918,11 +834,8 @@ class NovelAgent:
             supporting_character_ids=supporting_character_ids,
             minimal_context=manual_time_slot,
             strict_no_supporting=strict_no_supporting,
-        )
-        chapter_context = self._neighbor_chapters_context(
             novel_id=novel_id,
-            target_chapter_index=chapter_index,
-            enabled=(not manual_time_slot),
+            focus_timeline_event_id=focus_eid,
         )
         continuity_hint = {
             "time_slot_override": time_slot_override,
@@ -934,7 +847,6 @@ class NovelAgent:
             chapter_index=chapter_index,
             continuity_hint=continuity_hint,
             state_context=state_context,
-            chapter_context=chapter_context,
             lorebook=lorebook,
             strict_no_supporting=strict_no_supporting,
         )
@@ -944,7 +856,6 @@ class NovelAgent:
             write_system, write_human = build_write_chapter_prompt(
                 user_task=user_task,
                 state_context=state_context,
-                chapter_context=chapter_context,
                 lorebook=lorebook,
                 plan=None,
                 strict_no_supporting=strict_no_supporting,
@@ -961,91 +872,13 @@ class NovelAgent:
         return_usage: bool = False,
         llm_options: Optional[Dict[str, Any]] = None,
     ):
-        """
-        调用模型并解析为 Pydantic 模型（带一次“修复 JSON”的重试）。
-        """
-        messages = [SystemMessage(system), HumanMessage(human)]
+        """调用模型并解析为 Pydantic；实现见 `agents.novel.structured_invoke.invoke_pydantic_json`。"""
         model = self._model_for_call(llm_options)
-
-        def llm_fix_invoke(fix_prompt: str) -> str:
-            fix_messages = [SystemMessage(system), HumanMessage(fix_prompt)]
-            resp = model.invoke(fix_messages)
-            return parse_ai_text(resp)
-
-        logger.info("Invoking JSON model ...")
-        resp = model.invoke(messages)
-        raw_text = parse_ai_text(resp)
-        usage = getattr(resp, "usage_metadata", None) or {}
-
-        def parse_fn(json_dict: dict):
-            return root_model.model_validate(json_dict)
-
-        def dump_debug(name: str, text: str) -> Optional[str]:
-            try:
-                os.makedirs("outputs", exist_ok=True)
-                ts = datetime.now().strftime("%m%d_%H%M%S")
-                path = os.path.join("outputs", f"debug_json_{name}_{ts}.txt")
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(text or "")
-                return path
-            except Exception:
-                return None
-
-        # 解析 + 自动修复（两次策略）
-        try:
-            data = _json_load_with_retry(
-                raw_text=raw_text,
-                fix_prompt=(
-                    "你输出的不是合法 JSON。请仅输出一个合法 JSON 对象，内容与原意一致，"
-                    "并确保结构符合需要的模型（不要输出任何额外文本）。\n\n"
-                    "要求：\n"
-                    "- 只输出一个 JSON 对象\n"
-                    "- 不要使用中文引号\n"
-                    "- 所有字符串必须用英文双引号\n"
-                    "- 不要包含任何注释\n\n"
-                    f"原始输出：\n{raw_text}\n"
-                ),
-                llm_invoke_fn=llm_fix_invoke,
-            )
-            # 兼容模型额外包了一层 {"ChapterPlan": {...}} 之类的情况
-            try:
-                model_name = getattr(root_model, "__name__", "")
-                if isinstance(data, dict):
-                    if model_name and model_name in data and isinstance(data.get(model_name), dict):
-                        data = data[model_name]
-                    elif len(data) == 1:
-                        only_key = next(iter(data.keys()))
-                        if isinstance(data.get(only_key), dict) and only_key.lower() in {model_name.lower(), "result", "output"}:
-                            data = data[only_key]
-            except Exception:
-                pass
-            parsed = parse_fn(data)
-            return (parsed, usage) if return_usage else parsed
-        except Exception as e1:
-            logger.warning("Root JSON parse failed after retry: %s", e1)
-            raw_path = dump_debug("raw", raw_text)
-            try:
-                fix_prompt2 = (
-                    "把下面内容修复成合法 JSON：只输出 JSON（单个对象），不要输出任何解释。\n"
-                    "如果缺失逗号/括号，请补齐；如果有多余文本请删除。\n\n"
-                    f"{raw_text}\n"
-                )
-                fixed_text2 = llm_fix_invoke(fix_prompt2)
-                fixed_path = dump_debug("fixed", fixed_text2)
-                data2 = json.loads(_extract_json_object(fixed_text2))
-                try:
-                    model_name = getattr(root_model, "__name__", "")
-                    if isinstance(data2, dict) and model_name and model_name in data2 and isinstance(data2.get(model_name), dict):
-                        data2 = data2[model_name]
-                except Exception:
-                    pass
-                parsed2 = parse_fn(data2)
-                return (parsed2, usage) if return_usage else parsed2
-            except Exception as e2:
-                logger.exception("Root JSON parse failed hard: %s", e2)
-                raise ValueError(
-                    "模型输出 JSON 解析失败（已尝试修复）。"
-                    + (f" raw_dump={raw_path}" if raw_path else "")
-                    + (f" fixed_dump={fixed_path}" if 'fixed_path' in locals() and fixed_path else "")
-                )
-
+        return invoke_pydantic_json(
+            model=model,
+            system=system,
+            human=human,
+            root_model=root_model,
+            return_usage=return_usage,
+            log=logger,
+        )

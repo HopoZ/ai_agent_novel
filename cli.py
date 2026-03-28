@@ -5,7 +5,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
 from langchain.messages import HumanMessage, SystemMessage, AIMessage
-from agents.loader import LoreLoader
+from agents.lore.loader import LoreLoader
 import winsound
 
 

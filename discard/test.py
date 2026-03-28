@@ -1,5 +1,5 @@
 import os
-from agents.loader import LoreLoader
+from agents.lore.loader import LoreLoader
 
 
 def test_lore_loader():

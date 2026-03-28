@@ -109,12 +109,59 @@
     </template>
   </el-dialog>
 
-  <el-dialog v-model="inputPreviewVisible" title="当前模型 Input 预览" width="78%">
-    <div class="dialog-body">
-      <pre class="dialog-pre" v-text="inputPreviewText"></pre>
+  <el-dialog
+    v-model="inputPreviewVisible"
+    class="input-preview-dialog"
+    title="模型 Input 预览"
+    width="85%"
+    destroy-on-close
+  >
+    <p class="input-preview-lead muted">
+      以下为即将发给模型的分阶段提示词。确认无误后点击「确认并运行」；需要排查问题时可用「复制完整 JSON」。
+    </p>
+    <div v-if="inputPreviewData" class="input-preview-body">
+      <el-descriptions :column="2" border size="small" class="input-meta-desc">
+        <el-descriptions-item label="小说 ID" :span="2">
+          <code class="input-code-inline">{{ inputPreviewData.novel_id || "—" }}</code>
+        </el-descriptions-item>
+        <el-descriptions-item label="模式">
+          <el-tag size="small" type="primary">{{ inputPreviewData.mode || "—" }}</el-tag>
+        </el-descriptions-item>
+        <el-descriptions-item label="手动时间段">
+          {{ inputPreviewData.manual_time_slot ? "是" : "否" }}
+        </el-descriptions-item>
+      </el-descriptions>
+
+      <el-collapse v-model="inputPreviewOpenStages" class="input-stages-collapse">
+        <el-collapse-item
+          v-for="(st, idx) in inputPreviewStages"
+          :key="`st-${idx}-${st.name}`"
+          :name="String(idx)"
+        >
+          <template #title>
+            <span class="stage-title-row">
+              <span class="stage-title-text">{{ stageDisplayTitle(st.name) }}</span>
+              <el-tag size="small" effect="plain" class="stage-name-tag">{{ st.name }}</el-tag>
+            </span>
+          </template>
+          <div class="stage-panels">
+            <section class="prompt-block">
+              <header class="prompt-block-label">System</header>
+              <div class="prompt-block-body">{{ st.system || "（空）" }}</div>
+            </section>
+            <section class="prompt-block prompt-block--human">
+              <header class="prompt-block-label">Human / User</header>
+              <div class="prompt-block-body">{{ st.human || "（空）" }}</div>
+            </section>
+          </div>
+        </el-collapse-item>
+      </el-collapse>
     </div>
+    <div v-else class="muted">暂无预览数据，请关闭后重试。</div>
     <template #footer>
-      <span class="dialog-footer">
+      <span class="dialog-footer input-preview-footer">
+        <el-button @click="copyInputPreviewJson" :disabled="!inputPreviewData">复制完整 JSON</el-button>
+        <el-button @click="inputPreviewVisible = false">关闭</el-button>
         <el-button
           type="primary"
           :disabled="running || !pendingRunPayload"
@@ -123,7 +170,6 @@
         >
           确认并运行
         </el-button>
-        <el-button @click="inputPreviewVisible = false">关闭</el-button>
       </span>
     </template>
   </el-dialog>
@@ -141,7 +187,10 @@
         ]"
       />
       <el-button size="small" :loading="graphLoading" @click="loadGraph">刷新图谱</el-button>
-      <span class="muted">点击节点可查看详情，滚轮可缩放，拖拽可平移。</span>
+      <el-button size="small" type="success" plain @click="openGraphNodeCreate" :disabled="!form.novelId">
+        新建节点
+      </el-button>
+      <span class="muted">点击节点可编辑/删除；滚轮缩放，拖拽平移。</span>
     </div>
     <div style="height:10px;"></div>
     <div class="graph-box-fullscreen">
@@ -150,8 +199,69 @@
     </div>
   </el-dialog>
 
+  <el-dialog v-model="graphCreateVisible" title="新建图谱节点" width="480px" append-to-body destroy-on-close>
+    <el-form label-position="top">
+      <el-form-item label="节点类型">
+        <el-select v-model="graphCreateType" style="width:100%;">
+          <el-option label="人物（character）" value="character" />
+          <el-option label="时间线事件（timeline_event）" value="timeline_event" />
+          <el-option label="势力（faction）" value="faction" />
+        </el-select>
+      </el-form-item>
+      <template v-if="graphCreateType === 'character'">
+        <el-form-item label="角色 ID（唯一）" required>
+          <el-input v-model="graphCreateCharId" placeholder="例如：苏瑶 / 虚宇" />
+        </el-form-item>
+        <el-form-item label="简介（可选）">
+          <el-input v-model="graphCreateCharDesc" type="textarea" :rows="3" />
+        </el-form-item>
+        <el-form-item label="当前位置（可选）">
+          <el-input v-model="graphCreateCharLoc" />
+        </el-form-item>
+      </template>
+      <template v-else-if="graphCreateType === 'timeline_event'">
+        <div class="muted" style="margin-bottom:12px; line-height:1.55;">
+          时间线是<strong>两层</strong>：<strong>①</strong> 每条事件的文案与可选章节绑定存在小说
+          <code>state.json</code> 的 <code>world.timeline</code>（本表单即写入这里）；
+          <strong>②</strong> 事件谁先谁后、如何跳转，由图谱关系真源
+          <code>event_relations.json</code> 里的 <code>timeline_next</code> 边表示。
+          新建后请<strong>在图谱中点开该节点</strong>，用「上一跳 / 下一跳」保存与前后事件的连接。
+        </div>
+        <el-form-item label="time_slot" required>
+          <el-input v-model="graphCreateTlSlot" placeholder="例如：战争后期·反攻前夜" />
+        </el-form-item>
+        <el-form-item label="summary" required>
+          <el-input v-model="graphCreateTlSummary" type="textarea" :rows="3" placeholder="一句话概括该事件" />
+        </el-form-item>
+        <el-form-item label="绑定章节号 chapter_index（可选）">
+          <el-input v-model="graphCreateTlChapterIndexStr" placeholder="留空不绑定；填正整数" />
+          <div class="muted" style="margin-top:6px;">
+            写入 <code>world.timeline[].chapter_index</code>，与已有章节号对齐时用于归属/检索；与 <code>timeline_next</code> 边无关。
+          </div>
+        </el-form-item>
+      </template>
+      <template v-else>
+        <el-form-item label="势力名称（唯一）" required>
+          <el-input v-model="graphCreateFacName" placeholder="例如：天机阁" />
+        </el-form-item>
+        <el-form-item label="描述">
+          <el-input v-model="graphCreateFacDesc" type="textarea" :rows="4" />
+        </el-form-item>
+      </template>
+    </el-form>
+    <template #footer>
+      <el-button @click="graphCreateVisible = false">取消</el-button>
+      <el-button type="primary" :loading="graphCreateSubmitting" @click="submitGraphNodeCreate">创建</el-button>
+    </template>
+  </el-dialog>
+
   <el-drawer v-model="graphEditVisible" title="图谱编辑" size="520px" append-to-body>
-    <div v-if="!graphEditNode && !graphEditEdge" class="muted">请先在图谱中点击一个节点或一条边。</div>
+    <div v-if="!graphEditNode && !graphEditEdge" class="graph-drawer-empty muted">
+      <p>请先在图谱中点击一个节点或一条边。</p>
+      <el-button type="success" plain size="small" @click="openGraphNodeCreate" :disabled="!form.novelId">
+        新建节点
+      </el-button>
+    </div>
     <template v-else-if="graphEditEdge">
       <div class="muted">边：<code>{{ graphEditEdge.source }}</code> -> <code>{{ graphEditEdge.target }}</code></div>
       <div class="muted" style="margin-top:4px;">类型：{{ graphEditEdge.type || "relationship" }}</div>
@@ -261,7 +371,10 @@
           <el-form-item label="known_facts（每行一条）">
             <el-input v-model="graphCharFacts" type="textarea" :rows="4" />
           </el-form-item>
-          <el-button type="primary" @click="saveGraphNodePatch" :disabled="!form.novelId">保存节点</el-button>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <el-button type="primary" @click="saveGraphNodePatch" :disabled="!form.novelId">保存节点</el-button>
+            <el-button type="danger" plain @click="deleteCurrentGraphNode" :disabled="!form.novelId">删除节点</el-button>
+          </div>
         </el-form>
 
         <el-divider />
@@ -288,7 +401,10 @@
           <el-form-item label="description">
             <el-input v-model="graphFacDesc" type="textarea" :rows="6" />
           </el-form-item>
-          <el-button type="primary" @click="saveGraphNodePatch" :disabled="!form.novelId">保存节点</el-button>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <el-button type="primary" @click="saveGraphNodePatch" :disabled="!form.novelId">保存节点</el-button>
+            <el-button type="danger" plain @click="deleteCurrentGraphNode" :disabled="!form.novelId">删除节点</el-button>
+          </div>
         </el-form>
       </template>
 
@@ -322,13 +438,19 @@
               />
             </el-select>
           </el-form-item>
-          <el-button @click="saveTimelineNeighbors" :disabled="!form.novelId" style="margin-right:8px;">保存上下关系</el-button>
-          <el-button type="primary" @click="saveGraphNodePatch" :disabled="!form.novelId">保存节点</el-button>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+            <el-button @click="saveTimelineNeighbors" :disabled="!form.novelId">保存上下关系</el-button>
+            <el-button type="primary" @click="saveGraphNodePatch" :disabled="!form.novelId">保存节点</el-button>
+            <el-button type="danger" plain @click="deleteCurrentGraphNode" :disabled="!form.novelId">删除节点</el-button>
+          </div>
+          <div class="muted" style="margin-top:10px;">
+            删除时间线事件会重排后续 ev:timeline 下标，并清理指向该点的时间推进边。
+          </div>
         </el-form>
       </template>
 
       <template v-else>
-        <div class="muted">该类型节点暂不支持编辑。</div>
+        <div class="muted">该类型节点暂不支持在图谱内编辑或删除。</div>
       </template>
     </template>
   </el-drawer>
@@ -367,7 +489,7 @@
 
 <script lang="ts" setup>
 import { computed, nextTick, onMounted, onBeforeUnmount, reactive, ref, watch } from "vue";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 import * as echarts from "echarts";
 import TagPanel from "./components/TagPanel.vue";
 import MidFormPanel from "./components/MidFormPanel.vue";
@@ -457,6 +579,18 @@ const relLabel = ref("");
 const edgeRelLabel = ref("");
 const edgeSourceDraft = ref("");
 const edgeTargetDraft = ref("");
+
+const graphCreateVisible = ref(false);
+const graphCreateSubmitting = ref(false);
+const graphCreateType = ref<"character" | "timeline_event" | "faction">("timeline_event");
+const graphCreateCharId = ref("");
+const graphCreateCharDesc = ref("");
+const graphCreateCharLoc = ref("");
+const graphCreateTlSlot = ref("");
+const graphCreateTlSummary = ref("");
+const graphCreateTlChapterIndexStr = ref("");
+const graphCreateFacName = ref("");
+const graphCreateFacDesc = ref("");
 
 const graphCharacterNodeIds = computed(() => {
   const nodes = graphData.value?.nodes || [];
@@ -669,6 +803,114 @@ async function deleteEdgeRelationship() {
   ElMessage.success("已删除边");
   await loadGraph();
 }
+
+function resetGraphCreateForm() {
+  graphCreateCharId.value = "";
+  graphCreateCharDesc.value = "";
+  graphCreateCharLoc.value = "";
+  graphCreateTlSlot.value = "";
+  graphCreateTlSummary.value = "";
+  graphCreateTlChapterIndexStr.value = "";
+  graphCreateFacName.value = "";
+  graphCreateFacDesc.value = "";
+}
+
+function openGraphNodeCreate() {
+  if (!(form.novelId || "").trim()) {
+    ElMessage.error("请先选择小说。");
+    return;
+  }
+  resetGraphCreateForm();
+  const v = graphView.value;
+  if (v === "people") graphCreateType.value = "character";
+  else if (v === "events") graphCreateType.value = "timeline_event";
+  else graphCreateType.value = "character";
+  graphCreateVisible.value = true;
+}
+
+async function submitGraphNodeCreate() {
+  const novelId = (form.novelId || "").trim();
+  if (!novelId) return;
+  const t = graphCreateType.value;
+  let body: any = { node_type: t };
+  if (t === "character") {
+    const cid = (graphCreateCharId.value || "").trim();
+    if (!cid) {
+      ElMessage.error("请填写角色 ID。");
+      return;
+    }
+    body.character_id = cid;
+    body.description = (graphCreateCharDesc.value || "").trim() || null;
+    body.current_location = (graphCreateCharLoc.value || "").trim() || null;
+  } else if (t === "timeline_event") {
+    const slot = (graphCreateTlSlot.value || "").trim();
+    const summ = (graphCreateTlSummary.value || "").trim();
+    if (!slot || !summ) {
+      ElMessage.error("请填写 time_slot 与 summary。");
+      return;
+    }
+    body.time_slot = slot;
+    body.summary = summ;
+    const ci = parseInt(String(graphCreateTlChapterIndexStr.value || "").trim(), 10);
+    if (!Number.isNaN(ci) && ci >= 1) {
+      body.chapter_index = ci;
+    }
+  } else {
+    const fn = (graphCreateFacName.value || "").trim();
+    if (!fn) {
+      ElMessage.error("请填写势力名称。");
+      return;
+    }
+    body.faction_name = fn;
+    body.description = (graphCreateFacDesc.value || "").trim() || "";
+  }
+  graphCreateSubmitting.value = true;
+  try {
+    await apiJson(`/api/novels/${encodeURIComponent(novelId)}/graph/nodes`, "POST", body);
+    ElMessage.success("已创建节点");
+    graphCreateVisible.value = false;
+    await loadGraph();
+    if (graphFullscreenVisible.value) renderGraph();
+  } catch (e: any) {
+    ElMessage.error(e?.message || String(e));
+  } finally {
+    graphCreateSubmitting.value = false;
+  }
+}
+
+async function deleteCurrentGraphNode() {
+  const novelId = (form.novelId || "").trim();
+  const node = graphEditNode.value;
+  if (!novelId || !node?.id) return;
+  const nid = String(node.id || "");
+  if (nid.startsWith("ev:chapter:")) {
+    ElMessage.warning("章节节点不能在图谱内删除，请使用章节/正文管理。");
+    return;
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确定删除节点「${nid}」？人物会清理相关关系边与出场边；时间线删除会重排后续 ev:timeline 下标。`,
+      "删除节点",
+      { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" },
+    );
+  } catch {
+    return;
+  }
+  try {
+    await apiJson(
+      `/api/novels/${encodeURIComponent(novelId)}/graph/nodes?node_id=${encodeURIComponent(nid)}`,
+      "DELETE",
+      undefined,
+    );
+    ElMessage.success("已删除节点");
+    graphEditVisible.value = false;
+    graphEditNode.value = null;
+    await loadGraph();
+    if (graphFullscreenVisible.value) renderGraph();
+  } catch (e: any) {
+    ElMessage.error(e?.message || String(e));
+  }
+}
 async function openGraphDialog() {
   const novelId = (form.novelId || "").trim();
   if (!novelId) {
@@ -703,7 +945,45 @@ function openRoleManager() {
 const createDialogVisible = ref(false);
 const previewingInput = ref(false);
 const inputPreviewVisible = ref(false);
-const inputPreviewText = ref("");
+const inputPreviewData = ref<any>(null);
+const inputPreviewOpenStages = ref<string[]>([]);
+
+const inputPreviewStages = computed(() => {
+  const d = inputPreviewData.value;
+  const raw = d && Array.isArray(d.stages) ? d.stages : [];
+  return raw.map((s: any) => ({
+    name: String(s?.name ?? ""),
+    system: typeof s?.system === "string" ? s.system : "",
+    human: typeof s?.human === "string" ? s.human : "",
+  }));
+});
+
+function stageDisplayTitle(name: string): string {
+  const m: Record<string, string> = {
+    init_state: "初始化 · 世界状态",
+    plan_chapter: "规划 · 章节结构",
+    write_chapter_text: "写作 · 正文生成",
+  };
+  return m[name] || name || "阶段";
+}
+
+function setInputPreviewFromApi(data: any) {
+  inputPreviewData.value = data && typeof data === "object" ? data : null;
+  const stages = inputPreviewData.value?.stages;
+  const n = Array.isArray(stages) ? stages.length : 0;
+  inputPreviewOpenStages.value = n ? Array.from({ length: n }, (_, i) => String(i)) : [];
+}
+
+async function copyInputPreviewJson() {
+  if (!inputPreviewData.value) return;
+  const text = JSON.stringify(inputPreviewData.value, null, 2);
+  try {
+    await navigator.clipboard.writeText(text);
+    ElMessage.success("已复制到剪贴板");
+  } catch {
+    ElMessage.error("复制失败，请手动选择文本或检查浏览器权限");
+  }
+}
 const pendingRunPayload = ref<any | null>(null);
 const pendingRunNovelId = ref("");
 const pendingRunStarting = ref(false);
@@ -722,7 +1002,7 @@ function openCreateDialog() {
   createDialogVisible.value = true;
 }
 
-/** 与 agents/novel_agent._init_llm 保持一致（勿与后端漂移） */
+/** 与 agents/novel/llm_client.init_deepseek_chat 默认参数保持一致（勿与后端漂移） */
 const DEFAULT_LLM_TEMPERATURE = 0.7;
 const DEFAULT_LLM_MAX_TOKENS = 20000;
 
@@ -1384,7 +1664,7 @@ async function runMode() {
   runHint.value = "正在生成本次 Input 预览...";
   try {
     const data = await apiJson(`/api/novels/${encodeURIComponent(built.novelId)}/preview_input`, "POST", built.payload);
-    inputPreviewText.value = JSON.stringify(data, null, 2);
+    setInputPreviewFromApi(data);
     pendingRunPayload.value = built.payload;
     pendingRunNovelId.value = built.novelId;
     runHint.value = "Input 已生成，请在弹窗点击“确认并运行”";
@@ -1415,7 +1695,7 @@ async function previewCurrentInput() {
   previewingInput.value = true;
   try {
     const data = await apiJson(`/api/novels/${encodeURIComponent(built.novelId)}/preview_input`, "POST", built.payload);
-    inputPreviewText.value = JSON.stringify(data, null, 2);
+    setInputPreviewFromApi(data);
     pendingRunPayload.value = built.payload;
     pendingRunNovelId.value = built.novelId;
     inputPreviewVisible.value = true;
@@ -1748,6 +2028,100 @@ onBeforeUnmount(() => {
   white-space: pre-wrap;
   word-break: break-word;
   font-size: 12px;
+}
+
+.input-preview-dialog :deep(.el-dialog) {
+  max-width: 960px;
+}
+.input-preview-lead {
+  margin: 0 0 14px;
+  line-height: 1.5;
+  font-size: 13px;
+}
+.input-preview-body {
+  max-height: min(68vh, 720px);
+  overflow: auto;
+  padding-right: 4px;
+}
+.input-meta-desc {
+  margin-bottom: 14px;
+}
+.input-code-inline {
+  font-size: 12px;
+  word-break: break-all;
+}
+.input-stages-collapse {
+  border: none;
+}
+.input-stages-collapse :deep(.el-collapse-item__header) {
+  font-weight: 600;
+  padding-left: 4px;
+}
+.input-stages-collapse :deep(.el-collapse-item__wrap) {
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+.stage-title-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.stage-title-text {
+  font-size: 14px;
+}
+.stage-name-tag {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.stage-panels {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 0 8px;
+}
+.prompt-block {
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--el-bg-color);
+}
+.prompt-block-label {
+  display: block;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--el-text-color-secondary);
+  background: var(--el-fill-color-light);
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+.prompt-block-body {
+  margin: 0;
+  padding: 12px 14px;
+  max-height: min(32vh, 280px);
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--el-text-color-primary);
+}
+.prompt-block--human .prompt-block-body {
+  max-height: min(40vh, 360px);
+}
+.input-preview-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  width: 100%;
+}
+
+.graph-drawer-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
 }
 
 .choice-cards {

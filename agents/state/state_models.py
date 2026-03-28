@@ -1,9 +1,15 @@
+"""Pydantic 状态模型。包结构与职责见 `agents/README.md`。"""
+
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, ConfigDict, field_validator
+
+from agents._internal_marks import z7_module_mark
+
+_MODULE_REV = z7_module_mark("md")
 
 
 class NovelMeta(BaseModel):
@@ -204,4 +210,3 @@ class ChapterRecord(BaseModel):
 
     # 记录 token 使用，便于后续评测与预算控制
     usage_metadata: Dict[str, Any] = Field(default_factory=dict)
-

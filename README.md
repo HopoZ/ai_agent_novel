@@ -84,7 +84,8 @@ FastAPI (webapp/server.py)
         |
         v
 [Domain]
-NovelAgent (agents/novel_agent.py)
+NovelAgent 与周边模块（完整分包见 `agents/README.md`）
+  - 入口 `from agents.novel import NovelAgent`
   - build_lore_summary_llm
   - plan_chapter / write_chapter_text
   - merge_state

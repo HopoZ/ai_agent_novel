@@ -1,11 +1,14 @@
+"""next_state 合并。包结构与职责见 `agents/README.md`。"""
+
 from __future__ import annotations
 
 import json
 from typing import Dict
 
 from agents._internal_marks import z7_module_mark
+from agents.persistence.storage import list_chapters
+
 from .state_models import CharacterState, ContinuityState, NovelState, WorldState
-from .storage import list_chapters
 
 _MODULE_REV = z7_module_mark("sm")
 
@@ -118,4 +121,3 @@ def merge_state(base: NovelState, patch: NovelState) -> NovelState:
         merged.recent_summaries = patch.recent_summaries
 
     return merged
-

@@ -64,7 +64,7 @@ class RunModeRequest(BaseModel):
     # 配角设定（前端“快速多选角色”）
     supporting_character_ids: Optional[List[str]] = None
     lore_tags: Optional[List[str]] = None
-    # 单次请求 LLM 采样参数（留空则使用服务端默认，见 agents/novel_agent._init_llm）
+    # 单次请求 LLM 采样参数（留空则使用服务端默认，见 agents/novel/llm_client.init_deepseek_chat）
     llm_temperature: Optional[float] = Field(
         default=None,
         ge=0.0,
