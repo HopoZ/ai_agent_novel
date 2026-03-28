@@ -64,4 +64,23 @@ class RunModeRequest(BaseModel):
     # 配角设定（前端“快速多选角色”）
     supporting_character_ids: Optional[List[str]] = None
     lore_tags: Optional[List[str]] = None
+    # 单次请求 LLM 采样参数（留空则使用服务端默认，见 agents/novel_agent._init_llm）
+    llm_temperature: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=2.0,
+        description="temperature；规划/写作/初始化等均生效",
+    )
+    llm_top_p: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="top_p（nucleus sampling）",
+    )
+    llm_max_tokens: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=200000,
+        description="max_tokens（单次生成上限，依供应商支持为准）",
+    )
 

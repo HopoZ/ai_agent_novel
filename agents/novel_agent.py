@@ -90,7 +90,7 @@ def _init_llm():
         base_url="https://api.deepseek.com/v1",
         temperature=0.7,
         output_version="v1",
-        max_tokens=12000,
+        max_tokens=20000,
     )
 
 
@@ -126,6 +126,29 @@ class NovelAgent:
         if self.model is None:
             self.model = _init_llm()
         return self.model
+
+    def _model_for_call(self, llm_options: Optional[Dict[str, Any]] = None):
+        """
+        按单次请求覆盖 sampling 参数（temperature / top_p / max_tokens）。
+        未传或全为空时使用全局默认模型配置。
+        """
+        base = self._get_model()
+        if not llm_options:
+            return base
+        kwargs: Dict[str, Any] = {}
+        for key in ("temperature", "top_p", "max_tokens"):
+            v = llm_options.get(key)
+            if v is not None:
+                kwargs[key] = v
+        if not kwargs:
+            return base
+        bind = getattr(base, "bind", None)
+        if callable(bind):
+            try:
+                return bind(**kwargs)
+            except Exception as e:
+                logger.warning("model.bind(%s) failed, using base model: %s", kwargs, e)
+        return base
 
     def _load_state_hydrated(self, novel_id: str) -> Optional[NovelState]:
         state = load_state(novel_id)
@@ -253,6 +276,7 @@ class NovelAgent:
         user_task: str,
         lore_tags: Optional[list[str]] = None,
         lore_summary_id: Optional[str] = None,
+        llm_options: Optional[Dict[str, Any]] = None,
     ) -> Tuple[NovelState, Dict[str, Any]]:
         state = self._load_state_hydrated(novel_id)
         if not state:
@@ -267,7 +291,13 @@ class NovelAgent:
             lorebook=lorebook,
         )
 
-        plan_json, usage = self._invoke_json(system, human, root_model=NovelState, return_usage=True)
+        plan_json, usage = self._invoke_json(
+            system,
+            human,
+            root_model=NovelState,
+            return_usage=True,
+            llm_options=llm_options,
+        )
         plan_json.meta.initialized = True
         # 防止“补初始化”场景把已有章节进度回退到 0
         plan_json.meta.current_chapter_index = max(
@@ -285,12 +315,14 @@ class NovelAgent:
         user_task: str,
         lore_tags: Optional[list[str]] = None,
         lore_summary_id: Optional[str] = None,
+        llm_options: Optional[Dict[str, Any]] = None,
     ) -> NovelState:
         state, _ = self._init_state_impl(
             novel_id=novel_id,
             user_task=user_task,
             lore_tags=lore_tags,
             lore_summary_id=lore_summary_id,
+            llm_options=llm_options,
         )
         return state
 
@@ -300,12 +332,14 @@ class NovelAgent:
         user_task: str,
         lore_tags: Optional[list[str]] = None,
         lore_summary_id: Optional[str] = None,
+        llm_options: Optional[Dict[str, Any]] = None,
     ) -> Tuple[NovelState, Dict[str, Any]]:
         return self._init_state_impl(
             novel_id=novel_id,
             user_task=user_task,
             lore_tags=lore_tags,
             lore_summary_id=lore_summary_id,
+            llm_options=llm_options,
         )
 
     def init_state_stream(
@@ -314,6 +348,7 @@ class NovelAgent:
         user_task: str,
         lore_tags: Optional[list[str]] = None,
         lore_summary_id: Optional[str] = None,
+        llm_options: Optional[Dict[str, Any]] = None,
     ) -> Iterator[Dict[str, Any]]:
         """
         流式生成 init_state。
@@ -335,7 +370,8 @@ class NovelAgent:
         messages = [SystemMessage(system), HumanMessage(human)]
         chunks: list[str] = []
         final_usage: Dict[str, Any] = {}
-        for chunk in self._get_model().stream(messages):
+        model = self._model_for_call(llm_options)
+        for chunk in model.stream(messages):
             text = parse_ai_chunk_text(chunk)
             usage = getattr(chunk, "usage_metadata", None) or {}
             if text:
@@ -368,6 +404,7 @@ class NovelAgent:
         include_chapter_context: bool = True,
         lore_tags: Optional[list[str]] = None,
         lore_summary_id: Optional[str] = None,
+        llm_options: Optional[Dict[str, Any]] = None,
     ) -> ChapterPlan:
         state = self._load_state_hydrated(novel_id)
         if not state:
@@ -413,7 +450,7 @@ class NovelAgent:
             strict_no_supporting=strict_no_supporting,
         )
 
-        return self._invoke_json(system, human, root_model=ChapterPlan)
+        return self._invoke_json(system, human, root_model=ChapterPlan, llm_options=llm_options)
 
     def plan_chapter_stream(
         self,
@@ -426,6 +463,7 @@ class NovelAgent:
         include_chapter_context: bool = True,
         lore_tags: Optional[list[str]] = None,
         lore_summary_id: Optional[str] = None,
+        llm_options: Optional[Dict[str, Any]] = None,
     ) -> Iterator[Dict[str, Any]]:
         """
         流式生成章节规划（原始 JSON 文本）。
@@ -477,7 +515,8 @@ class NovelAgent:
         messages = [SystemMessage(system), HumanMessage(human)]
         chunks: list[str] = []
         final_usage: Dict[str, Any] = {}
-        for chunk in self._get_model().stream(messages):
+        model = self._model_for_call(llm_options)
+        for chunk in model.stream(messages):
             text = parse_ai_chunk_text(chunk)
             usage = getattr(chunk, "usage_metadata", None) or {}
             if text:
@@ -491,7 +530,7 @@ class NovelAgent:
 
         def llm_fix_invoke(fix_prompt: str) -> str:
             fix_messages = [SystemMessage(system), HumanMessage(fix_prompt)]
-            resp = self._get_model().invoke(fix_messages)
+            resp = model.invoke(fix_messages)
             return parse_ai_text(resp)
 
         data = _json_load_with_retry(
@@ -522,6 +561,7 @@ class NovelAgent:
         time_slot_hint: Optional[str] = None,
         pov_character_ids_override: Optional[list[str]] = None,
         supporting_character_ids: Optional[list[str]] = None,
+        llm_options: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, Dict[str, Any]]:
         state = self._load_state_hydrated(novel_id)
         if not state:
@@ -560,7 +600,8 @@ class NovelAgent:
 
         messages = [SystemMessage(system), HumanMessage(human)]
         logger.info("Writing chapter %s ...", plan.chapter_index)
-        resp = self._get_model().invoke(messages)
+        model = self._model_for_call(llm_options)
+        resp = model.invoke(messages)
         text = parse_ai_text(resp)
         usage = getattr(resp, "usage_metadata", None) or {}
         return text.strip(), usage
@@ -576,6 +617,7 @@ class NovelAgent:
         time_slot_hint: Optional[str] = None,
         pov_character_ids_override: Optional[list[str]] = None,
         supporting_character_ids: Optional[list[str]] = None,
+        llm_options: Optional[Dict[str, Any]] = None,
     ) -> Iterator[Dict[str, Any]]:
         """
         流式生成章节正文。
@@ -620,7 +662,8 @@ class NovelAgent:
 
         messages = [SystemMessage(system), HumanMessage(human)]
         logger.info("Streaming write chapter %s ...", plan.chapter_index)
-        for chunk in self._get_model().stream(messages):
+        model = self._model_for_call(llm_options)
+        for chunk in model.stream(messages):
             text = parse_ai_chunk_text(chunk)
             usage = getattr(chunk, "usage_metadata", None) or {}
             if text or usage:
@@ -632,6 +675,7 @@ class NovelAgent:
         user_task: str,
         chapter_index: int,
         latest_content: str,
+        llm_options: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         独立生成“下章建议”，不参与当前章节 plan/write。
@@ -655,7 +699,8 @@ class NovelAgent:
             state_context=state_context,
             latest_content=content,
         )
-        resp = self._get_model().invoke([SystemMessage(system), HumanMessage(human)])
+        model = self._model_for_call(llm_options)
+        resp = model.invoke([SystemMessage(system), HumanMessage(human)])
         return parse_ai_text(resp).strip()
 
     def run(
@@ -671,17 +716,19 @@ class NovelAgent:
         supporting_character_ids: Optional[list[str]] = None,
         lore_tags: Optional[list[str]] = None,
         lore_summary_id: Optional[str] = None,
+        llm_options: Optional[Dict[str, Any]] = None,
     ) -> RunResult:
         state = self._load_state_hydrated(novel_id)
         if not state:
             raise ValueError(f"novel_id not found: {novel_id}")
 
         if mode == "init_state":
-            new_state = self.init_state(
+            self.init_state(
                 novel_id,
                 user_task=user_task,
                 lore_tags=lore_tags,
                 lore_summary_id=lore_summary_id,
+                llm_options=llm_options,
             )
             return RunResult(novel_id=novel_id, mode=mode, chapter_index=None, state_updated=True, content=None)
 
@@ -702,6 +749,7 @@ class NovelAgent:
                 include_chapter_context=(not manual_time_slot),
                 lore_tags=lore_tags,
                 lore_summary_id=lore_summary_id,
+                llm_options=llm_options,
             )
             # 允许 plan.next_state 是“补丁”，这里合并成完整状态再落盘
             try:
@@ -747,6 +795,7 @@ class NovelAgent:
                 time_slot_hint=time_slot_override,
                 pov_character_ids_override=pov_character_ids_override,
                 supporting_character_ids=supporting_character_ids,
+                llm_options=llm_options,
             )
 
             if mode == "revise_chapter":
@@ -787,6 +836,7 @@ class NovelAgent:
                     user_task=user_task,
                     chapter_index=chapter_index,
                     latest_content=content_text,
+                    llm_options=llm_options,
                 )
             except Exception as e:
                 logger.warning("Failed to generate next_status: %s", e)
@@ -903,19 +953,27 @@ class NovelAgent:
 
         return out
 
-    def _invoke_json(self, system: str, human: str, root_model, return_usage: bool = False):
+    def _invoke_json(
+        self,
+        system: str,
+        human: str,
+        root_model,
+        return_usage: bool = False,
+        llm_options: Optional[Dict[str, Any]] = None,
+    ):
         """
         调用模型并解析为 Pydantic 模型（带一次“修复 JSON”的重试）。
         """
         messages = [SystemMessage(system), HumanMessage(human)]
+        model = self._model_for_call(llm_options)
 
         def llm_fix_invoke(fix_prompt: str) -> str:
             fix_messages = [SystemMessage(system), HumanMessage(fix_prompt)]
-            resp = self._get_model().invoke(fix_messages)
+            resp = model.invoke(fix_messages)
             return parse_ai_text(resp)
 
         logger.info("Invoking JSON model ...")
-        resp = self._get_model().invoke(messages)
+        resp = model.invoke(messages)
         raw_text = parse_ai_text(resp)
         usage = getattr(resp, "usage_metadata", None) or {}
 

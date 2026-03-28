@@ -141,6 +141,18 @@ def _infer_time_slot(novel_id: str, req: RunModeRequest) -> Optional[str]:
     return legacy_slot
 
 
+def _llm_call_options(req: RunModeRequest) -> Optional[Dict[str, Any]]:
+    """将前端可选 LLM 参数转为 agent 使用的 bind 字典；全空则走服务端默认。"""
+    opts: Dict[str, Any] = {}
+    if req.llm_temperature is not None:
+        opts["temperature"] = float(req.llm_temperature)
+    if req.llm_top_p is not None:
+        opts["top_p"] = float(req.llm_top_p)
+    if req.llm_max_tokens is not None:
+        opts["max_tokens"] = int(req.llm_max_tokens)
+    return opts or None
+
+
 def _timeline_idx(node_id: Optional[str]) -> Optional[int]:
     raw = str(node_id or "").strip()
     if not raw.startswith("ev:timeline:"):
@@ -478,6 +490,7 @@ def run_mode(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
             pov_character_ids_override=pov_ids,
             supporting_character_ids=(req.supporting_character_ids or []),
             lore_tags=req.lore_tags,
+            llm_options=_llm_call_options(req),
         )
     except Exception as e:
         logger.exception("run_mode failed novel_id=%s mode=%s", novel_id, req.mode)
@@ -571,6 +584,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
         if (not pov_ids) and req.pov_character_id_override:
             pov_ids = [req.pov_character_id_override]
         llm_user_task = _build_llm_user_task(novel_id, req.user_task, req, inferred_time_slot, pov_ids)
+        llm_opts = _llm_call_options(req)
 
         try:
             # 这里对 write_chapter 做“正文流式”，其它模式走一次性结果但也会发阶段事件。
@@ -612,6 +626,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     supporting_character_ids=(req.supporting_character_ids or []),
                     include_chapter_context=(not manual_time_slot),
                     lore_tags=req.lore_tags,
+                    llm_options=llm_opts,
                 ):
                     if await _disconnected():
                         logger.info("run_stream disconnected during plan stream. novel_id=%s chapter=%s", novel_id, chapter_index)
@@ -643,6 +658,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     time_slot_hint=inferred_time_slot,
                     pov_character_ids_override=pov_ids,
                     supporting_character_ids=(req.supporting_character_ids or []),
+                    llm_options=llm_opts,
                 ):
                     if await _disconnected():
                         logger.info("run_stream disconnected during write stream. novel_id=%s chapter=%s", novel_id, chapter_index)
@@ -704,6 +720,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                         user_task=llm_user_task,
                         chapter_index=chapter_index,
                         latest_content=content_text,
+                        llm_options=llm_opts,
                     )
                     yield _sse_pack("phase", {"name": "next_status_done", "has_text": bool((next_status or "").strip())})
                 except Exception as e:
@@ -751,6 +768,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     pov_character_ids_override=pov_ids,
                     supporting_character_ids=(req.supporting_character_ids or []),
                     lore_tags=req.lore_tags,
+                    llm_options=llm_opts,
                 )
                 if req.mode in {"plan_only", "write_chapter", "revise_chapter"} and result.chapter_index is not None:
                     has_event_selection = bool(

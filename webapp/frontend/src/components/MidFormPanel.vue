@@ -167,6 +167,54 @@
           <el-form-item label="章节预设名（可选）">
             <el-input v-model="form.chapterPresetName" placeholder="例如：重逢夜 / 石碑共鸣 / 古墟初探"></el-input>
           </el-form-item>
+          <el-divider content-position="left">模型采样</el-divider>
+          <div class="muted" style="margin-bottom:8px;">
+            下面三项控制<strong>大模型怎么选词、单轮最多写多长</strong>，不改动你的小说数据/图谱逻辑。
+            与 <code>_init_llm</code> 一致：<strong>temperature={{ defaultLlmTemperature }}</strong>、<strong>max_tokens={{ defaultLlmMaxTokens }}</strong>；<code>top_p</code> 未在服务端写死，留空则请求里不传（由接口默认）。
+            同一次运行里：<strong>init / 规划 / 正文 / 修订 / 下章建议</strong>共用当前这组值。
+          </div>
+          <el-form-item :label="`temperature（默认 ${defaultLlmTemperature}）`">
+            <el-input-number
+              v-model="form.llmTemperature"
+              :min="0"
+              :max="2"
+              :step="0.1"
+              :precision="2"
+              controls-position="right"
+              style="width:100%;"
+            />
+            <div class="muted" style="margin-top:6px;">
+              <strong>随机性</strong>：越高越敢发散、文风变化大；越低越稳、重复感强。规划 JSON 宜偏低或中等，正文可按喜好略调高。
+            </div>
+          </el-form-item>
+          <el-form-item label="top_p（可选）">
+            <el-input-number
+              v-model="form.llmTopP"
+              :min="0"
+              :max="1"
+              :step="0.05"
+              :precision="2"
+              controls-position="right"
+              style="width:100%;"
+              clearable
+            />
+            <div class="muted" style="margin-top:6px;">
+              <strong>核采样</strong>：只在概率较高的一截候选里抽样；越低越保守整齐，越高候选面越宽。与 temperature 二选一微调即可，不必两个都极端。
+            </div>
+          </el-form-item>
+          <el-form-item :label="`max_tokens（默认 ${defaultLlmMaxTokens}）`">
+            <el-input-number
+              v-model="form.llmMaxTokens"
+              :min="1"
+              :max="200000"
+              :step="256"
+              controls-position="right"
+              style="width:100%;"
+            />
+            <div class="muted" style="margin-top:6px;">
+              <strong>本轮回复长度上限</strong>（token，约等于字数折算）。太小容易规划/正文被截断；太大更耗 token、更慢，且受供应商上限限制。
+            </div>
+          </el-form-item>
         </el-collapse-item>
 
         <el-collapse-item name="task" title="本章任务">
@@ -198,6 +246,8 @@
 <script lang="ts" setup>
 defineProps<{
   form: any;
+  defaultLlmTemperature: number;
+  defaultLlmMaxTokens: number;
   midActiveSections: string[];
   novelsLoading: boolean;
   novels: Array<{ novel_id: string; novel_title: string }>;

@@ -1,4 +1,4 @@
-## AI Novel Agent（README1）
+## AI Novel Agent
 
 一个面向长篇网文/系列叙事的工程化写作系统。  
 系统以 `settings/*.md` 作为设定单一真实来源（SSOT），围绕 `plan -> write -> state update -> persist` 建立可持续迭代的创作闭环，并提供可观测、可回放、可维护的 Web 写作工作流。

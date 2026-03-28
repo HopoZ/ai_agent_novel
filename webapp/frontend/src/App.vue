@@ -26,6 +26,8 @@
       <div class="mid-pane" :style="{ width: `${midPanelWidth}px` }">
         <MidFormPanel
           :form="form"
+          :default-llm-temperature="DEFAULT_LLM_TEMPERATURE"
+          :default-llm-max-tokens="DEFAULT_LLM_MAX_TOKENS"
           :mid-active-sections="midActiveSections"
           :on-mid-sections-change="onMidSectionsChange"
           :novels-loading="novelsLoading"
@@ -720,6 +722,10 @@ function openCreateDialog() {
   createDialogVisible.value = true;
 }
 
+/** 与 agents/novel_agent._init_llm 保持一致（勿与后端漂移） */
+const DEFAULT_LLM_TEMPERATURE = 0.7;
+const DEFAULT_LLM_MAX_TOKENS = 20000;
+
 const form = reactive<{
   novelId: string;
   mode: Mode;
@@ -733,6 +739,9 @@ const form = reactive<{
   focusCharacterIds: string[];
   chapterPresetName: string;
   userTask: string;
+  llmTemperature: number | null;
+  llmTopP: number | null;
+  llmMaxTokens: number | null;
 }>({
   novelId: "",
   mode: "write_chapter",
@@ -746,6 +755,9 @@ const form = reactive<{
   focusCharacterIds: [],
   chapterPresetName: "",
   userTask: "",
+  llmTemperature: DEFAULT_LLM_TEMPERATURE,
+  llmTopP: null,
+  llmMaxTokens: DEFAULT_LLM_MAX_TOKENS,
 });
 
 const inferredTimeSlotHint = computed(() => {
@@ -1218,7 +1230,7 @@ function buildRunPayload() {
     if (picked.length === 0) return base;
     return `${base}\n\n（配角设定：${picked.join("、")}）`;
   })();
-  const payload = {
+  const payload: Record<string, unknown> = {
     mode: form.mode,
     user_task: mergedTask,
     existing_event_id: form.eventMode === "existing" ? (form.existingEventId || null) : null,
@@ -1232,6 +1244,18 @@ function buildRunPayload() {
     chapter_preset_name: form.chapterPresetName || null,
     lore_tags: loreTags,
   };
+  payload.llm_temperature =
+    form.llmTemperature != null && !Number.isNaN(form.llmTemperature)
+      ? form.llmTemperature
+      : DEFAULT_LLM_TEMPERATURE;
+  payload.llm_max_tokens = Math.round(
+    form.llmMaxTokens != null && !Number.isNaN(form.llmMaxTokens)
+      ? form.llmMaxTokens
+      : DEFAULT_LLM_MAX_TOKENS
+  );
+  if (form.llmTopP != null && !Number.isNaN(form.llmTopP)) {
+    payload.llm_top_p = form.llmTopP;
+  }
   return { novelId, payload };
 }
 
