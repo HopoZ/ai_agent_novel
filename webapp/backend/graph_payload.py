@@ -4,19 +4,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Set
 
-from agents.persistence.graph_tables import ensure_graph_tables, load_character_relations, load_event_relations
-from agents.persistence.storage import list_chapters
+from agents.persistence.graph_tables import (
+    ensure_graph_tables,
+    load_character_relations,
+    load_event_relations,
+    resolve_chapter_timeline_event_id,
+)
+from agents.persistence.storage import list_chapters_latest_per_index
 from agents.state.state_models import NovelState
-
-
-def _timeline_event_id_for_chapter(state: NovelState, chap) -> Optional[str]:
-    ts = str(chap.time_slot or "").strip()
-    if not ts:
-        return None
-    for ev in state.world.timeline or []:
-        if str(ev.time_slot or "").strip() == ts and (ev.event_id or "").strip():
-            return str(ev.event_id).strip()
-    return None
 
 
 def build_novel_graph_payload(novel_id: str, state: NovelState, view: str) -> Dict[str, Any]:
@@ -94,12 +89,12 @@ def build_novel_graph_payload(novel_id: str, state: NovelState, view: str) -> Di
                 if tgt and tgt.startswith("ev:chapter:"):
                     add_edge(src, tgt, label, "appear")
 
-        for chap in list_chapters(novel_id):
+        for chap in list_chapters_latest_per_index(novel_id):
             cid = f"ev:chapter:{chap.chapter_index}"
             label = f"章节事件 · {chap.time_slot}"
             add_node(cid, label, "chapter_event", {"data": chap.model_dump(mode="json")})
 
-            teid = _timeline_event_id_for_chapter(state, chap)
+            teid = resolve_chapter_timeline_event_id(state, chap)
             if teid:
                 add_edge(cid, teid, "属于事件", "chapter_belongs")
 

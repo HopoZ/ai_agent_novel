@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Dict, List
 
 class LoreLoader:
-    def __init__(self, data_path="settings"):
+    def __init__(self, data_path="lores"):
         # Web 启动时工作目录可能变化；把相对路径固定到仓库根目录
         # agents/lore/loader.py -> 仓库根为向上两级
         repo_root = Path(__file__).resolve().parents[2]
@@ -20,7 +20,7 @@ class LoreLoader:
 
     def _scan_markdown_files(self) -> list[Path]:
         """
-        递归扫描 settings/**/*.md（忽略 README.md），返回相对路径排序列表。
+        递归扫描 lores/**/*.md（忽略 README.md），返回相对路径排序列表。
         """
         if not self.data_path.exists():
             return []
@@ -35,7 +35,7 @@ class LoreLoader:
     def _path_to_tag(self, file_path: Path) -> str:
         """
         将 markdown 文件路径映射为 tag（目录结构可见）：
-        settings/world/faction.md -> world/faction
+        lores/world/faction.md -> world/faction
         """
         rel = file_path.relative_to(self.data_path)
         return rel.with_suffix("").as_posix()
@@ -66,7 +66,7 @@ class LoreLoader:
 
     def get_lore_tags(self):
         """
-        返回 settings/**/*.md 的标签（保留目录层级）。
+        返回 lores/**/*.md 的标签（保留目录层级）。
         例如：世界观/势力/联盟
         """
         return [self._path_to_tag(p) for p in self._scan_markdown_files()]

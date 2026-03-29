@@ -4,7 +4,7 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 from uuid import UUID
 
 from agents.state.state_models import ChapterRecord, ContinuityState, NovelMeta, NovelState, WorldState
@@ -128,6 +128,7 @@ def save_state(novel_id: str, state: NovelState) -> None:
 
 def load_chapter(novel_id: str, chapter_index: int) -> Optional[ChapterRecord]:
     def _scan_dir() -> Optional[ChapterRecord]:
+        hits: List[ChapterRecord] = []
         for fp in get_chapters_dir(novel_id).glob("*.json"):
             try:
                 data = json.loads(fp.read_text(encoding="utf-8"))
@@ -137,8 +138,10 @@ def load_chapter(novel_id: str, chapter_index: int) -> Optional[ChapterRecord]:
             except Exception:
                 continue
             if rec.chapter_index == chapter_index:
-                return rec
-        return None
+                hits.append(rec)
+        if not hits:
+            return None
+        return max(hits, key=lambda c: c.created_at)
 
     p = get_chapter_path(novel_id, chapter_index)
     if p.exists():
@@ -168,6 +171,16 @@ def list_chapters(novel_id: str) -> List[ChapterRecord]:
     # 先按 chapter_index，再按 created_at 排序
     out.sort(key=lambda c: (c.chapter_index, c.created_at))
     return out
+
+
+def list_chapters_latest_per_index(novel_id: str) -> List[ChapterRecord]:
+    """同一 chapter_index 多文件时只保留 created_at 最新的一条（与 load_chapter 一致）。"""
+    by_idx: Dict[int, ChapterRecord] = {}
+    for c in list_chapters(novel_id):
+        prev = by_idx.get(c.chapter_index)
+        if prev is None or c.created_at > prev.created_at:
+            by_idx[c.chapter_index] = c
+    return sorted(by_idx.values(), key=lambda c: c.chapter_index)
 
 
 def save_chapter(novel_id: str, chapter: ChapterRecord, chapter_preset_name: Optional[str] = None) -> Path:

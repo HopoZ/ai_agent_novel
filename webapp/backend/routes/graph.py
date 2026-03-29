@@ -7,14 +7,22 @@ from agents.persistence.graph_tables import (
     load_character_relations,
     load_event_relations,
     new_timeline_event_id,
+    replace_chapter_belongs_for_chapter,
     replace_timeline_next_edges_from_state,
     save_character_entities,
     save_character_relations,
     save_event_relations,
     sync_timeline_event_entity_rows,
     timeline_index_for_node_id,
+    validate_timeline_event_id,
 )
-from agents.persistence.storage import load_state, save_state
+from agents.persistence.storage import (
+    list_chapters_latest_per_index,
+    load_chapter,
+    load_state,
+    save_chapter,
+    save_state,
+)
 from agents.state.state_models import CharacterState, TimelineEvent
 from webapp.backend.deps import logger
 from webapp.backend.graph_payload import build_novel_graph_payload
@@ -115,6 +123,29 @@ def patch_graph_node(novel_id: str, req: GraphNodePatchRequest):
         ensure_graph_tables(novel_id)
         sync_timeline_event_entity_rows(novel_id, state)
         replace_timeline_next_edges_from_state(novel_id, state)
+        return {"ok": True, "node_id": node_id}
+
+    if node_id.startswith("ev:chapter:"):
+        try:
+            cidx = int(node_id.split("ev:chapter:", 1)[1].strip())
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid chapter node id") from None
+        chap = load_chapter(novel_id, cidx)
+        if not chap:
+            raise HTTPException(status_code=404, detail="chapter not found")
+        if "timeline_event_id" not in patch:
+            raise HTTPException(status_code=400, detail="chapter node patch supports timeline_event_id only")
+        raw = patch.get("timeline_event_id")
+        if raw is None or raw == "":
+            chap.timeline_event_id = None
+        else:
+            eid = str(raw).strip()
+            if not validate_timeline_event_id(state, eid):
+                raise HTTPException(status_code=400, detail="timeline_event_id not in state.world.timeline")
+            chap.timeline_event_id = eid
+        ensure_graph_tables(novel_id)
+        save_chapter(novel_id, chap, chapter_preset_name=chap.chapter_preset_name)
+        replace_chapter_belongs_for_chapter(novel_id, state, chap)
         return {"ok": True, "node_id": node_id}
 
     raise HTTPException(status_code=400, detail="unsupported node_id")
@@ -284,6 +315,11 @@ def delete_graph_node(novel_id: str, node_id: str = Query(..., description="char
         save_state(novel_id, state)
         sync_timeline_event_entity_rows(novel_id, state)
         replace_timeline_next_edges_from_state(novel_id, state)
+        for chap in list_chapters_latest_per_index(novel_id):
+            if (chap.timeline_event_id or "").strip() == tid:
+                chap.timeline_event_id = None
+                save_chapter(novel_id, chap, chapter_preset_name=chap.chapter_preset_name)
+                replace_chapter_belongs_for_chapter(novel_id, state, chap)
         return {"ok": True, "node_id": nid}
 
     raise HTTPException(status_code=400, detail="unsupported node_id")
@@ -432,9 +468,32 @@ def patch_graph_edge(novel_id: str, req: GraphEdgePatchRequest):
         return {"ok": True}
 
     if et == "chapter_belongs":
-        raise HTTPException(
-            status_code=400,
-            detail="chapter_belongs 已废弃：章节与时间线仅通过 time_slot 对齐，请改时间线或章节 time_slot",
-        )
+        if not nsrc.startswith("ev:chapter:"):
+            raise HTTPException(status_code=400, detail="chapter_belongs source must be ev:chapter:{n}")
+        try:
+            cidx = int(nsrc.split("ev:chapter:", 1)[1].strip())
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid chapter index") from None
+        chap = load_chapter(novel_id, cidx)
+        if not chap:
+            raise HTTPException(status_code=404, detail="chapter not found")
+        if op == "delete":
+            chap.timeline_event_id = None
+            save_chapter(novel_id, chap, chapter_preset_name=chap.chapter_preset_name)
+            replace_chapter_belongs_for_chapter(novel_id, state, chap)
+            return {"ok": True}
+        if not ntgt:
+            chap.timeline_event_id = None
+            save_chapter(novel_id, chap, chapter_preset_name=chap.chapter_preset_name)
+            replace_chapter_belongs_for_chapter(novel_id, state, chap)
+            return {"ok": True}
+        if not ntgt.startswith("ev:timeline:"):
+            raise HTTPException(status_code=400, detail="chapter_belongs target must be ev:timeline:* or empty")
+        if not validate_timeline_event_id(state, ntgt):
+            raise HTTPException(status_code=400, detail="target timeline event not found")
+        chap.timeline_event_id = ntgt
+        save_chapter(novel_id, chap, chapter_preset_name=chap.chapter_preset_name)
+        replace_chapter_belongs_for_chapter(novel_id, state, chap)
+        return {"ok": True}
 
     raise HTTPException(status_code=400, detail="unsupported edge_type")

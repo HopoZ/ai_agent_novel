@@ -152,6 +152,17 @@ def build_llm_user_task(
     - 重点涉及角色
     """
     base = str(raw_user_task or "").strip()
+    mode = str(req.mode or "").strip()
+    if mode == "expand_chapter":
+        base = (
+            "[扩写模式] 下方用户任务中的正文是「待扩写种子」（短文/梗概/片段）。"
+            "规划须围绕该种子设计 beats；正文阶段须扩写为约 4000～5000 字的连贯章节。\n\n"
+        ) + base
+    elif mode == "optimize_suggestions":
+        base = (
+            "[优化建议模式] 请只输出修改与优化建议（分条、可执行），设计爽点or深刻点or转折点，不要输出完整章节正文。\n\n"
+        ) + base
+
     lines: List[str] = []
 
     st = load_state(novel_id)
@@ -164,47 +175,48 @@ def build_llm_user_task(
         ev = timeline[idx]
         return f"{event_id}（{ev.time_slot}｜{ev.summary}）"
 
-    existing_id = str(req.existing_event_id or "").strip()
-    if existing_id.startswith("ev:timeline:") and st:
-        idx = timeline_index_for_node_id(st, existing_id)
-        if idx is not None and 0 <= idx < len(timeline):
-            ev = timeline[idx]
-            lines.append(f"章节归属时间线：{existing_id}（{ev.time_slot}｜{ev.summary}）")
-            preds, succs = timeline_next_graph_neighbors(novel_id, existing_id)
-            if preds or succs:
-                for pid in preds:
-                    pi = timeline_index_for_node_id(st, pid)
-                    if pi is not None and 0 <= pi < len(timeline):
-                        pev = timeline[pi]
-                        lines.append(
-                            f"关系图前置事件（timeline_next）：{pid}（{pev.time_slot}｜{pev.summary}）"
-                        )
-                for sid in succs:
-                    si = timeline_index_for_node_id(st, sid)
-                    if si is not None and 0 <= si < len(timeline):
-                        sev = timeline[si]
-                        lines.append(
-                            f"关系图后置事件（timeline_next）：{sid}（{sev.time_slot}｜{sev.summary}）"
-                        )
+    if mode != "optimize_suggestions":
+        existing_id = str(req.existing_event_id or "").strip()
+        if existing_id.startswith("ev:timeline:") and st:
+            idx = timeline_index_for_node_id(st, existing_id)
+            if idx is not None and 0 <= idx < len(timeline):
+                ev = timeline[idx]
+                lines.append(f"章节归属时间线：{existing_id}（{ev.time_slot}｜{ev.summary}）")
+                preds, succs = timeline_next_graph_neighbors(novel_id, existing_id)
+                if preds or succs:
+                    for pid in preds:
+                        pi = timeline_index_for_node_id(st, pid)
+                        if pi is not None and 0 <= pi < len(timeline):
+                            pev = timeline[pi]
+                            lines.append(
+                                f"关系图前置事件（timeline_next）：{pid}（{pev.time_slot}｜{pev.summary}）"
+                            )
+                    for sid in succs:
+                        si = timeline_index_for_node_id(st, sid)
+                        if si is not None and 0 <= si < len(timeline):
+                            sev = timeline[si]
+                            lines.append(
+                                f"关系图后置事件（timeline_next）：{sid}（{sev.time_slot}｜{sev.summary}）"
+                            )
+            else:
+                lines.append(f"章节归属时间线：{existing_id}")
+        elif (req.new_event_time_slot or "").strip() and (req.new_event_summary or "").strip():
+            lines.append(
+                "章节归属时间线（新建事件）："
+                f"time_slot={str(req.new_event_time_slot).strip()}，"
+                f"summary={str(req.new_event_summary).strip()}"
+            )
+            prev_id = str(req.new_event_prev_id or "").strip()
+            next_id = str(req.new_event_next_id or "").strip()
+            if prev_id:
+                lines.append(f"新事件前置事件（可选）：{_event_desc(prev_id)}")
+            if next_id:
+                lines.append(f"新事件后置事件（可选）：{_event_desc(next_id)}")
         else:
-            lines.append(f"章节归属时间线：{existing_id}")
-    elif (req.new_event_time_slot or "").strip() and (req.new_event_summary or "").strip():
-        lines.append(
-            "章节归属时间线（新建事件）："
-            f"time_slot={str(req.new_event_time_slot).strip()}，"
-            f"summary={str(req.new_event_summary).strip()}"
-        )
-        prev_id = str(req.new_event_prev_id or "").strip()
-        next_id = str(req.new_event_next_id or "").strip()
-        if prev_id:
-            lines.append(f"新事件前置事件（可选）：{_event_desc(prev_id)}")
-        if next_id:
-            lines.append(f"新事件后置事件（可选）：{_event_desc(next_id)}")
-    else:
-        lines.append("章节归属时间线：未显式指定（按系统推导/默认流程）")
+            lines.append("章节归属时间线：未显式指定（按系统推导/默认流程）")
 
-    if inferred_time_slot:
-        lines.append(f"本章时间段（系统推导）：{inferred_time_slot}")
+        if inferred_time_slot:
+            lines.append(f"本章时间段（系统推导）：{inferred_time_slot}")
 
     if pov_ids:
         lines.append(f"主视角候选：{', '.join([x for x in pov_ids if x])}")

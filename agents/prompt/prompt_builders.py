@@ -56,7 +56,7 @@ def build_plan_chapter_prompt(
         "你要输出一个 ChapterPlan：\n"
         "- chapter_index 必须等于目标\n"
         "- time_slot 必须是本章写作的时间段（使用覆盖值或从世界线推断）\n"
-        "- pov_character_id：若提供了 pov_character_ids_override，则从该列表中选择最合适的一个作为主 POV；否则自行选择最稳定 POV\n"
+        "- pov_character_id：若提供了 pov_character_ids_override，则该列表中人物作为主 POV；否则自行选择最稳定 POV\n"
         "- who_is_present：列出在本章关键行动中出现的主要角色；若提供 supporting_character_ids，请优先纳入为配角出场候选\n"
         "- beats：提供 6~12 条剧情 beats（每条有 beat_title/summary，可选 time_slot）\n"
         "- next_state：给出“本章结束后的状态补丁（patch）”，不要重复整份 NovelState，避免输出过长被截断：\n"
@@ -81,12 +81,21 @@ def build_write_chapter_prompt(
     lorebook: str,
     plan: Optional[ChapterPlan] = None,
     strict_no_supporting: bool = False,
+    write_mode: str = "generate",
 ) -> tuple[str, str]:
-    system = (
-        "你是一个网文作家。请根据当前 NovelState 与 ChapterPlan 生成章节正文，不要有markdown格式。"
-        "要求：必须严格遵守设定与连续性；不要提及自己是 AI；不要输出任何多余说明。"
-        "正文直接开始叙述，4000-5000字范围。"
-    )
+    if write_mode == "expand":
+        system = (
+            "你是一个网文作家。用户在「用户本章提示」中给出了待扩写的短文、梗概或片段。"
+            "请结合 NovelState、ChapterPlan 与 lorebook，将其扩写为约 4000～5000 字的连贯章节正文，"
+            "不要有 markdown 格式；不要提及自己是 AI；不要输出任何多余说明。"
+            "必须保留用户种子的核心情节与人设关系，补足场景、对话、动作与节奏，禁止只稍作润色就结束。"
+        )
+    else:
+        system = (
+            "你是一个网文作家。请根据当前 NovelState 与 ChapterPlan 生成章节正文，不要有markdown格式。"
+            "要求：必须严格遵守设定与连续性；不要提及自己是 AI；不要输出任何多余说明。"
+            "正文直接开始叙述，4000-5000字范围。"
+        )
     plan_text = (
         plan.model_dump_json(ensure_ascii=False, indent=2)
         if plan is not None
@@ -104,8 +113,34 @@ def build_write_chapter_prompt(
         "请输出纯文本章节正文（不要输出 JSON、不要输出标题前的解释）。\n"
         "写作时必须严格遵循 ChapterPlan.time_slot（本章时间段），不要擅自改写本章归属事件。"
     )
+    if write_mode == "expand":
+        human += (
+            "\n\n【扩写硬性要求】以用户本章提示中的片段为叙事骨架展开；"
+            "成文长度应达到约 4000～5000 字量级的网文章节体量。"
+        )
     if strict_no_supporting:
         human += "\n补充约束：未指定 supporting_character_ids，本章不要主动扩展知名配角出场。"
+    return system, human
+
+
+def build_optimize_suggestions_prompt(
+    user_task: str,
+    state_context: str,
+    lorebook: str,
+) -> tuple[str, str]:
+    system = (
+        "你是资深网文编辑与策划。根据世界观与当前小说状态，针对用户提供的素材或问题给出可执行的优化建议。"
+        "不要输出完整重写版正文；以分条建议为主（可含极短示例句）。不要大段 markdown 标题。"
+    )
+    human = (
+        f"用户素材/问题：\n{user_task}\n\n"
+        f"当前小说状态（压缩）：\n{state_context}\n\n"
+        f"lorebook（静态设定）：\n{lorebook}\n\n"
+        "请输出优化建议，要求：\n"
+        "- 5～10 条，每条独立成段或一行\n"
+        "- 可涉及：情节张力、人设一致、节奏、伏笔、设定贴合、文笔与对话等\n"
+        "- 具体可执行，避免空泛套话\n"
+    )
     return system, human
 
 

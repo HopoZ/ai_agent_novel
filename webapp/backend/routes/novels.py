@@ -9,8 +9,10 @@ from fastapi.responses import StreamingResponse
 from agents.novel import NovelAgent
 from agents.persistence.graph_tables import (
     ensure_graph_tables,
+    load_character_entities,
     persist_chapter_artifacts,
     replace_timeline_next_edges_from_state,
+    validate_timeline_event_id,
 )
 from agents.persistence.storage import load_chapter, load_state, save_state, list_chapters
 from agents.state.state_models import ChapterPlan, ChapterRecord
@@ -31,7 +33,7 @@ router = APIRouter(tags=["novels"])
 
 
 def _sync_after_run_if_event(novel_id: str, req: RunModeRequest, chapter_index: Optional[int]) -> None:
-    if req.mode not in {"plan_only", "write_chapter", "revise_chapter"} or chapter_index is None:
+    if req.mode not in {"plan_only", "write_chapter", "revise_chapter", "expand_chapter"} or chapter_index is None:
         return
     has_event_selection = bool(
         (req.existing_event_id or "").strip()
@@ -110,6 +112,21 @@ def get_state(novel_id: str):
     return state.model_dump(mode="json")
 
 
+@router.get("/{novel_id}/character_entities")
+def get_character_entities(novel_id: str):
+    """人物实体表 `character_entities.json`：供前端主视角/配角等多选候选项。"""
+    if not load_state(novel_id):
+        raise HTTPException(status_code=404, detail="novel not found")
+    ensure_graph_tables(novel_id)
+    rows = load_character_entities(novel_id)
+    ids = [
+        str(r.get("character_id") or "").strip()
+        for r in rows
+        if str(r.get("character_id") or "").strip()
+    ]
+    return {"novel_id": novel_id, "characters": rows, "character_ids": ids}
+
+
 @router.get("/{novel_id}/chapters/{chapter_index}")
 def get_chapter(novel_id: str, chapter_index: int):
     chapter = load_chapter(novel_id, chapter_index)
@@ -162,7 +179,7 @@ def run_mode(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
     llm_user_task = build_llm_user_task(novel_id, req.user_task, req, inferred, pov_ids)
     st0 = load_state(novel_id)
     pre_chapter_index = req.chapter_index or ((st0.meta.current_chapter_index + 1) if st0 else 1)
-    if req.mode in {"plan_only", "write_chapter", "revise_chapter"}:
+    if req.mode in {"plan_only", "write_chapter", "revise_chapter", "expand_chapter"}:
         try:
             prebuild_chapter_graph_records(
                 novel_id=novel_id,
@@ -259,7 +276,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
         llm_opts = llm_call_options(req)
 
         try:
-            if req.mode in {"write_chapter", "revise_chapter"}:
+            if req.mode in {"write_chapter", "revise_chapter", "expand_chapter"}:
                 if await _disconnected():
                     logger.info("run_stream client disconnected early. novel_id=%s mode=%s", novel_id, req.mode)
                     return
@@ -319,6 +336,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                 yield sse_pack("phase", {"name": "writing", "chapter_index": chapter_index})
                 parts: List[str] = []
                 usage_meta: Dict[str, Any] = {}
+                write_mode = "expand" if req.mode == "expand_chapter" else "generate"
                 for item in agent.write_chapter_text_stream(
                     novel_id=novel_id,
                     plan=plan,
@@ -330,6 +348,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     supporting_character_ids=(req.supporting_character_ids or []),
                     llm_options=llm_opts,
                     timeline_event_focus_id=req_timeline_focus_id(req),
+                    write_mode=write_mode,
                 ):
                     if await _disconnected():
                         logger.info(
@@ -356,9 +375,11 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     )
                     return
                 yield sse_pack("phase", {"name": "saving"})
+                next_state = plan.next_state
                 record = ChapterRecord(
                     chapter_index=chapter_index,
                     chapter_preset_name=req.chapter_preset_name,
+                    timeline_event_id=validate_timeline_event_id(next_state, req_timeline_focus_id(req)),
                     time_slot=plan.time_slot,
                     pov_character_id=plan.pov_character_id,
                     who_is_present=plan.who_is_present,
@@ -366,7 +387,6 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     content=content_text,
                     usage_metadata=usage_meta,
                 )
-                next_state = plan.next_state
                 persist_chapter_artifacts(
                     novel_id=novel_id,
                     chapter=record,
@@ -420,6 +440,45 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                         "next_status": next_status or None,
                     },
                 )
+            elif req.mode == "optimize_suggestions":
+                if await _disconnected():
+                    return
+                st_opt = load_state(novel_id)
+                if not st_opt or not st_opt.meta.initialized:
+                    raise ValueError("state not initialized. please run init_state first")
+                yield sse_pack("phase", {"name": "optimizing"})
+                opt_parts: List[str] = []
+                opt_usage: Dict[str, Any] = {}
+                for item in agent.optimize_suggestions_stream(
+                    novel_id=novel_id,
+                    user_task=llm_user_task,
+                    lore_tags=req.lore_tags,
+                    llm_options=llm_opts,
+                ):
+                    if await _disconnected():
+                        return
+                    txt = str(item.get("delta", "") or "")
+                    if txt:
+                        opt_parts.append(txt)
+                        yield sse_pack("content", {"delta": txt})
+                    um = item.get("usage_metadata") or {}
+                    if isinstance(um, dict) and um:
+                        opt_usage = um
+                st_final = load_state(novel_id)
+                yield sse_pack(
+                    "done",
+                    {
+                        "novel_id": novel_id,
+                        "mode": req.mode,
+                        "chapter_index": None,
+                        "state_updated": False,
+                        "usage_metadata": opt_usage,
+                        "content": "".join(opt_parts).strip(),
+                        "plan": None,
+                        "state": (st_final.model_dump(mode="json") if st_final else None),
+                        "next_status": None,
+                    },
+                )
             else:
                 if await _disconnected():
                     logger.info(
@@ -431,16 +490,17 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                 yield sse_pack("phase", {"name": "running"})
                 stx = load_state(novel_id)
                 chapter_index = req.chapter_index or ((stx.meta.current_chapter_index + 1) if stx else 1)
-                try:
-                    prebuild_chapter_graph_records(
-                        novel_id=novel_id,
-                        req=req,
-                        chapter_index=int(chapter_index),
-                        inferred_time_slot=inferred,
-                        pov_ids=pov_ids,
-                    )
-                except Exception as e:
-                    logger.warning("prebuild chapter graph records failed(non-stream): %s", e)
+                if req.mode != "init_state":
+                    try:
+                        prebuild_chapter_graph_records(
+                            novel_id=novel_id,
+                            req=req,
+                            chapter_index=int(chapter_index),
+                            inferred_time_slot=inferred,
+                            pov_ids=pov_ids,
+                        )
+                    except Exception as e:
+                        logger.warning("prebuild chapter graph records failed(non-stream): %s", e)
                 result = agent.run(
                     novel_id=novel_id,
                     mode=req.mode,

@@ -32,6 +32,8 @@ export function useGraph(novelId: Ref<string>) {
   const graphFacDesc = ref("");
   const graphTlSlot = ref("");
   const graphTlSummary = ref("");
+  /** 章节节点归属的时间线事件 id（可空 = 仅按 time_slot 弱对齐） */
+  const graphChapterTimelineEventId = ref("");
   const timelinePrevDraft = ref("");
   const timelineNextDraft = ref("");
   const relTarget = ref("");
@@ -132,6 +134,8 @@ export function useGraph(novelId: Ref<string>) {
       ) as { target?: string } | undefined;
       timelinePrevDraft.value = String(incoming?.source || "");
       timelineNextDraft.value = String(outgoing?.target || "");
+    } else if (nodeType === "chapter_event") {
+      graphChapterTimelineEventId.value = String(data?.timeline_event_id || "").trim();
     }
     relTarget.value = "";
     relLabel.value = "";
@@ -165,6 +169,25 @@ export function useGraph(novelId: Ref<string>) {
 
     ElMessage.success("已保存事件节点的上/下关系");
     await loadGraph();
+  }
+
+  async function saveChapterEventTimeline() {
+    const id = nid();
+    const node = graphEditNode.value;
+    if (!id || !node || String(node.type) !== "chapter_event") return;
+    const nodeIdStr = String(node.id || "");
+    if (!nodeIdStr.startsWith("ev:chapter:")) {
+      ElMessage.error("当前节点不是章节事件节点。");
+      return;
+    }
+    const teid = (graphChapterTimelineEventId.value || "").trim();
+    await apiJson(`/api/novels/${encodeURIComponent(id)}/graph/node`, "PATCH", {
+      node_id: nodeIdStr,
+      patch: { timeline_event_id: teid || null },
+    });
+    ElMessage.success("已保存章节归属事件");
+    await loadGraph();
+    if (graphFullscreenVisible.value) renderGraph();
   }
 
   function openGraphEdgeEditor(edge: Record<string, unknown>) {
@@ -593,6 +616,7 @@ export function useGraph(novelId: Ref<string>) {
     graphFacDesc,
     graphTlSlot,
     graphTlSummary,
+    graphChapterTimelineEventId,
     timelinePrevDraft,
     timelineNextDraft,
     relTarget,
@@ -620,6 +644,7 @@ export function useGraph(novelId: Ref<string>) {
     openGraphEditor,
     openGraphEdgeEditor,
     saveTimelineNeighbors,
+    saveChapterEventTimeline,
     saveGraphNodePatch,
     setRelationship,
     deleteRelationship,

@@ -50,7 +50,7 @@ def build_lorebook(lore_loader: Any, lore_tags: Optional[list[str]] = None) -> s
 
     lore = lore_loader.get_all_lore()
     if not lore.strip():
-        raise ValueError("settings 目录下没有找到 .md 设定文件，无法生成 lorebook。")
+        raise ValueError("lores 目录下没有找到 .md 设定文件，无法生成 lorebook。")
     return lore
 
 

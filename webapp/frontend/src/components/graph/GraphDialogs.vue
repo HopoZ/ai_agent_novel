@@ -154,10 +154,29 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
         </el-form>
       </template>
       <template v-else-if="String(graph.graphEditEdge.type || '').toLowerCase() === 'chapter_belongs'">
-        <div class="muted" style="line-height:1.6;">
-          此类边由系统根据章节与时间线的 <strong>time_slot</strong> 文本是否一致自动画出，不再支持在图谱里按章号绑定。
-          需要调整时，请编辑对应章节节点或时间线节点的 <code>time_slot</code>。
-        </div>
+        <el-form label-position="top">
+          <el-form-item label="章节（source）">
+            <el-input v-model="graph.edgeSourceDraft" disabled />
+          </el-form-item>
+          <el-form-item label="归属时间线事件（target）">
+            <el-select v-model="graph.edgeTargetDraft" filterable clearable placeholder="选择事件（清空则仅按 time_slot 弱对齐）" style="width:100%;">
+              <el-option label="（清空显式归属）" value="" />
+              <el-option
+                v-for="t in graph.graphTimelineOptions"
+                :key="`cb-${t.id}`"
+                :label="t.label"
+                :value="t.id"
+              />
+            </el-select>
+          </el-form-item>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <el-button type="primary" @click="graph.saveEdgeRelationship" :disabled="!novelId">保存归属</el-button>
+            <el-button type="danger" plain @click="graph.deleteEdgeRelationship" :disabled="!novelId">清除显式归属</el-button>
+          </div>
+          <div class="muted" style="margin-top:8px;">
+            多章可指向同一事件；未选事件时，若章节 <code>time_slot</code> 与某时间线事件一致，仍会画出弱对齐边。
+          </div>
+        </el-form>
       </template>
       <template v-else>
         <div class="muted">该类型边暂不支持修改（可修改 relationship 边）。</div>
@@ -252,6 +271,35 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
           </div>
           <div class="muted" style="margin-top:10px;">
             删除时间线事件会移除该事件的稳定 id，并清理所有以该 id 为端点的关系边；其余事件 id 不变。
+          </div>
+        </el-form>
+      </template>
+
+      <template v-else-if="graph.graphEditNode.type === 'chapter_event'">
+        <el-form label-position="top">
+          <el-form-item label="归属时间线事件（显式）">
+            <el-select
+              v-model="graph.graphChapterTimelineEventId"
+              filterable
+              clearable
+              placeholder="选择事件；清空则仅按 time_slot 弱对齐"
+              style="width:100%;"
+            >
+              <el-option label="（清空显式归属）" value="" />
+              <el-option
+                v-for="t in graph.graphTimelineOptions"
+                :key="`ch-${t.id}`"
+                :label="t.label"
+                :value="t.id"
+              />
+            </el-select>
+          </el-form-item>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <el-button type="primary" @click="graph.saveChapterEventTimeline" :disabled="!novelId">保存归属</el-button>
+          </div>
+          <div class="muted" style="margin-top:10px;">
+            同一事件可挂多章；正文文件 <code>ChapterRecord.timeline_event_id</code> 为真源，落盘会同步
+            <code>event_relations</code> 中 <code>chapter_belongs</code> 边。
           </div>
         </el-form>
       </template>

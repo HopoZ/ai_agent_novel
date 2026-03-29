@@ -1,5 +1,5 @@
 """
-设定（Lore）：从 `settings/**/*.md` 加载、摘要缓存、注入运行时。
+设定（Lore）：从 `lores/**/*.md` 加载、摘要缓存、注入运行时。
 包结构与职责见 `agents/README.md`。
 """
 

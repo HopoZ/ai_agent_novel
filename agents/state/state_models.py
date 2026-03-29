@@ -24,7 +24,7 @@ class NovelMeta(BaseModel):
     initialized: bool = False
     current_chapter_index: int = 0
 
-    # 本小说使用的 lorebook 设定 tag（来自 settings/*.md 文件名）
+    # 本小说使用的 lorebook 设定 tag（来自 lores/**/*.md 路径 tag）
     lore_tags: List[str] = Field(default_factory=list)
 
 
@@ -217,6 +217,9 @@ class ChapterRecord(BaseModel):
     # 用户可选的章节预设名，用于生成唯一章节文件名
     chapter_preset_name: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    # 多章可指向同一时间线事件；缺省时仍可用 time_slot 与 timeline 弱对齐
+    timeline_event_id: Optional[str] = None
 
     time_slot: str
     pov_character_id: Optional[str]

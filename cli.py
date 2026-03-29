@@ -80,5 +80,5 @@ if __name__ == "__main__":
         f.write(content)
 
     winsound.Beep(1000, 500)  # windows的语音库，提示任务完成
-    print(f"任务完成！设定已自动从 settings 目录同步。")
+    print(f"任务完成！设定已自动从 lores 目录同步。")
     print(f"创作完成！结果已存至: {output_file}")

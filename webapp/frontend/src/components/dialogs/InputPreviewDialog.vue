@@ -34,6 +34,7 @@ function stageDisplayTitle(name: string): string {
     init_state: "初始化 · 世界状态",
     plan_chapter: "规划 · 章节结构",
     write_chapter_text: "写作 · 正文生成",
+    optimize_suggestions: "优化 · 建议（非整章）",
   };
   return m[name] || name || "阶段";
 }

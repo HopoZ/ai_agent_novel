@@ -11,6 +11,7 @@ from agents._internal_marks import z7_module_mark
 from agents.persistence.graph_tables import (
     hydrate_state_character_relationships,
     persist_chapter_artifacts,
+    validate_timeline_event_id,
 )
 from agents.lore.loader import LoreLoader
 from agents.lore.lore_runtime import build_lore_summary_llm as build_lore_summary_llm_runtime
@@ -18,6 +19,7 @@ from agents.lore.lore_runtime import build_lorebook
 from agents.prompt.prompt_builders import (
     build_init_state_prompt,
     build_next_status_prompt,
+    build_optimize_suggestions_prompt,
     build_plan_chapter_prompt,
     build_write_chapter_prompt,
 )
@@ -65,12 +67,13 @@ class NovelAgent:
     - 保存完整 world_state / 人物状态 / 时间段 / 出场角色
     """
 
-    def __init__(self, lore_path: str = "settings"):
+    def __init__(self, lore_loader: Optional[LoreLoader] = None):
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         )
-        self.lore_loader = LoreLoader(data_path=lore_path)
+        # 设定目录只在 LoreLoader 默认；测试可注入自定义 loader
+        self.lore_loader = lore_loader or LoreLoader()
         self.model = None  # 懒加载：避免未配置 key 时无法启动 Web
 
     def _get_model(self):
@@ -465,6 +468,7 @@ class NovelAgent:
         supporting_character_ids: Optional[list[str]] = None,
         llm_options: Optional[Dict[str, Any]] = None,
         timeline_event_focus_id: Optional[str] = None,
+        write_mode: str = "generate",
     ) -> Tuple[str, Dict[str, Any]]:
         state = self._load_state_hydrated(novel_id)
         if not state:
@@ -496,6 +500,7 @@ class NovelAgent:
             lorebook=lorebook,
             plan=plan,
             strict_no_supporting=strict_no_supporting,
+            write_mode=write_mode,
         )
 
         messages = [SystemMessage(system), HumanMessage(human)]
@@ -519,6 +524,7 @@ class NovelAgent:
         supporting_character_ids: Optional[list[str]] = None,
         llm_options: Optional[Dict[str, Any]] = None,
         timeline_event_focus_id: Optional[str] = None,
+        write_mode: str = "generate",
     ) -> Iterator[Dict[str, Any]]:
         """
         流式生成章节正文。
@@ -556,12 +562,78 @@ class NovelAgent:
             lorebook=lorebook,
             plan=plan,
             strict_no_supporting=strict_no_supporting,
+            write_mode=write_mode,
         )
 
         messages = [SystemMessage(system), HumanMessage(human)]
         logger.info("Streaming write chapter %s ...", plan.chapter_index)
         model = self._model_for_call(llm_options)
         for chunk in model.stream(messages):
+            text = parse_ai_chunk_text(chunk)
+            usage = getattr(chunk, "usage_metadata", None) or {}
+            if text or usage:
+                yield {"delta": text, "usage_metadata": usage}
+
+    def optimize_suggestions_invoke(
+        self,
+        novel_id: str,
+        user_task: str,
+        lore_tags: Optional[list[str]] = None,
+        lore_summary_id: Optional[str] = None,
+        llm_options: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[str, Dict[str, Any]]:
+        state = self._load_state_hydrated(novel_id)
+        if not state:
+            raise ValueError(f"novel_id not found: {novel_id}")
+        if not state.meta.initialized:
+            raise ValueError("state not initialized. please run init_state first")
+        lorebook = self._lorebook(lore_tags or state.meta.lore_tags, lore_summary_id=lore_summary_id)
+        state_context = self._compact_state_for_prompt(
+            state=state,
+            user_task=user_task,
+            novel_id=novel_id,
+            timeline_n=4,
+            max_chars=10000,
+        )
+        system, human = build_optimize_suggestions_prompt(
+            user_task=user_task,
+            state_context=state_context,
+            lorebook=lorebook,
+        )
+        model = self._model_for_call(llm_options)
+        resp = model.invoke([SystemMessage(system), HumanMessage(human)])
+        text = parse_ai_text(resp).strip()
+        usage = getattr(resp, "usage_metadata", None) or {}
+        return text, usage
+
+    def optimize_suggestions_stream(
+        self,
+        novel_id: str,
+        user_task: str,
+        lore_tags: Optional[list[str]] = None,
+        lore_summary_id: Optional[str] = None,
+        llm_options: Optional[Dict[str, Any]] = None,
+    ) -> Iterator[Dict[str, Any]]:
+        state = self._load_state_hydrated(novel_id)
+        if not state:
+            raise ValueError(f"novel_id not found: {novel_id}")
+        if not state.meta.initialized:
+            raise ValueError("state not initialized. please run init_state first")
+        lorebook = self._lorebook(lore_tags or state.meta.lore_tags, lore_summary_id=lore_summary_id)
+        state_context = self._compact_state_for_prompt(
+            state=state,
+            user_task=user_task,
+            novel_id=novel_id,
+            timeline_n=4,
+            max_chars=10000,
+        )
+        system, human = build_optimize_suggestions_prompt(
+            user_task=user_task,
+            state_context=state_context,
+            lorebook=lorebook,
+        )
+        model = self._model_for_call(llm_options)
+        for chunk in model.stream([SystemMessage(system), HumanMessage(human)]):
             text = parse_ai_chunk_text(chunk)
             usage = getattr(chunk, "usage_metadata", None) or {}
             if text or usage:
@@ -641,7 +713,26 @@ class NovelAgent:
             )
             return RunResult(novel_id=novel_id, mode=mode, chapter_index=None, state_updated=True, content=None)
 
-        if mode in {"plan_only", "write_chapter", "revise_chapter"}:
+        if mode == "optimize_suggestions":
+            if not state.meta.initialized:
+                raise ValueError("state not initialized. please run init_state first")
+            text, usage = self.optimize_suggestions_invoke(
+                novel_id=novel_id,
+                user_task=user_task,
+                lore_tags=lore_tags,
+                lore_summary_id=lore_summary_id,
+                llm_options=llm_options,
+            )
+            return RunResult(
+                novel_id=novel_id,
+                mode=mode,
+                chapter_index=None,
+                state_updated=False,
+                content=text,
+                usage_metadata=usage,
+            )
+
+        if mode in {"plan_only", "write_chapter", "revise_chapter", "expand_chapter"}:
             if not state.meta.initialized:
                 raise ValueError("state not initialized. please run init_state first")
 
@@ -672,6 +763,7 @@ class NovelAgent:
                 record = ChapterRecord(
                     chapter_index=chapter_index,
                     chapter_preset_name=chapter_preset_name,
+                    timeline_event_id=validate_timeline_event_id(plan.next_state, timeline_event_focus_id),
                     time_slot=plan.time_slot,
                     pov_character_id=plan.pov_character_id,
                     who_is_present=plan.who_is_present,
@@ -694,7 +786,8 @@ class NovelAgent:
                     plan=plan,
                 )
 
-            # write_chapter / revise_chapter：先写正文，再落盘章节
+            # write_chapter / revise_chapter / expand_chapter：先写正文，再落盘章节
+            write_mode = "expand" if mode == "expand_chapter" else "generate"
             content_text, usage = self.write_chapter_text(
                 novel_id=novel_id,
                 plan=plan,
@@ -707,6 +800,7 @@ class NovelAgent:
                 supporting_character_ids=supporting_character_ids,
                 llm_options=llm_options,
                 timeline_event_focus_id=timeline_event_focus_id,
+                write_mode=write_mode,
             )
 
             if mode == "revise_chapter":
@@ -716,6 +810,7 @@ class NovelAgent:
             record = ChapterRecord(
                 chapter_index=chapter_index,
                 chapter_preset_name=chapter_preset_name,
+                timeline_event_id=validate_timeline_event_id(plan.next_state, timeline_event_focus_id),
                 time_slot=plan.time_slot,
                 pov_character_id=plan.pov_character_id,
                 who_is_present=plan.who_is_present,
@@ -799,7 +894,16 @@ class NovelAgent:
             "stages": [],
         }
 
-        if mode in {"plan_only", "write_chapter", "revise_chapter"} and (not state.meta.initialized):
+        if (
+            mode
+            in {
+                "plan_only",
+                "write_chapter",
+                "revise_chapter",
+                "expand_chapter",
+                "optimize_suggestions",
+            }
+        ) and (not state.meta.initialized):
             raise ValueError("state not initialized. please run init_state first")
 
         if mode == "init_state":
@@ -811,6 +915,23 @@ class NovelAgent:
                 lorebook=lorebook,
             )
             out["stages"].append({"name": "init_state", "system": system, "human": human})
+            return out
+
+        if mode == "optimize_suggestions":
+            lorebook = self._lorebook(lore_tags or state.meta.lore_tags, lore_summary_id=lore_summary_id)
+            state_context = self._compact_state_for_prompt(
+                state=state,
+                user_task=user_task,
+                novel_id=novel_id,
+                timeline_n=4,
+                max_chars=10000,
+            )
+            osys, ohum = build_optimize_suggestions_prompt(
+                user_task=user_task,
+                state_context=state_context,
+                lorebook=lorebook,
+            )
+            out["stages"].append({"name": "optimize_suggestions", "system": osys, "human": ohum})
             return out
 
         if chapter_index is None:
@@ -851,13 +972,15 @@ class NovelAgent:
         )
         out["stages"].append({"name": "plan_chapter", "system": plan_system, "human": plan_human})
 
-        if mode in {"write_chapter", "revise_chapter"}:
+        if mode in {"write_chapter", "revise_chapter", "expand_chapter"}:
+            wm = "expand" if mode == "expand_chapter" else "generate"
             write_system, write_human = build_write_chapter_prompt(
                 user_task=user_task,
                 state_context=state_context,
                 lorebook=lorebook,
                 plan=None,
                 strict_no_supporting=strict_no_supporting,
+                write_mode=wm,
             )
             out["stages"].append({"name": "write_chapter_text", "system": write_system, "human": write_human})
 

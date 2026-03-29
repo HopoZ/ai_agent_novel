@@ -41,7 +41,10 @@
           :on-pov-change="onPovChange"
           :on-focus-change="onFocusChange"
           :open-role-manager="openRoleManager"
-          :run-mode="runMode"
+          :run-generate="runGenerate"
+          :run-expand="runExpand"
+          :run-optimize="runOptimize"
+          :run-init-world="runInitWorld"
           :abort-run="abortRun"
         />
       </div>
@@ -118,7 +121,13 @@ import CreateNovelDialog from "./components/dialogs/CreateNovelDialog.vue";
 import InputPreviewDialog from "./components/dialogs/InputPreviewDialog.vue";
 import RoleManagerDialog from "./components/dialogs/RoleManagerDialog.vue";
 
-type Mode = "init_state" | "plan_only" | "write_chapter" | "revise_chapter";
+type AppRunMode =
+  | "init_state"
+  | "plan_only"
+  | "write_chapter"
+  | "revise_chapter"
+  | "expand_chapter"
+  | "optimize_suggestions";
 
 const { leftPanelWidth, midPanelWidth, startResizeLeft, startResizeMid } = usePanelResize();
 
@@ -148,7 +157,9 @@ let runAbortController: AbortController | null = null;
 const resultText = ref("等待你的操作...");
 const nextStatusText = ref("");
 const planStreamText = ref("");
-const runPhase = ref<"idle" | "planning" | "writing" | "saving" | "outputs_written" | "done" | "error">("idle");
+const runPhase = ref<
+  "idle" | "planning" | "writing" | "optimizing" | "saving" | "outputs_written" | "done" | "error"
+>("idle");
 const runHint = ref("");
 const lastOutputPath = ref("");
 const tokenUsageText = ref("");
@@ -217,7 +228,6 @@ const DEFAULT_LLM_MAX_TOKENS = 20000;
 
 const form = reactive<{
   novelId: string;
-  mode: Mode;
   eventMode: "existing" | "new";
   existingEventId: string;
   newEventTimeSlot: string;
@@ -233,7 +243,6 @@ const form = reactive<{
   llmMaxTokens: number | null;
 }>({
   novelId: "",
-  mode: "write_chapter",
   eventMode: "existing",
   existingEventId: "",
   newEventTimeSlot: "",
@@ -288,6 +297,7 @@ const runPhaseLabel = computed(() => {
   if (p === "idle") return "待命";
   if (p === "planning") return "正在规划章节";
   if (p === "writing") return "正在生成正文";
+  if (p === "optimizing") return "正在生成优化建议";
   if (p === "saving") return "正在保存章节、状态与三表";
   if (p === "outputs_written") return "正文已写入 outputs";
   if (p === "done") return "已完成";
@@ -452,12 +462,13 @@ async function loadCharacterOptions() {
   form.focusCharacterIds = [];
   if (!novelId) return;
   try {
-    const st = (await apiJson(`/api/novels/${encodeURIComponent(novelId)}/state`, "GET", null)) as { characters?: unknown[] };
-    const list = Array.isArray(st?.characters) ? st.characters : [];
-    const ids = list
-      .map((c: unknown) => String((c as { character_id?: string })?.character_id || "").trim())
-      .filter((x: string) => !!x);
-    characterOptions.value = Array.from(new Set(ids));
+    const res = (await apiJson(
+      `/api/novels/${encodeURIComponent(novelId)}/character_entities`,
+      "GET",
+      null
+    )) as { character_ids?: string[] };
+    const ids = Array.isArray(res?.character_ids) ? res.character_ids : [];
+    characterOptions.value = Array.from(new Set(ids.map((x) => String(x || "").trim()).filter(Boolean)));
   } catch (e: unknown) {
     const err = e as { message?: string };
     logDebug("loadCharacterOptions failed: " + (err?.message || String(e)));
@@ -558,11 +569,11 @@ async function createNovel() {
   createForm.povCharacterId = "";
   await loadNovels();
   await loadAnchors();
-  resultText.value = `创建成功！\n\n现在选择运行模式并点击“运行模式”。`;
+  resultText.value = `创建成功！\n\n若尚未初始化世界，请展开「高级」点击「初始化世界」；否则可直接使用下方三个写作按钮。`;
   createDialogVisible.value = false;
 }
 
-function buildRunPayload() {
+function buildRunPayload(runMode: AppRunMode) {
   const novelId = (form.novelId || "").trim();
   if (!novelId) {
     ElMessage.error("请先创建新小说或填写小说编号。");
@@ -571,15 +582,17 @@ function buildRunPayload() {
 
   const loreTags = selectedTags.value || [];
   if (loreTags.length === 0) {
-    ElMessage.error("请至少勾选 1 项设定（settings/*.md 文件名）。");
+    ElMessage.error("请至少勾选 1 项设定（lores 下对应标签）。");
     return null;
   }
   if (!form.userTask || !form.userTask.trim()) {
-    ElMessage.error("请输入本章任务描述（例如：写第3章 + 更新世界线/人物关系的要求）。");
+    ElMessage.error("请填写任务框内容（生成/扩写/优化/初始化均需要）。");
     return null;
   }
-  if (!validateTimePlan()) {
-    return null;
+  if (runMode !== "optimize_suggestions" && runMode !== "init_state") {
+    if (!validateTimePlan()) {
+      return null;
+    }
   }
 
   const mergedTask = (() => {
@@ -589,7 +602,7 @@ function buildRunPayload() {
     return `${base}\n\n（配角设定：${picked.join("、")}）`;
   })();
   const payload: Record<string, unknown> = {
-    mode: form.mode,
+    mode: runMode,
     user_task: mergedTask,
     existing_event_id: form.eventMode === "existing" ? (form.existingEventId || null) : null,
     new_event_time_slot: form.eventMode === "new" ? (form.newEventTimeSlot || null) : null,
@@ -643,12 +656,13 @@ async function executeRun(novelId: string, payload: Record<string, unknown>) {
           runPhase.value = name;
         }
         if (name === "planning") rightTab.value = "plan";
-        if (name === "writing") rightTab.value = "result";
+        if (name === "writing" || name === "optimizing") rightTab.value = "result";
         if (name === "next_status") rightTab.value = "next";
         const extra = name === "writing" && d?.chapter_index ? ` chapter=${d.chapter_index}` : "";
         const out = name === "outputs_written" && d?.path ? ` path=${d.path}` : "";
         if (name === "planning") runHint.value = "正在生成章节规划（beats + next_state）";
         if (name === "writing") runHint.value = "正在流式生成正文，请稍候...";
+        if (name === "optimizing") runHint.value = "正在流式生成优化建议...";
         if (name === "saving") runHint.value = "正在保存章节记录、世界状态和图谱三表";
         if (name === "next_status") runHint.value = "正在生成下章建议...";
         if (name === "next_status_done") runHint.value = "下章建议已生成";
@@ -729,8 +743,8 @@ async function executeRun(novelId: string, payload: Record<string, unknown>) {
   }
 }
 
-async function runMode() {
-  const built = buildRunPayload();
+async function startPreviewRun(runMode: AppRunMode) {
+  const built = buildRunPayload(runMode);
   if (!built) return;
   previewingInput.value = true;
   runPhase.value = "idle";
@@ -749,6 +763,19 @@ async function runMode() {
   } finally {
     previewingInput.value = false;
   }
+}
+
+function runGenerate() {
+  return startPreviewRun("write_chapter");
+}
+function runExpand() {
+  return startPreviewRun("expand_chapter");
+}
+function runOptimize() {
+  return startPreviewRun("optimize_suggestions");
+}
+function runInitWorld() {
+  return startPreviewRun("init_state");
 }
 
 async function confirmRunFromPreview() {

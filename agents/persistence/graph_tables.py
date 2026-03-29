@@ -7,7 +7,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from agents.persistence.storage import get_chapters_dir, get_state_path, list_chapters, load_state, save_chapter, save_state
+from agents.persistence.storage import (
+    get_chapters_dir,
+    get_state_path,
+    list_chapters,
+    list_chapters_latest_per_index,
+    load_state,
+    save_chapter,
+    save_state,
+)
 from agents.state.state_models import ChapterRecord, NovelState
 
 
@@ -37,6 +45,37 @@ def _event_relations_path(novel_id: str) -> Path:
 
 def new_timeline_event_id() -> str:
     return f"ev:timeline:{uuid.uuid4().hex}"
+
+
+def validate_timeline_event_id(state: NovelState, eid: Optional[str]) -> Optional[str]:
+    """若 eid 为当前 timeline 中存在的稳定 id，则原样返回，否则 None。"""
+    x = (eid or "").strip()
+    if not x.startswith("ev:timeline:"):
+        return None
+    for ev in state.world.timeline or []:
+        if (ev.event_id or "").strip() == x:
+            return x
+    return None
+
+
+def resolve_chapter_timeline_event_id(state: NovelState, chapter: ChapterRecord) -> Optional[str]:
+    """
+    章 → 归属的时间线事件 id：
+    1) ChapterRecord.timeline_event_id 若在 state.timeline 中存在则采用（多章可同指一事件）
+    2) 否则按 time_slot 文本对齐 timeline 中第一条匹配
+    """
+    tid = (chapter.timeline_event_id or "").strip()
+    if tid.startswith("ev:timeline:"):
+        v = validate_timeline_event_id(state, tid)
+        if v:
+            return v
+    ts = str(chapter.time_slot or "").strip()
+    if not ts:
+        return None
+    for ev in state.world.timeline or []:
+        if str(ev.time_slot or "").strip() == ts and (ev.event_id or "").strip():
+            return str(ev.event_id).strip()
+    return None
 
 
 def timeline_index_for_node_id(state: NovelState, node_id: Optional[str]) -> Optional[int]:
@@ -298,7 +337,7 @@ def ensure_graph_tables(novel_id: str) -> None:
             }
         )
 
-    for chap in list_chapters(novel_id):
+    for chap in list_chapters_latest_per_index(novel_id):
         cid = f"ev:chapter:{chap.chapter_index}"
         for p in chap.who_is_present or []:
             ch = f"char:{p.character_id}"
@@ -308,6 +347,16 @@ def ensure_graph_tables(novel_id: str) -> None:
                     "target": cid,
                     "label": p.role_in_scene or "出场",
                     "kind": "appear",
+                }
+            )
+        teid = resolve_chapter_timeline_event_id(state, chap)
+        if teid:
+            event_relations.append(
+                {
+                    "source": cid,
+                    "target": teid,
+                    "label": "属于事件",
+                    "kind": "chapter_belongs",
                 }
             )
 
@@ -462,7 +511,7 @@ def timeline_next_graph_neighbors(novel_id: str, focus_event_id: str) -> Tuple[L
 
 
 def resolve_chapter_event_ids(state: NovelState, time_slot: str) -> List[str]:
-    """与章节写作对齐的时间线事件：仅按 time_slot 与 timeline 项匹配（不再使用章号绑定）。"""
+    """按 time_slot 文本列出所有匹配的时间线事件 id（弱对齐；显式归属见 ChapterRecord.timeline_event_id）。"""
     ts = str(time_slot or "").strip()
     if not ts:
         return []
@@ -472,6 +521,31 @@ def resolve_chapter_event_ids(state: NovelState, time_slot: str) -> List[str]:
         for ev in timeline
         if str(ev.time_slot or "").strip() == ts and (ev.event_id or "").strip()
     ]
+
+
+def replace_chapter_belongs_for_chapter(novel_id: str, state: NovelState, chapter: ChapterRecord) -> None:
+    """重写本章的 chapter_belongs 边，与 ChapterRecord + state 一致。"""
+    rows = load_event_relations(novel_id)
+    target = f"ev:chapter:{chapter.chapter_index}"
+    rows = [
+        r
+        for r in rows
+        if not (
+            str(r.get("kind", "")).strip().lower() == "chapter_belongs"
+            and str(r.get("source", "")).strip() == target
+        )
+    ]
+    teid = resolve_chapter_timeline_event_id(state, chapter)
+    if teid:
+        rows.append(
+            {
+                "source": target,
+                "target": teid,
+                "label": "属于事件",
+                "kind": "chapter_belongs",
+            }
+        )
+    save_event_relations(novel_id, rows)
 
 
 def replace_appear_edges_for_chapter(novel_id: str, chapter: ChapterRecord) -> None:
@@ -617,6 +691,7 @@ def persist_chapter_artifacts(
         ],
     )
     replace_appear_edges_for_chapter(novel_id, chapter)
+    replace_chapter_belongs_for_chapter(novel_id, next_state, chapter)
     replace_timeline_next_edges_from_state(novel_id, next_state)
 
 

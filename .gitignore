@@ -1,6 +1,6 @@
 /.env
 /outputs
-/settings
+/lores
 /storage
 /logs
 *.log

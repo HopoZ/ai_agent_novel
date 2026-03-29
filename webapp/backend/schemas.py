@@ -20,7 +20,10 @@ class BuildLoreSummaryRequest(BaseModel):
 
 class RunModeRequest(BaseModel):
     mode: str = Field(
-        description="init_state | plan_only | write_chapter | revise_chapter"
+        description=(
+            "init_state | plan_only | write_chapter | revise_chapter | "
+            "expand_chapter | optimize_suggestions"
+        )
     )
     user_task: str
     # 不建议前端显式指定 chapter_index（现实中会有重排/插入等需求）

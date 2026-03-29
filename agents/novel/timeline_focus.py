@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Optional
 
 from agents._internal_marks import z7_module_mark
-from agents.persistence.graph_tables import resolve_chapter_event_ids
+from agents.persistence.graph_tables import resolve_chapter_event_ids, resolve_chapter_timeline_event_id
 from agents.state.state_models import NovelState
 from agents.persistence.storage import load_chapter
 
@@ -24,8 +24,12 @@ def resolve_timeline_focus_event_id(
     x = (explicit or "").strip()
     if x.startswith("ev:timeline:"):
         return x
-    slot = (time_slot_for_resolve or state.continuity.time_slot or "").strip()
     chap = load_chapter(novel_id, chapter_index)
+    if chap:
+        teid = resolve_chapter_timeline_event_id(state, chap)
+        if teid:
+            return teid
+    slot = (time_slot_for_resolve or state.continuity.time_slot or "").strip()
     if chap and str(chap.time_slot or "").strip():
         slot = str(chap.time_slot).strip()
     ids = resolve_chapter_event_ids(state, slot)

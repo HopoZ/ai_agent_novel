@@ -35,14 +35,6 @@
             </el-button>
           </el-form-item>
 
-          <el-form-item label="模式">
-            <el-select v-model="form.mode" placeholder="选择运行模式">
-              <el-option label="初始化：生成初始状态（state.json）" value="init_state" />
-              <el-option label="只规划：生成 beats + next_state，并落盘章节记录/三表" value="plan_only" />
-              <el-option label="写正文：规划 + 写作，并落盘章节/状态/三表（推荐）" value="write_chapter" />
-              <el-option label="修订章节：按规划+写作重写指定章（MVP）" value="revise_chapter" />
-            </el-select>
-          </el-form-item>
         </el-collapse-item>
 
         <el-collapse-item name="timeline" title="时序">
@@ -164,6 +156,14 @@
         </el-collapse-item>
 
         <el-collapse-item name="advanced" title="高级">
+          <el-form-item label="首次使用（未初始化世界）">
+            <el-button style="width:100%;" @click="runInitWorld" :disabled="running" plain type="warning">
+              初始化世界（init_state）
+            </el-button>
+            <div class="muted" style="margin-top:6px;">
+              新建小说后若尚未生成过完整 state，请先初始化；与下方三个写作按钮独立。
+            </div>
+          </el-form-item>
           <el-form-item label="章节预设名（可选）">
             <el-input v-model="form.chapterPresetName" placeholder="例如：重逢夜 / 石碑共鸣 / 古墟初探"></el-input>
           </el-form-item>
@@ -218,25 +218,30 @@
         </el-collapse-item>
 
         <el-collapse-item name="task" title="本章任务">
-          <el-form-item label="本章任务描述">
+          <el-form-item label="任务 / 素材">
             <el-input
               v-model="form.userTask"
               type="textarea"
               :rows="7"
-              placeholder="例如：写第3章，主角与某势力冲突，要求推进世界线；系统会记录“章节归属事件”并关联相关人物。"
+              placeholder="生成内容：本章情节与写作要求。扩写内容：粘贴待扩写的短文/梗概（将扩至约4000–5000字）。优化内容：粘贴片段或说明希望改进的方向（输出建议，不写整章）。"
             ></el-input>
           </el-form-item>
         </el-collapse-item>
       </el-collapse>
 
       <div class="mid-actions-sticky">
-        <div style="display:flex; gap:8px; width:100%;">
-          <el-button type="primary" style="flex:1;" @click="runMode" :loading="running">
+        <div class="muted" style="margin-bottom:8px;">写作（先预览 Input，确认后再流式运行）</div>
+        <div style="display:flex; flex-direction:column; gap:8px; width:100%;">
+          <el-button type="primary" @click="runGenerate" :disabled="running" :loading="running">
             {{ running ? "运行中..." : "生成内容" }}
           </el-button>
-          <el-button v-if="running" type="danger" style="flex:1;" @click="abortRun">
-            中止生成
+          <el-button type="success" plain @click="runExpand" :disabled="running">
+            扩写内容
           </el-button>
+          <el-button type="info" plain @click="runOptimize" :disabled="running">
+            优化内容
+          </el-button>
+          <el-button v-if="running" type="danger" @click="abortRun">中止生成</el-button>
         </div>
       </div>
     </el-form>
@@ -263,7 +268,10 @@ defineProps<{
   onPovChange: (v: any) => void;
   onFocusChange: (v: any) => void;
   openRoleManager: () => void;
-  runMode: () => void;
+  runGenerate: () => void;
+  runExpand: () => void;
+  runOptimize: () => void;
+  runInitWorld: () => void;
   abortRun: () => void;
 }>();
 </script>
