@@ -67,7 +67,7 @@ python -m cli
 
 ####  Electron 桌面壳
 
-下载release下的exe
+给**下载安装包的用户**看的说明见 **[RELEASE.md](./RELEASE.md)**（当前 **1.0.0**）。开发者构建与数据目录见 **`electron/README.md`**、**`electron/ELECTRON_RELEASE.md`**。
 
 ---
 
