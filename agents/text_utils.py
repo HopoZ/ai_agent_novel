@@ -23,15 +23,30 @@ def safe_filename(name: str, fallback: str = "novel") -> str:
     return name[:80] if len(name) > 80 else name
 
 
-def write_outputs_txt(novel_title: str, chapter_index: int, content: str) -> str:
+def _novel_outputs_dirname(novel_title: str, novel_id: str | None) -> str:
+    title = safe_filename(novel_title, fallback="novel")
+    nid = safe_filename((novel_id or "").strip(), fallback="")
+    if nid:
+        return f"{title}_{nid[:12]}"
+    return title
+
+
+def write_outputs_txt(
+    novel_title: str,
+    chapter_index: int,
+    content: str,
+    *,
+    novel_id: str | None = None,
+) -> str:
     out_root = get_outputs_root()
-    os.makedirs(out_root, exist_ok=True)
+    novel_dir = os.path.join(str(out_root), _novel_outputs_dirname(novel_title, novel_id))
+    os.makedirs(novel_dir, exist_ok=True)
     ts = datetime.now().strftime("%m%d_%H%M%S")
     title = safe_filename(novel_title, fallback="novel")
     # 输出文件名不再使用“第几章”概念（章节可重排/插入），仅用小说名 + 时间戳保证可读与唯一性。
     # chapter_index 仍保留在 storage/novels/<id>/novel.db 的 chapters 表记录内。
     filename = f"{title}_{ts}.txt"
-    path = os.path.join(str(out_root), filename)
+    path = os.path.join(novel_dir, filename)
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
     return path

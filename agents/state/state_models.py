@@ -73,9 +73,13 @@ class TimelineEvent(BaseModel):
         if not isinstance(data, dict):
             return data
         d = {k: v for k, v in data.items() if k != "chapter_index"}
-        # 兼容 LLM 常用别名：time / event
+        # 兼容 LLM 常用别名：time / year / date / event
         if d.get("time_slot") is None and d.get("time") is not None:
             d["time_slot"] = d["time"]
+        if d.get("time_slot") is None and d.get("year") is not None:
+            d["time_slot"] = d["year"]
+        if d.get("time_slot") is None and d.get("date") is not None:
+            d["time_slot"] = d["date"]
         if d.get("summary") is None and d.get("event") is not None:
             d["summary"] = d["event"]
         return d

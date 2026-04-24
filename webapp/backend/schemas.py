@@ -11,11 +11,56 @@ class CreateNovelRequest(BaseModel):
     pov_character_id: Optional[str] = None
     initial_user_task: Optional[str] = None
     lore_tags: Optional[List[str]] = None
+    auto_generate_lore: bool = True
+    auto_lore_brief: Optional[str] = None
+
+
+class AutoLoreRegenerateRequest(BaseModel):
+    brief: Optional[str] = None
+    overwrite: bool = True
+
+
+class NovelUpdateRequest(BaseModel):
+    novel_title: str
+
+
+class NovelTagsUpdateRequest(BaseModel):
+    lore_tags: List[str] = Field(default_factory=list)
 
 
 class BuildLoreSummaryRequest(BaseModel):
     tags: List[str] = Field(default_factory=list)
     force: bool = False
+
+
+class LoreTagCreateRequest(BaseModel):
+    tag: str
+    content: str = ""
+    overwrite: bool = False
+
+
+class LoreTagRenameRequest(BaseModel):
+    old_tag: str
+    new_tag: str
+
+
+class LoreTagDeleteRequest(BaseModel):
+    tag: str
+
+
+class LoreTagUpdateContentRequest(BaseModel):
+    tag: str
+    content: str = ""
+
+
+class LoreTagBatchDeleteRequest(BaseModel):
+    tags: List[str] = Field(default_factory=list)
+
+
+class LoreTagBatchReplacePrefixRequest(BaseModel):
+    tags: List[str] = Field(default_factory=list)
+    old_prefix: str = ""
+    new_prefix: str = ""
 
 
 class RunModeRequest(BaseModel):
@@ -100,6 +145,10 @@ class RunModeRequest(BaseModel):
         default=False,
         description="当结构卡未满足最小要求时，是否确认“继续生成（风险）”",
     )
+    shadow_director_guidance: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="影子编导自动建议（冲突类型/伏笔回收/推荐配角等）",
+    )
 
 
 # --- 图谱 API 请求体（原 server.py 内联模型） ---
@@ -153,6 +202,7 @@ class ApiModelListRequest(BaseModel):
     provider: Optional[str] = None  # deepseek | openai_compatible
     api_key: str = ""
     base_url: Optional[str] = None
+    force_refresh: bool = False
 
 
 class ApiConnectionTestRequest(BaseModel):

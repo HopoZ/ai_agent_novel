@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import shutil
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
@@ -19,6 +21,7 @@ from agents.persistence.graph_tables import (
 from agents.persistence.storage import load_chapter, load_state, save_state, list_chapters
 from agents.state.chapter_structure import build_locked_structure_card, evaluate_structure_gate
 from agents.state.consistency_audit import build_consistency_audit
+from agents.state.shadow_director import build_shadow_director_package
 from agents.state.state_models import ChapterPlan, ChapterRecord
 from webapp.backend.deps import agent, logger
 from webapp.backend.paths import STORAGE_NOVELS_DIR
@@ -32,12 +35,212 @@ from webapp.backend.run_helpers import (
     uses_new_timeline_event_for_chapter,
 )
 from webapp.backend.schemas import (
+    AutoLoreRegenerateRequest,
     CreateNovelRequest,
+    NovelTagsUpdateRequest,
+    NovelUpdateRequest,
     RunModeRequest,
 )
 from webapp.backend.sse import sse_pack
 
 router = APIRouter(tags=["novels"])
+
+
+def _unwrap_chapter_plan_payload(payload: Any) -> Dict[str, Any]:
+    """
+    兼容模型偶发返回包装层：
+    - {"ChapterPlan": {...}}
+    - {"result": {...}} / {"output": {...}}
+    """
+    if not isinstance(payload, dict):
+        return {}
+    if "ChapterPlan" in payload and isinstance(payload.get("ChapterPlan"), dict):
+        return payload["ChapterPlan"]
+    if "result" in payload and isinstance(payload.get("result"), dict):
+        return payload["result"]
+    if "output" in payload and isinstance(payload.get("output"), dict):
+        return payload["output"]
+    if len(payload) == 1:
+        only = next(iter(payload.keys()))
+        inner = payload.get(only)
+        if isinstance(inner, dict) and str(only).strip().lower() in {"chapterplan", "result", "output"}:
+            return inner
+    return payload
+
+
+def _auto_lore_manifest_path(novel_id: str):
+    return STORAGE_NOVELS_DIR / novel_id / "auto_lore_manifest.json"
+
+
+def _safe_stem_text(v: str) -> str:
+    s = "".join(ch for ch in str(v or "").strip() if ch.isalnum() or ch in ("_", "-", " ", "·"))
+    return s.strip()[:48] or "untitled"
+
+
+def _build_auto_lore_docs(
+    *,
+    novel_id: str,
+    novel_title: str,
+    start_time_slot: str,
+    pov_character_id: str,
+    selected_tags: List[str],
+    brief: str,
+) -> List[Dict[str, str]]:
+    root = f"自动生成/{novel_id}"
+    tag_hint = "、".join(selected_tags[:8]) if selected_tags else "（当前未勾选其他设定）"
+    title_line = novel_title or "未命名小说"
+    slot_line = start_time_slot or "未指定时间段"
+    pov_line = pov_character_id or "未指定视角角色"
+    brief_line = brief or "无额外说明。"
+    files = [
+        {
+            "filename": "00_项目说明.md",
+            "body": (
+                f"# 自动设定包（{title_line}）\n\n"
+                f"- 小说ID：`{novel_id}`\n"
+                f"- 起始时间段：{slot_line}\n"
+                f"- 起始视角：{pov_line}\n"
+                f"- 创建时已勾选标签：{tag_hint}\n\n"
+                "## 说明\n"
+                "本目录内容由系统在创建小说时自动生成，可直接编辑。建议保留文件名，便于后续追踪。\n"
+            ),
+        },
+        {
+            "filename": "01_世界观骨架.md",
+            "body": (
+                f"# 世界观骨架 · {title_line}\n\n"
+                "## 时代与环境\n"
+                f"- 当前起点：{slot_line}\n"
+                "- 时代技术层级：\n"
+                "- 社会秩序与禁忌：\n"
+                "- 资源与冲突稀缺点：\n\n"
+                "## 本书核心矛盾\n"
+                "- 主矛盾：\n"
+                "- 次矛盾：\n"
+                "- 触发事件：\n\n"
+                "## 作者补充意图\n"
+                f"{brief_line}\n"
+            ),
+        },
+        {
+            "filename": "02_角色与关系草案.md",
+            "body": (
+                f"# 角色与关系草案 · {title_line}\n\n"
+                "## 主视角\n"
+                f"- 角色ID：{pov_line}\n"
+                "- 当前目标：\n"
+                "- 隐性动机：\n"
+                "- 风险与弱点：\n\n"
+                "## 关键他者\n"
+                "- 角色A：与主视角关系 / 利益冲突 / 可触发事件\n"
+                "- 角色B：与主视角关系 / 利益冲突 / 可触发事件\n\n"
+                "## 关系变化触发清单\n"
+                "- 关系突变前置事件：\n"
+                "- 关系逆转关键台词或行动：\n"
+            ),
+        },
+        {
+            "filename": "03_连载主线与伏笔.md",
+            "body": (
+                f"# 连载主线与伏笔 · {title_line}\n\n"
+                "## 三段式主线\n"
+                "- 第一阶段（铺设）：\n"
+                "- 第二阶段（对抗）：\n"
+                "- 第三阶段（回收）：\n\n"
+                "## 伏笔池（建议至少3条）\n"
+                "1. 伏笔内容：\n"
+                "   - 埋设章节：\n"
+                "   - 回收目标章节：\n"
+                "2. 伏笔内容：\n"
+                "   - 埋设章节：\n"
+                "   - 回收目标章节：\n"
+                "3. 伏笔内容：\n"
+                "   - 埋设章节：\n"
+                "   - 回收目标章节：\n"
+            ),
+        },
+    ]
+    docs: List[Dict[str, str]] = []
+    for it in files:
+        fn = _safe_stem_text(it["filename"]).replace(" ", "_")
+        if not fn.lower().endswith(".md"):
+            fn = f"{fn}.md"
+        rel = f"{root}/{fn}"
+        docs.append({"relative_path": rel, "tag": rel[:-3], "content": it["body"]})
+    return docs
+
+
+def _write_auto_lore_docs(
+    *,
+    novel_id: str,
+    docs: List[Dict[str, str]],
+    overwrite: bool,
+) -> Dict[str, Any]:
+    base = agent.lore_loader.data_path
+    generated: List[Dict[str, str]] = []
+    skipped: List[Dict[str, str]] = []
+    for d in docs:
+        rel = str(d.get("relative_path") or "").replace("\\", "/").strip()
+        if not rel:
+            continue
+        path = base / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        exists = path.exists()
+        if exists and (not overwrite):
+            skipped.append({"relative_path": rel, "tag": str(d.get("tag") or "")})
+            continue
+        path.write_text(str(d.get("content") or "").strip() + "\n", encoding="utf-8")
+        generated.append({"relative_path": rel, "tag": str(d.get("tag") or "")})
+
+    payload = {
+        "novel_id": novel_id,
+        "generated": generated,
+        "skipped": skipped,
+        "count": len(generated),
+        "updated_at": str(uuid4()),
+    }
+    mf = _auto_lore_manifest_path(novel_id)
+    mf.parent.mkdir(parents=True, exist_ok=True)
+    mf.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return payload
+
+
+def _read_auto_lore_manifest(novel_id: str) -> Dict[str, Any]:
+    mf = _auto_lore_manifest_path(novel_id)
+    if not mf.exists():
+        return {"novel_id": novel_id, "generated": [], "skipped": [], "count": 0}
+    try:
+        data = json.loads(mf.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {"novel_id": novel_id, "generated": [], "skipped": [], "count": 0}
+
+
+def _generate_auto_lore_for_novel(
+    *,
+    novel_id: str,
+    novel_title: str,
+    start_time_slot: str,
+    pov_character_id: str,
+    lore_tags: List[str],
+    brief: str,
+    overwrite: bool,
+) -> Dict[str, Any]:
+    docs = _build_auto_lore_docs(
+        novel_id=novel_id,
+        novel_title=novel_title,
+        start_time_slot=start_time_slot,
+        pov_character_id=pov_character_id,
+        selected_tags=lore_tags,
+        brief=brief,
+    )
+    return _write_auto_lore_docs(
+        novel_id=novel_id,
+        docs=docs,
+        overwrite=overwrite,
+    )
 
 
 def _sync_after_run_if_event(novel_id: str, req: RunModeRequest, chapter_index: Optional[int]) -> None:
@@ -91,6 +294,31 @@ def _build_structure_gate(
     return evaluate_structure_gate(card)
 
 
+def _build_shadow_director(
+    *,
+    novel_id: str,
+    req: RunModeRequest,
+    inferred_time_slot: Optional[str],
+    timeline_focus_id: Optional[str],
+    structure_gate: Optional[Dict[str, Any]],
+    pov_ids: List[str],
+) -> Optional[Dict[str, Any]]:
+    if req.mode not in {"plan_only", "write_chapter", "revise_chapter", "expand_chapter"}:
+        return None
+    st = load_state(novel_id)
+    if not st:
+        return None
+    return build_shadow_director_package(
+        state=st,
+        user_task=req.user_task,
+        inferred_time_slot=inferred_time_slot,
+        timeline_focus_id=timeline_focus_id,
+        pov_ids=list(pov_ids or []),
+        existing_supporting=list(req.supporting_character_ids or []),
+        structure_card=(structure_gate.get("card") if structure_gate else None),
+    )
+
+
 @router.get("")
 def list_novels():
     base = STORAGE_NOVELS_DIR
@@ -122,28 +350,119 @@ def list_novels():
     return {"novels": novels}
 
 
+@router.patch("/{novel_id}")
+def update_novel(novel_id: str, req: NovelUpdateRequest):
+    state = load_state(novel_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="novel not found")
+    title = str(req.novel_title or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="novel_title is required")
+    state.meta.novel_title = title
+    save_state(novel_id, state)
+    return {"ok": True, "novel_id": novel_id, "novel_title": title}
+
+
+@router.patch("/{novel_id}/lore_tags")
+def update_novel_lore_tags(novel_id: str, req: NovelTagsUpdateRequest):
+    state = load_state(novel_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="novel not found")
+    cleaned: List[str] = []
+    seen = set()
+    for t in (req.lore_tags or []):
+        s = str(t or "").strip()
+        if (not s) or (s in seen):
+            continue
+        seen.add(s)
+        cleaned.append(s)
+    state.meta.lore_tags = cleaned
+    save_state(novel_id, state)
+    return {"ok": True, "novel_id": novel_id, "lore_tags": cleaned, "count": len(cleaned)}
+
+
+@router.delete("/{novel_id}")
+def delete_novel(novel_id: str):
+    # 仅允许删除 storage/novels 下该小说目录，避免误删
+    target = (STORAGE_NOVELS_DIR / novel_id).resolve()
+    base = STORAGE_NOVELS_DIR.resolve()
+    if str(target) == str(base) or (base not in target.parents):
+        raise HTTPException(status_code=400, detail="invalid novel_id")
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="novel not found")
+    shutil.rmtree(target, ignore_errors=False)
+    return {"ok": True, "novel_id": novel_id}
+
+
 @router.post("")
 def create_novel(req: CreateNovelRequest):
     novel_id = str(uuid4())
+    title = str(req.novel_title or "").strip() or "未命名小说"
+    start_slot = str(req.start_time_slot or "").strip()
+    pov_id = str(req.pov_character_id or "").strip()
+    picked_tags = [str(t).strip() for t in (req.lore_tags or []) if str(t).strip()]
     agent.create_novel_stub(
         novel_id=novel_id,
-        novel_title=req.novel_title,
-        start_time_slot=req.start_time_slot,
-        pov_character_id=req.pov_character_id,
-        lore_tags=req.lore_tags,
+        novel_title=title,
+        start_time_slot=start_slot or None,
+        pov_character_id=pov_id or None,
+        lore_tags=picked_tags,
     )
+
+    auto_manifest: Dict[str, Any] = {"generated": [], "count": 0}
+    if bool(req.auto_generate_lore):
+        try:
+            auto_manifest = _generate_auto_lore_for_novel(
+                novel_id=novel_id,
+                novel_title=title,
+                start_time_slot=start_slot,
+                pov_character_id=pov_id,
+                lore_tags=picked_tags,
+                brief=str(req.auto_lore_brief or "").strip(),
+                overwrite=True,
+            )
+        except Exception as e:
+            logger.warning("auto lore generation failed for novel_id=%s: %s", novel_id, e)
 
     if req.initial_user_task and req.initial_user_task.strip():
         try:
             agent.init_state(
                 novel_id=novel_id,
                 user_task=req.initial_user_task,
-                lore_tags=req.lore_tags,
+                lore_tags=picked_tags,
             )
         except Exception:
             pass
 
-    return {"novel_id": novel_id}
+    return {
+        "novel_id": novel_id,
+        "auto_lore": auto_manifest,
+    }
+
+
+@router.get("/{novel_id}/auto_lore")
+def get_auto_lore(novel_id: str):
+    st = load_state(novel_id)
+    if not st:
+        raise HTTPException(status_code=404, detail="novel not found")
+    return _read_auto_lore_manifest(novel_id)
+
+
+@router.post("/{novel_id}/auto_lore/regenerate")
+def regenerate_auto_lore(novel_id: str, req: AutoLoreRegenerateRequest):
+    st = load_state(novel_id)
+    if not st:
+        raise HTTPException(status_code=404, detail="novel not found")
+    payload = _generate_auto_lore_for_novel(
+        novel_id=novel_id,
+        novel_title=str(st.meta.novel_title or "").strip() or "未命名小说",
+        start_time_slot=str(st.continuity.time_slot or "").strip(),
+        pov_character_id=str(st.continuity.pov_character_id or "").strip(),
+        lore_tags=[str(t).strip() for t in (st.meta.lore_tags or []) if str(t).strip()],
+        brief=str(req.brief or "").strip(),
+        overwrite=bool(req.overwrite),
+    )
+    return payload
 
 
 @router.get("/{novel_id}/state")
@@ -237,7 +556,6 @@ def run_mode(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
     pov_ids = list(req.pov_character_ids_override or [])
     if (not pov_ids) and req.pov_character_id_override:
         pov_ids = [req.pov_character_id_override]
-    llm_user_task = build_llm_user_task(novel_id, req.user_task, req, inferred, pov_ids)
     st0 = load_state(novel_id)
     pre_chapter_index = req.chapter_index or ((st0.meta.current_chapter_index + 1) if st0 else 1)
     structure_gate = _build_structure_gate(
@@ -247,6 +565,15 @@ def run_mode(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
         chapter_index=int(pre_chapter_index),
         timeline_focus_id=timeline_focus_id,
     )
+    shadow_director = _build_shadow_director(
+        novel_id=novel_id,
+        req=req,
+        inferred_time_slot=inferred,
+        timeline_focus_id=timeline_focus_id,
+        structure_gate=structure_gate,
+        pov_ids=pov_ids,
+    )
+    llm_user_task = build_llm_user_task(novel_id, req.user_task, req, inferred, pov_ids)
     if structure_gate and structure_gate.get("needs_ack") and (not req.structure_risk_ack):
         return {
             "novel_id": novel_id,
@@ -256,6 +583,7 @@ def run_mode(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
             "blocked": True,
             "block_type": "structure_gate",
             "structure_gate": structure_gate,
+            "shadow_director": shadow_director,
         }
     if req.mode in {"plan_only", "write_chapter", "revise_chapter", "expand_chapter"}:
         try:
@@ -308,15 +636,19 @@ def run_mode(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
         resp["next_status"] = result.next_status
     if structure_gate:
         resp["structure_gate"] = structure_gate
+    if shadow_director:
+        resp["shadow_director"] = shadow_director
     state_obj = load_state(novel_id)
     resp["state"] = state_obj.model_dump(mode="json") if state_obj else None
     if req.mode in {"write_chapter", "revise_chapter", "expand_chapter"} and result.chapter_index and state_obj:
         chapter_row = load_chapter(novel_id, int(result.chapter_index))
         if chapter_row:
+            prev_chapter = load_chapter(novel_id, int(result.chapter_index) - 1) if int(result.chapter_index) > 1 else None
             resp["consistency_audit"] = build_consistency_audit(
                 state=state_obj,
                 chapter=chapter_row,
                 mode=req.mode,
+                previous_chapter=prev_chapter,
             )
     return resp
 
@@ -329,9 +661,24 @@ def preview_mode_input(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
     pov_ids = list(req.pov_character_ids_override or [])
     if (not pov_ids) and req.pov_character_id_override:
         pov_ids = [req.pov_character_id_override]
-    llm_user_task = build_llm_user_task(novel_id, req.user_task, req, inferred, pov_ids)
     st0 = load_state(novel_id)
     pre_chapter_index = req.chapter_index or ((st0.meta.current_chapter_index + 1) if st0 else 1)
+    structure_gate = _build_structure_gate(
+        novel_id=novel_id,
+        req=req,
+        inferred_time_slot=inferred,
+        chapter_index=int(pre_chapter_index),
+        timeline_focus_id=timeline_focus_id,
+    )
+    shadow_director = _build_shadow_director(
+        novel_id=novel_id,
+        req=req,
+        inferred_time_slot=inferred,
+        timeline_focus_id=timeline_focus_id,
+        structure_gate=structure_gate,
+        pov_ids=pov_ids,
+    )
+    llm_user_task = build_llm_user_task(novel_id, req.user_task, req, inferred, pov_ids)
     try:
         out = agent.preview_input(
             novel_id=novel_id,
@@ -346,15 +693,10 @@ def preview_mode_input(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
             timeline_event_focus_id=timeline_focus_id,
             omit_world_timeline=uses_new_timeline_event_for_chapter(req),
         )
-        structure_gate = _build_structure_gate(
-            novel_id=novel_id,
-            req=req,
-            inferred_time_slot=inferred,
-            chapter_index=int(pre_chapter_index),
-            timeline_focus_id=timeline_focus_id,
-        )
         if structure_gate:
             out["structure_gate"] = structure_gate
+        if shadow_director:
+            out["shadow_director"] = shadow_director
         return out
     except Exception as e:
         logger.exception("preview_input failed novel_id=%s mode=%s", novel_id, req.mode)
@@ -390,6 +732,14 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
             chapter_index=int(pre_chapter_index),
             timeline_focus_id=timeline_focus_id,
         )
+        shadow_director = _build_shadow_director(
+            novel_id=novel_id,
+            req=req,
+            inferred_time_slot=inferred,
+            timeline_focus_id=timeline_focus_id,
+            structure_gate=structure_gate,
+            pov_ids=pov_ids,
+        )
         if structure_gate and structure_gate.get("needs_ack") and (not req.structure_risk_ack):
             yield sse_pack(
                 "done",
@@ -401,6 +751,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     "blocked": True,
                     "block_type": "structure_gate",
                     "structure_gate": structure_gate,
+                    "shadow_director": shadow_director,
                     "usage_metadata": {},
                     "content": None,
                     "plan": None,
@@ -462,7 +813,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                         plan_json = item.get("plan") or {}
                 if not plan_json:
                     raise ValueError("plan stream failed: empty plan")
-                plan = ChapterPlan.model_validate(plan_json)
+                plan = ChapterPlan.model_validate(_unwrap_chapter_plan_payload(plan_json))
                 try:
                     plan.next_state = NovelAgent.merge_state(st, plan.next_state)  # type: ignore
                 except Exception as e:
@@ -542,7 +893,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     from agents.text_utils import write_outputs_txt
 
                     title = (st.meta.novel_title or "未命名小说") if st else "未命名小说"
-                    out_path = write_outputs_txt(title, chapter_index, content_text)
+                    out_path = write_outputs_txt(title, chapter_index, content_text, novel_id=novel_id)
                     yield sse_pack("phase", {"name": "outputs_written", "path": out_path})
                 except Exception as e:
                     logger.warning("Failed to write outputs txt (stream): %s", e)
@@ -576,7 +927,12 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     resolve_chapter_timeline_event_id(st_done, record) if st_done else None
                 )
                 consistency_audit = (
-                    build_consistency_audit(state=st_done, chapter=record, mode=req.mode)
+                    build_consistency_audit(
+                        state=st_done,
+                        chapter=record,
+                        mode=req.mode,
+                        previous_chapter=(load_chapter(novel_id, chapter_index - 1) if chapter_index > 1 else None),
+                    )
                     if st_done
                     else None
                 )
@@ -595,6 +951,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                         "chapter_timeline_event_id": chapter_timeline_event_id,
                         "consistency_audit": consistency_audit,
                         "structure_gate": structure_gate,
+                        "shadow_director": shadow_director,
                     },
                 )
             elif req.mode == "optimize_suggestions":
@@ -720,10 +1077,12 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                 if req.mode in {"write_chapter", "revise_chapter", "expand_chapter"} and result.chapter_index and state_obj:
                     chapter_row = load_chapter(novel_id, int(result.chapter_index))
                     if chapter_row:
+                        prev_chapter = load_chapter(novel_id, int(result.chapter_index) - 1) if int(result.chapter_index) > 1 else None
                         consistency_audit = build_consistency_audit(
                             state=state_obj,
                             chapter=chapter_row,
                             mode=req.mode,
+                            previous_chapter=prev_chapter,
                         )
                 yield sse_pack(
                     "done",
@@ -738,6 +1097,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                         "state": (state_obj.model_dump(mode="json") if state_obj else None),
                         "consistency_audit": consistency_audit,
                         "structure_gate": structure_gate,
+                        "shadow_director": shadow_director,
                     },
                 )
         except Exception as e:

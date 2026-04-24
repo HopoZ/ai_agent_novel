@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
-from typing import Literal
+import time
+from typing import Any, Dict, Literal
 from urllib import error as urlerror
 from urllib import request as urlrequest
 from urllib.parse import urlsplit, urlunsplit
@@ -24,6 +26,36 @@ from webapp.backend.deps import reset_agent_llm_cache
 from webapp.backend.schemas import ApiConnectionTestRequest, ApiKeyUpdateRequest, ApiModelListRequest
 
 router = APIRouter(tags=["settings"])
+
+_MODEL_CACHE_TTL_SECONDS = 300
+_MODEL_LIST_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _api_key_fingerprint(key: str) -> str:
+    raw = str(key or "").encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:12]
+
+
+def _model_cache_key(*, provider: str, base_url: str, api_key: str) -> str:
+    return f"{provider}::{base_url.rstrip('/')}::{_api_key_fingerprint(api_key)}"
+
+
+def _get_cached_model_list(cache_key: str) -> dict[str, Any] | None:
+    row = _MODEL_LIST_CACHE.get(cache_key)
+    if not row:
+        return None
+    exp = float(row.get("expires_at", 0) or 0)
+    if exp <= time.time():
+        _MODEL_LIST_CACHE.pop(cache_key, None)
+        return None
+    return row
+
+
+def _put_cached_model_list(cache_key: str, payload: dict[str, Any]) -> None:
+    _MODEL_LIST_CACHE[cache_key] = {
+        "expires_at": time.time() + _MODEL_CACHE_TTL_SECONDS,
+        "payload": payload,
+    }
 
 
 def _normalize_openai_base_url(raw: str) -> str:
@@ -72,6 +104,29 @@ def _candidate_model_endpoints(base_url: str) -> list[str]:
         seen.add(x)
         uniq.append(x)
     return uniq
+
+
+def _infer_model_capabilities(*, model_id: str, model_name: str = "", context_length: int | None = None) -> list[str]:
+    text = f"{model_id} {model_name}".lower()
+    caps: list[str] = ["chat"]
+    if any(k in text for k in ("vision", "vl", "image", "gpt-4o", "omni")):
+        caps.append("vision")
+    if any(k in text for k in ("tool", "function", "fc", "agent")):
+        caps.append("tool")
+    if any(k in text for k in ("reason", "thinking", "r1", "o1", "deepseek-reasoner")):
+        caps.append("reasoning")
+    if isinstance(context_length, int) and context_length >= 128000 and "reasoning" not in caps:
+        # 长上下文模型常用于复杂推理，给出轻提示
+        caps.append("reasoning")
+    # 保序去重
+    out: list[str] = []
+    seen: set[str] = set()
+    for c in caps:
+        if c in seen:
+            continue
+        seen.add(c)
+        out.append(c)
+    return out
 
 
 def _api_key_source() -> Literal["env", "file", "none"]:
@@ -187,6 +242,11 @@ def _fetch_openai_compatible_models(*, api_key: str, base_url: str) -> tuple[lis
                         ctx = x.get("context_length")
                         if isinstance(ctx, int) and ctx > 0:
                             item["context_length"] = ctx
+                        item["capabilities"] = _infer_model_capabilities(
+                            model_id=mid,
+                            model_name=nm,
+                            context_length=(ctx if isinstance(ctx, int) else None),
+                        )
                         out.append(item)
             # 常见网关扩展：{ models: ["a", "b"] } 或 { models: [{id:"a"}] }
             models = data.get("models")
@@ -195,7 +255,12 @@ def _fetch_openai_compatible_models(*, api_key: str, base_url: str) -> tuple[lis
                     if isinstance(x, str):
                         m = x.strip()
                         if m:
-                            out.append({"id": m})
+                            out.append(
+                                {
+                                    "id": m,
+                                    "capabilities": _infer_model_capabilities(model_id=m),
+                                }
+                            )
                     elif isinstance(x, dict):
                         m = str(x.get("id") or x.get("name") or "").strip()
                         if m:
@@ -206,6 +271,11 @@ def _fetch_openai_compatible_models(*, api_key: str, base_url: str) -> tuple[lis
                             ctx = x.get("context_length")
                             if isinstance(ctx, int) and ctx > 0:
                                 item["context_length"] = ctx
+                            item["capabilities"] = _infer_model_capabilities(
+                                model_id=m,
+                                model_name=nm,
+                                context_length=(ctx if isinstance(ctx, int) else None),
+                            )
                             out.append(item)
         elif isinstance(data, list):
             # 宽松兼容：直接返回字符串列表
@@ -213,7 +283,12 @@ def _fetch_openai_compatible_models(*, api_key: str, base_url: str) -> tuple[lis
                 if isinstance(x, str):
                     m = x.strip()
                     if m:
-                        out.append({"id": m})
+                        out.append(
+                            {
+                                "id": m,
+                                "capabilities": _infer_model_capabilities(model_id=m),
+                            }
+                        )
                 elif isinstance(x, dict):
                     m = str(x.get("id") or x.get("name") or "").strip()
                     if m:
@@ -224,6 +299,11 @@ def _fetch_openai_compatible_models(*, api_key: str, base_url: str) -> tuple[lis
                         ctx = x.get("context_length")
                         if isinstance(ctx, int) and ctx > 0:
                             item["context_length"] = ctx
+                        item["capabilities"] = _infer_model_capabilities(
+                            model_id=m,
+                            model_name=nm,
+                            context_length=(ctx if isinstance(ctx, int) else None),
+                        )
                         out.append(item)
         by_id: dict[str, dict[str, Any]] = {}
         for it in out:
@@ -239,6 +319,19 @@ def _fetch_openai_compatible_models(*, api_key: str, base_url: str) -> tuple[lis
                 prev["name"] = it.get("name")
             if (not prev.get("context_length")) and it.get("context_length"):
                 prev["context_length"] = it.get("context_length")
+            if it.get("capabilities"):
+                caps_old = list(prev.get("capabilities") or [])
+                caps_new = list(it.get("capabilities") or [])
+                merged_caps: list[str] = []
+                seen_caps: set[str] = set()
+                for c in [*caps_old, *caps_new]:
+                    s = str(c).strip()
+                    if not s or s in seen_caps:
+                        continue
+                    seen_caps.add(s)
+                    merged_caps.append(s)
+                if merged_caps:
+                    prev["capabilities"] = merged_caps
         return [by_id[k] for k in sorted(by_id.keys())], endpoint
 
     # 所有候选都失败
@@ -316,16 +409,35 @@ def list_models(body: ApiModelListRequest):
         if not base_url:
             raise HTTPException(status_code=400, detail="OpenAI 兼容模式请填写 Base URL。")
 
-    model_items, used_endpoint = _fetch_openai_compatible_models(api_key=key, base_url=base_url)
-    models = [str(x.get("id") or "").strip() for x in model_items if str(x.get("id") or "").strip()]
-    return {
-        "provider": provider,
-        "base_url": _normalize_openai_base_url(base_url),
-        "used_endpoint": used_endpoint,
-        "count": len(models),
-        "models": models,
-        "model_items": model_items,
-    }
+    normalized_base_url = _normalize_openai_base_url(base_url)
+    cache_key = _model_cache_key(provider=provider, base_url=normalized_base_url, api_key=key)
+    force_refresh = bool(body.force_refresh)
+    cache_hit = False
+    payload: dict[str, Any] | None = None
+    if not force_refresh:
+        cached = _get_cached_model_list(cache_key)
+        if cached and isinstance(cached.get("payload"), dict):
+            payload = dict(cached.get("payload") or {})
+            cache_hit = True
+
+    if payload is None:
+        model_items, used_endpoint = _fetch_openai_compatible_models(api_key=key, base_url=base_url)
+        models = [str(x.get("id") or "").strip() for x in model_items if str(x.get("id") or "").strip()]
+        payload = {
+            "provider": provider,
+            "base_url": normalized_base_url,
+            "used_endpoint": used_endpoint,
+            "count": len(models),
+            "models": models,
+            "model_items": model_items,
+            "cache_ttl_seconds": _MODEL_CACHE_TTL_SECONDS,
+        }
+        _put_cached_model_list(cache_key, payload)
+
+    out = dict(payload)
+    out["cache_hit"] = cache_hit
+    out["force_refresh"] = force_refresh
+    return out
 
 
 @router.post("/settings/test_connection")

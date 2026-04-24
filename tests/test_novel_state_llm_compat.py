@@ -9,6 +9,12 @@ def test_timeline_event_time_event_aliases():
     assert ev.summary == "发生了某事"
 
 
+def test_timeline_event_year_event_aliases():
+    ev = TimelineEvent.model_validate({"year": "修真历三千二百年", "event": "林墨重生苏醒"})
+    assert ev.time_slot == "修真历三千二百年"
+    assert ev.summary == "林墨重生苏醒"
+
+
 def test_world_key_rules_nested_coerced_to_str():
     w = WorldState.model_validate(
         {

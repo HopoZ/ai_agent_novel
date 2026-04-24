@@ -51,6 +51,26 @@
           v-text="nextStatusText || (running ? '（生成中，完成后将展示下章建议）' : '（本次运行暂无下章建议）')"
           @scroll.passive="onNextScroll"
         ></pre>
+        <div class="next-actions">
+          <div class="muted" style="margin-bottom:6px;">可编辑后直接生成下一章（先走预览）。</div>
+          <el-input
+            :model-value="nextChapterDraft"
+            type="textarea"
+            :rows="6"
+            placeholder="编辑下章方向后点击“生成下一章”"
+            @update:model-value="onNextChapterDraftChange"
+          />
+          <div style="margin-top:8px;">
+            <el-button
+              type="primary"
+              :disabled="!novelId || running || !String(nextChapterDraft || '').trim()"
+              :loading="previewingInput"
+              @click="onGenerateNextChapter"
+            >
+              生成下一章
+            </el-button>
+          </div>
+        </div>
       </el-tab-pane>
       <el-tab-pane label="规划流" name="plan">
         <pre
@@ -91,9 +111,13 @@ const props = defineProps<{
   graphView: "people" | "events" | "mixed";
   resultText: string;
   nextStatusText: string;
+  nextChapterDraft: string;
   planStreamText: string;
+  previewingInput: boolean;
   novelId: string;
   onRightTabChange: (v: "result" | "next" | "plan" | "graph") => void;
+  onNextChapterDraftChange: (v: string) => void;
+  onGenerateNextChapter: () => void;
   graphViewLabel: string;
   openGraphDialog: () => void;
 }>();
@@ -199,6 +223,9 @@ watch(
 }
 .right-tabs :deep(.el-tabs__content) {
   padding-top: 6px;
+}
+.next-actions {
+  margin-top: 10px;
 }
 </style>
 

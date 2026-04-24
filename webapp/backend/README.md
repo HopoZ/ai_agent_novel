@@ -32,14 +32,14 @@ python -m uvicorn webapp.backend.server:app --reload --port 8000
 | `app.py` | `create_app()`：CORS、请求日志中间件、`/static`、挂载子路由、启动时可选前端构建 |
 | `deps.py` | 单例 `NovelAgent`、命名 logger |
 | `paths.py` | 相对仓库根的路径常量（Vite、`storage/novels` 等） |
-| `schemas.py` | Pydantic 请求/响应模型（含 `RunModeRequest`、图谱 `Graph*` 等） |
+| `schemas.py` | Pydantic 请求/响应模型（含 `RunModeRequest`：`structure_card` / `structure_risk_ack` / `shadow_director_guidance`，`ApiModelListRequest.force_refresh`，`CreateNovelRequest.auto_generate_lore/auto_lore_brief`，以及图谱 `Graph*`） |
 | `frontend_assets.py` | `dist` 新鲜度、`npm build`、挂载 `/assets` |
 | `sse.py` | `run_stream` 的 SSE 帧封装 |
-| `run_helpers.py` | 时间段推导、`user_task` 拼接、章节-事件辅助、写前图骨架；**无** FastAPI 依赖 |
+| `run_helpers.py` | 时间段推导、`user_task` 拼接、章节-事件辅助、写前图骨架；含影子编导 guidance 注入；**无** FastAPI 依赖 |
 | `graph_payload.py` | 由 `state` + 四表拼装 `GET /graph` 的 nodes/edges JSON（只读） |
 | `routes/__init__.py` | 路由包 |
 | `routes/pages.py` | `GET /`：Vite `index.html` 或旧模板回退 |
-| `routes/settings.py` | `/api/settings`、`/api/settings/api_key`、`/api/settings/models`、`/api/settings/test_connection`（LLM 提供商配置、模型列表、连通性测试） |
-| `routes/lore.py` | `/api/lore/*`：`POST summary/build`、`GET summary/{id}`、`GET tags`、`GET preview` |
-| `routes/novels.py` | `/api/novels/*`：列表、创建、`state`、`character_entities`、按章 `chapters/{i}`、`anchors`、`run`、`preview_input`、`run_stream`；写作模式含结构卡门禁 `structure_gate`（自动锁定 + 风险确认）与写后 `consistency_audit` |
+| `routes/settings.py` | `/api/settings`、`/api/settings/api_key`、`/api/settings/models`、`/api/settings/test_connection`（LLM 提供商配置、模型列表、连通性测试；模型列表支持后端 TTL 缓存 + `force_refresh` 强刷，并返回 `model_items.capabilities`） |
+| `routes/lore.py` | `/api/lore/*`：`POST summary/build`、`GET summary/{id}`、`GET tags`、`GET preview`，以及 Tag 文件管理：`POST/PATCH/DELETE /tags`、`PUT /tags/content`、`POST /tags/batch_delete`、`POST /tags/batch_replace_prefix`（批量操作会同步小说已绑定 lore_tags） |
+| `routes/novels.py` | `/api/novels/*`：列表、创建、`state`、`character_entities`、按章 `chapters/{i}`、`anchors`、`run`、`preview_input`、`run_stream`；支持创建时自动生成 lores 草案、`/auto_lore` 查询与 `/auto_lore/regenerate` 重生成；写作模式含结构卡门禁 `structure_gate`、影子编导策略 `shadow_director`（自动细节接管 + 可撤销）与写后 `consistency_audit`（含时间线反转/角色瞬移/关系突变无依据等高危阻断规则） |
 | `routes/graph.py` | `/api/novels/{id}/graph`（GET）；`PATCH graph/node`、`POST graph/nodes`、`DELETE graph/nodes`、`POST graph/relationship`、`PATCH timeline-neighbors`、`PATCH graph/edge` |

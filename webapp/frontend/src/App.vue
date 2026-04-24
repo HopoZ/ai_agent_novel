@@ -10,6 +10,12 @@
               <h1 class="app-title">AI 小说创作代理</h1>
             </div>
             <div class="app-header-actions">
+              <el-button size="small" @click="openAutoLoreManager">
+                自动设定
+              </el-button>
+              <el-button size="small" @click="openInsightsDrawer">
+                运行面板
+              </el-button>
               <el-button text type="primary" size="small" @click="openOutputsDir">打开输出</el-button>
               <el-button type="primary" plain size="small" @click="apiSettingsVisible = true">
                 API 密钥
@@ -42,12 +48,16 @@
         <TagPanel
           :tags-loading="tagsLoading"
           :building-lore-summary="buildingLoreSummary"
+          :can-sync-novel-tags="Boolean((form.novelId || '').trim())"
           :on-tag-tree-ref="onTagTreeRef"
           :tag-tree-data="tagTreeData"
           :on-select-all="selectAll"
           :on-invert-select="invertSelect"
           :on-clear-select="clearSelect"
           :on-build-current-lore-summary="buildCurrentLoreSummary"
+          :on-load-novel-tags="loadNovelLoreTags"
+          :on-save-novel-tags="saveNovelLoreTags"
+          :on-open-tag-manager="openTagManager"
           :on-tree-check="onTreeCheck"
           :get-tag-preview="getTagPreview"
           :on-open-tag-dialog="openTagDialog"
@@ -74,53 +84,125 @@
           :all-character-options="allCharacterSelectOptions"
           :previewing-input="previewingInput"
           :open-create-dialog="openCreateDialog"
+          :rename-current-novel="renameCurrentNovel"
+          :delete-current-novel="deleteCurrentNovel"
           :on-pov-change="onPovChange"
           :on-focus-change="onFocusChange"
           :apply-suggested-timeline-event="applySuggestedTimelineEvent"
+          :shadow-director-applied-summary="shadowDirectorAppliedSummary"
+          :undo-shadow-director-apply="undoShadowDirectorApply"
           :open-role-manager="openRoleManager"
+          :open-insights-drawer="openInsightsDrawer"
+          :graph-loading="graph.graphLoading"
+          :graph-node-total="graphSliceNodeTotal"
+          :graph-edge-total="graphSliceEdgeTotal"
+          :graph-character-total="graphSliceCharacterTotal"
+          :current-event-label="currentEventLabel"
+          :graph-view-label="graph.graphViewLabel"
+          :reload-graph-slice="reloadGraphSlice"
+          :open-graph-dialog="graph.openGraphDialog"
           :run-generate="runGenerate"
           :run-expand="runExpand"
-          :run-init-world="runInitWorld"
           :run-optimize="runOptimize"
           :abort-run="abortRun"
         />
       </div>
 
-      <div class="resize-handle" @mousedown="startResizeMid" title="拖动调整中间栏宽度"></div>
-
-      <div class="right-pane">
-        <RightPanel
-          :running="running"
-          :run-phase="runPhase"
-          :run-phase-label="runPhaseLabel"
-          :run-hint="runHint"
-          :token-usage-text="tokenUsageText"
-          :shadow-digest-text="shadowDigestText"
-          :consistency-audit-text="consistencyAuditText"
-          :consistency-audit-severity="consistencyAuditSeverity"
-          :last-output-path="lastOutputPath"
-          :right-tab="rightTab"
-          :graph-view="graph.graphView"
-          :graph-view-label="graph.graphViewLabel"
-          :open-graph-dialog="graph.openGraphDialog"
-          :on-right-tab-change="onRightTabChange"
-          :result-text="resultText"
-          :next-status-text="nextStatusText"
-          :plan-stream-text="planStreamText"
-          :novel-id="form.novelId"
-        />
-      </div>
       </div>
     </div>
   </div>
 
   <TextPreviewDialog v-model="dialogVisible" :title="dialogTitle" :text="dialogText" />
 
+  <el-dialog
+    v-model="tagManagerVisible"
+    title="Tag 管理"
+    width="760px"
+    destroy-on-close
+  >
+    <el-alert
+      type="info"
+      :closable="false"
+      show-icon
+      style="margin-bottom:10px;"
+      title="Tag 对应 lores 下的 .md 文件路径。可在这里新建、改名、删和编辑内容。"
+    />
+    <el-form label-position="top">
+      <el-form-item label="选择Tag">
+        <el-select
+          v-model="tagManagerTag"
+          filterable
+          clearable
+          placeholder="先选一个已有Tag，或输入新Tag后点击“新建”"
+          style="width:100%;"
+          @change="onTagManagerTagChange"
+        >
+          <el-option v-for="t in tags" :key="`tm-${t}`" :label="t" :value="t" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="批量选择">
+        <el-select
+          v-model="tagManagerBatchTags"
+          multiple
+          filterable
+          collapse-tags
+          collapse-tags-tooltip
+          clearable
+          placeholder="可多选后做批量删除/批量迁移前缀"
+          style="width:100%;"
+        >
+          <el-option v-for="t in tags" :key="`tm-batch-${t}`" :label="t" :value="t" />
+        </el-select>
+        <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
+          <el-button size="small" @click="selectAllTagsForBatch">批量全选</el-button>
+          <el-button size="small" @click="clearBatchSelection">清空批量</el-button>
+        </div>
+      </el-form-item>
+      <el-form-item label="批量前缀迁移（可选）">
+        <div style="display:flex; gap:8px; width:100%; flex-wrap:wrap;">
+          <el-input
+            v-model="tagManagerOldPrefix"
+            placeholder="旧前缀（可空；空则给选中Tag统一加新前缀）"
+            style="flex:1 1 48%;"
+          />
+          <el-input
+            v-model="tagManagerNewPrefix"
+            placeholder="新前缀（可空；表示去掉旧前缀）"
+            style="flex:1 1 48%;"
+          />
+        </div>
+      </el-form-item>
+      <el-form-item label="内容">
+        <el-input
+          v-model="tagManagerContent"
+          type="textarea"
+          :rows="12"
+          placeholder="Tag 对应的 markdown 内容"
+        />
+      </el-form-item>
+    </el-form>
+    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+      <el-button type="primary" :loading="tagManagerBusy" @click="createTagFromManager">新建Tag</el-button>
+      <el-button :loading="tagManagerBusy" :disabled="!tagManagerTag" @click="renameTagFromManager">重命名Tag</el-button>
+      <el-button type="success" :loading="tagManagerBusy" :disabled="!tagManagerTag" @click="saveTagContentFromManager">保存内容</el-button>
+      <el-button type="danger" plain :loading="tagManagerBusy" :disabled="!tagManagerTag" @click="deleteTagFromManager">删除Tag</el-button>
+      <el-button type="warning" plain :loading="tagManagerBusy" :disabled="tagManagerBatchTags.length === 0" @click="batchReplacePrefixFromManager">
+        批量迁移前缀
+      </el-button>
+      <el-button type="danger" :loading="tagManagerBusy" :disabled="tagManagerBatchTags.length === 0" @click="batchDeleteTagsFromManager">
+        批量删除
+      </el-button>
+      <el-button :loading="tagManagerBusy" :disabled="!tagManagerTag" @click="onTagManagerTagChange">刷新内容</el-button>
+    </div>
+  </el-dialog>
+
   <CreateNovelDialog
     v-model="createDialogVisible"
     v-model:novel-title="createForm.novelTitle"
     v-model:start-time-slot="createForm.startTimeSlot"
     v-model:pov-character-id="createForm.povCharacterId"
+    v-model:auto-generate-lore="createForm.autoGenerateLore"
+    v-model:auto-lore-brief="createForm.autoLoreBrief"
     :running="running"
     @create="createNovel"
   />
@@ -140,19 +222,45 @@
 
   <GraphDialogs :novel-id="form.novelId" />
 
+  <el-drawer
+    v-model="insightsDrawerVisible"
+    title="运行面板"
+    size="42%"
+    :with-header="true"
+    class="insights-drawer"
+  >
+    <RightPanel
+      :running="running"
+      :run-phase="runPhase"
+      :run-phase-label="runPhaseLabel"
+      :run-hint="runHint"
+      :token-usage-text="tokenUsageText"
+      :shadow-digest-text="shadowDigestText"
+      :consistency-audit-text="consistencyAuditText"
+      :consistency-audit-severity="consistencyAuditSeverity"
+      :last-output-path="lastOutputPath"
+      :right-tab="rightTab"
+      :graph-view="graph.graphView"
+      :graph-view-label="graph.graphViewLabel"
+      :open-graph-dialog="graph.openGraphDialog"
+      :on-right-tab-change="onRightTabChange"
+      :result-text="resultText"
+      :next-status-text="nextStatusText"
+      :next-chapter-draft="nextChapterHintDraft"
+      :plan-stream-text="planStreamText"
+      :previewing-input="previewingInput"
+      :novel-id="form.novelId"
+      :on-next-chapter-draft-change="onNextChapterDraftChange"
+      :on-generate-next-chapter="confirmNextChapterFromHint"
+    />
+  </el-drawer>
+
   <RoleManagerDialog
     v-model="roleManagerVisible"
     v-model:character-tag-draft="characterTagDraft"
     :all-character-options="allCharacterSelectOptions"
     @add="addCharacterTag"
     @remove="removeCharacterTag"
-  />
-
-  <NextChapterHintDialog
-    v-model="nextChapterHintVisible"
-    v-model:draft="nextChapterHintDraft"
-    :previewing-input="previewingInput"
-    @confirm="confirmNextChapterFromHint"
   />
 
   <OptimizeIntentDialog
@@ -163,6 +271,60 @@
   />
 
   <ApiSettingsDialog v-model="apiSettingsVisible" />
+
+  <el-dialog
+    v-model="autoLoreManagerVisible"
+    title="自动设定管理"
+    width="680px"
+    destroy-on-close
+  >
+    <el-alert
+      type="info"
+      :closable="false"
+      show-icon
+      style="margin-bottom:10px;"
+      title="自动设定文件位于 lores/自动生成/<novel_id>/，可在此重生成，也可直接打开输入目录手动编辑。"
+    />
+    <el-form label-position="top">
+      <el-form-item label="重生成补充说明（可选）">
+        <el-input
+          v-model="autoLoreRegenerateBrief"
+          type="textarea"
+          :rows="3"
+          placeholder="例如：增加宫廷权谋线，强化配角反转，主线节奏偏慢热"
+        />
+      </el-form-item>
+    </el-form>
+    <div style="display:flex; gap:8px; margin-bottom:8px;">
+      <el-button
+        type="primary"
+        :loading="autoLoreRegenerating"
+        :disabled="!form.novelId"
+        @click="regenerateAutoLore"
+      >
+        重生成并覆盖
+      </el-button>
+      <el-button :loading="autoLoreLoading" :disabled="!form.novelId" @click="loadAutoLoreManifest">
+        刷新列表
+      </el-button>
+      <el-button :disabled="!form.novelId" @click="openLoresDir">打开输入目录</el-button>
+    </div>
+    <el-table
+      :data="autoLoreRows"
+      size="small"
+      border
+      v-loading="autoLoreLoading"
+      empty-text="当前小说还没有自动设定文件。"
+    >
+      <el-table-column prop="tag" label="Tag" min-width="260" />
+      <el-table-column prop="relative_path" label="文件" min-width="220" />
+      <el-table-column label="操作" width="120">
+        <template #default="{ row }">
+          <el-button link type="primary" @click="openTagDialog(String(row.tag || ''))">查看</el-button>
+        </template>
+      </el-table-column>
+    </el-table>
+  </el-dialog>
 
   <WorldInitDialog
     v-model="worldInitDialogVisible"
@@ -191,7 +353,6 @@ import TextPreviewDialog from "./components/dialogs/TextPreviewDialog.vue";
 import CreateNovelDialog from "./components/dialogs/CreateNovelDialog.vue";
 import InputPreviewDialog from "./components/dialogs/InputPreviewDialog.vue";
 import RoleManagerDialog from "./components/dialogs/RoleManagerDialog.vue";
-import NextChapterHintDialog from "./components/dialogs/NextChapterHintDialog.vue";
 import OptimizeIntentDialog from "./components/dialogs/OptimizeIntentDialog.vue";
 import ApiSettingsDialog from "./components/dialogs/ApiSettingsDialog.vue";
 import WorldInitDialog from "./components/dialogs/WorldInitDialog.vue";
@@ -208,7 +369,7 @@ type AppRunMode =
 const DEFAULT_INIT_STATE_USER_TASK =
   "根据左侧已勾选的设定，生成完整 NovelState（世界观、人物、连续性）；尊重本小说创建时填写的起始时间段与视角。";
 
-const { leftPanelWidth, midPanelWidth, layoutStacked, startResizeLeft, startResizeMid } =
+const { leftPanelWidth, midPanelWidth, layoutStacked, startResizeLeft } =
   usePanelResize();
 
 const tagsLoading = ref(true);
@@ -220,7 +381,7 @@ function onTagTreeRef(el: unknown) {
   tagTreeRef.value = el as typeof tagTreeRef.value;
 }
 const novelsLoading = ref(true);
-const novels = ref<Array<{ novel_id: string; novel_title: string }>>([]);
+const novels = ref<Array<{ novel_id: string; novel_title: string; initialized?: boolean; updated_at?: string }>>([]);
 const previewCache = reactive<Record<string, string>>({});
 const previewFullCache = reactive<Record<string, string>>({});
 
@@ -266,13 +427,23 @@ const rightTab = ref<"result" | "next" | "plan" | "graph">("result");
 function onRightTabChange(v: "result" | "next" | "plan" | "graph") {
   rightTab.value = v;
 }
+function openInsightsDrawer() {
+  insightsDrawerVisible.value = true;
+}
 
 const dialogVisible = ref(false);
 const dialogTitle = ref("");
 const dialogText = ref("");
+const tagManagerVisible = ref(false);
+const tagManagerTag = ref("");
+const tagManagerContent = ref("");
+const tagManagerBatchTags = ref<string[]>([]);
+const tagManagerOldPrefix = ref("");
+const tagManagerNewPrefix = ref("");
+const tagManagerBusy = ref(false);
 const roleManagerVisible = ref(false);
 /** 中间栏折叠：accordion 一次只展开一块（与 MidFormPanel el-collapse accordion 一致） */
-const midActiveSection = ref<string>("task");
+const midActiveSection = ref<string>("timeline");
 function onMidSectionChange(v: string | string[]) {
   midActiveSection.value = Array.isArray(v) ? String(v[0] ?? "") : String(v ?? "");
 }
@@ -308,12 +479,17 @@ const pendingRunPayload = ref<unknown>(null);
 const pendingRunNovelId = ref("");
 const pendingRunStarting = ref(false);
 
-const nextChapterHintVisible = ref(false);
 const nextChapterHintDraft = ref("");
 
 const optimizeIntentVisible = ref(false);
 const optimizeIntentDraft = ref("");
 const apiSettingsVisible = ref(false);
+const insightsDrawerVisible = ref(false);
+const autoLoreManagerVisible = ref(false);
+const autoLoreLoading = ref(false);
+const autoLoreRegenerating = ref(false);
+const autoLoreRegenerateBrief = ref("");
+const autoLoreRows = ref<Array<{ tag: string; relative_path: string }>>([]);
 
 const FIRST_RUN_KEY = "novel-agent-onboarding-dismissed-v1";
 const firstRunHintVisible = ref(false);
@@ -382,19 +558,104 @@ const lastChapterTimelineEventId = ref("");
 /** preview_input 给出的“影子编导”建议挂载事件 */
 const suggestedTimelineEventId = ref("");
 const suggestedTimelineEventLabel = ref("");
+const previewShadowDirector = ref<Record<string, unknown> | null>(null);
+const shadowDirectorAppliedSummary = ref("");
+const shadowDirectorUndoSnapshot = ref<{
+  eventMode: "existing" | "new";
+  existingEventId: string;
+  newEventTimeSlot: string;
+  newEventSummary: string;
+  newEventPrevId: string;
+  newEventNextId: string;
+  focusCharacterIds: string[];
+  guidance: Record<string, unknown> | null;
+} | null>(null);
 
 const createForm = reactive<{
   novelTitle: string;
   startTimeSlot: string;
   povCharacterId: string;
+  autoGenerateLore: boolean;
+  autoLoreBrief: string;
 }>({
   novelTitle: "",
   startTimeSlot: "",
   povCharacterId: "",
+  autoGenerateLore: true,
+  autoLoreBrief: "",
 });
 
 function openCreateDialog() {
   createDialogVisible.value = true;
+}
+
+async function loadAutoLoreManifest() {
+  const novelId = (form.novelId || "").trim();
+  if (!novelId) {
+    autoLoreRows.value = [];
+    return;
+  }
+  autoLoreLoading.value = true;
+  try {
+    const res = (await apiJson(
+      `/api/novels/${encodeURIComponent(novelId)}/auto_lore`,
+      "GET",
+      null
+    )) as {
+      generated?: Array<{ tag?: string; relative_path?: string }>;
+      skipped?: Array<{ tag?: string; relative_path?: string }>;
+    };
+    const rows = [
+      ...(Array.isArray(res.generated) ? res.generated : []),
+      ...(Array.isArray(res.skipped) ? res.skipped : []),
+    ]
+      .map((x) => ({
+        tag: String(x?.tag || "").trim(),
+        relative_path: String(x?.relative_path || "").trim(),
+      }))
+      .filter((x) => x.tag || x.relative_path);
+    autoLoreRows.value = rows;
+  } catch {
+    autoLoreRows.value = [];
+  } finally {
+    autoLoreLoading.value = false;
+  }
+}
+
+async function openAutoLoreManager() {
+  if (!(form.novelId || "").trim()) {
+    ElMessage.warning("请先选择或创建一本小说。");
+    return;
+  }
+  autoLoreManagerVisible.value = true;
+  await loadAutoLoreManifest();
+}
+
+async function regenerateAutoLore() {
+  const novelId = (form.novelId || "").trim();
+  if (!novelId) {
+    ElMessage.error("请先选择一本小说。");
+    return;
+  }
+  autoLoreRegenerating.value = true;
+  try {
+    const res = (await apiJson(
+      `/api/novels/${encodeURIComponent(novelId)}/auto_lore/regenerate`,
+      "POST",
+      {
+        brief: (autoLoreRegenerateBrief.value || "").trim() || null,
+        overwrite: true,
+      }
+    )) as { count?: number };
+    await loadTags();
+    await loadAutoLoreManifest();
+    ElMessage.success(`已重生成自动设定（${Number(res?.count || 0)} 个文件）。`);
+  } catch (e: unknown) {
+    const err = e as { message?: string };
+    ElMessage.error(err?.message || String(e));
+  } finally {
+    autoLoreRegenerating.value = false;
+  }
 }
 
 /** 与 agents/novel/llm_client.init_deepseek_chat 默认参数保持一致（勿与后端漂移） */
@@ -411,6 +672,9 @@ const form = reactive<{
   newEventNextId: string;
   povCharacterOverride: string[];
   focusCharacterIds: string[];
+  conflictChoice: string;
+  foreshadowChoice: string;
+  supportingPreset: string;
   chapterPresetName: string;
   /** 当前地图/场景，可选；随请求写入 current_map 并注入模型约束 */
   currentMap: string;
@@ -428,6 +692,9 @@ const form = reactive<{
   newEventNextId: "",
   povCharacterOverride: [],
   focusCharacterIds: [],
+  conflictChoice: "自动",
+  foreshadowChoice: "自动",
+  supportingPreset: "自动",
   chapterPresetName: "",
   currentMap: "",
   userTask: "",
@@ -454,6 +721,17 @@ const inferredTimeSlotHint = computed(() => {
   if (before) return `${before}之前`;
   return "";
 });
+const graphSliceNodeTotal = computed(() => Number(graph.graphStats?.nodeTotal || 0));
+const graphSliceEdgeTotal = computed(() => Number(graph.graphStats?.edgeTotal || 0));
+const graphSliceCharacterTotal = computed(() => Number(graph.graphStats?.nodeByType?.character || 0));
+const currentEventLabel = computed(() => {
+  const byId = new Map((anchors.value || []).map((a) => [a.id, a.label]));
+  return String(byId.get(form.existingEventId) || "").trim();
+});
+
+function reloadGraphSlice() {
+  void graph.loadGraph();
+}
 
 const currentNovelTitle = computed(() => {
   const id = (form.novelId || "").trim();
@@ -530,22 +808,16 @@ function abortRun() {
 
 function selectAll() {
   selectedTags.value = [...tags.value];
-  nextTick(() => {
-    if (tagTreeRef.value) tagTreeRef.value.setCheckedKeys([...tags.value], false);
-  });
+  syncTagTreeChecked();
 }
 function clearSelect() {
   selectedTags.value = [];
-  nextTick(() => {
-    if (tagTreeRef.value) tagTreeRef.value.setCheckedKeys([], false);
-  });
+  syncTagTreeChecked();
 }
 function invertSelect() {
   const set = new Set(selectedTags.value);
   selectedTags.value = tags.value.filter((t) => !set.has(t));
-  nextTick(() => {
-    if (tagTreeRef.value) tagTreeRef.value.setCheckedKeys([...selectedTags.value], false);
-  });
+  syncTagTreeChecked();
 }
 function onTreeCheck() {
   if (!tagTreeRef.value) return;
@@ -555,18 +827,66 @@ function onTreeCheck() {
   selectedTags.value = all.filter((k) => tags.value.includes(k));
 }
 
+function syncTagTreeChecked() {
+  nextTick(() => {
+    if (tagTreeRef.value) tagTreeRef.value.setCheckedKeys([...selectedTags.value], false);
+  });
+}
+
+async function loadNovelLoreTags() {
+  const novelId = (form.novelId || "").trim();
+  if (!novelId) {
+    selectedTags.value = [];
+    syncTagTreeChecked();
+    return;
+  }
+  try {
+    const st = (await apiJson(`/api/novels/${encodeURIComponent(novelId)}/state`, "GET", null)) as {
+      meta?: { lore_tags?: string[] };
+    };
+    const rows = Array.isArray(st?.meta?.lore_tags) ? st.meta?.lore_tags || [] : [];
+    const cleaned = rows.map((x) => String(x || "").trim()).filter((x) => x && tags.value.includes(x));
+    selectedTags.value = cleaned;
+    syncTagTreeChecked();
+  } catch (e: unknown) {
+    const err = e as { message?: string };
+    ElMessage.error(`加载本书标签失败：${err?.message || String(e)}`);
+  }
+}
+
+async function saveNovelLoreTags() {
+  const novelId = (form.novelId || "").trim();
+  if (!novelId) {
+    ElMessage.warning("请先选择一本小说。");
+    return;
+  }
+  const payload = { lore_tags: selectedTags.value || [] };
+  try {
+    const res = (await apiJson(
+      `/api/novels/${encodeURIComponent(novelId)}/lore_tags`,
+      "PATCH",
+      payload
+    )) as { count?: number };
+    ElMessage.success(`已保存本书标签（${Number(res?.count || 0)} 项）。`);
+  } catch (e: unknown) {
+    const err = e as { message?: string };
+    ElMessage.error(`保存本书标签失败：${err?.message || String(e)}`);
+  }
+}
+
 async function loadTags() {
   tagsLoading.value = true;
   const res = (await apiJson("/api/lore/tags", "GET", null)) as { tags?: string[]; groups?: Record<string, string[]> };
   tags.value = res.tags || [];
   tagGroups.value = res.groups || {};
-  selectedTags.value = [...tags.value];
+  const existed = new Set(selectedTags.value || []);
+  const kept = tags.value.filter((t) => existed.has(t));
+  selectedTags.value = kept.length > 0 ? kept : [...tags.value];
   for (const k of Object.keys(previewCache)) delete previewCache[k];
   for (const k of Object.keys(previewFullCache)) delete previewFullCache[k];
   tagsLoading.value = false;
   logDebug(`Loaded tags count=${tags.value.length}`);
-  await nextTick();
-  if (tagTreeRef.value) tagTreeRef.value.setCheckedKeys([...selectedTags.value], false);
+  syncTagTreeChecked();
 }
 
 async function buildCurrentLoreSummary() {
@@ -602,7 +922,9 @@ async function buildCurrentLoreSummary() {
 async function loadNovels() {
   novelsLoading.value = true;
   try {
-    const res = (await apiJson("/api/novels", "GET", null)) as { novels?: Array<{ novel_id: string; novel_title: string }> };
+    const res = (await apiJson("/api/novels", "GET", null)) as {
+      novels?: Array<{ novel_id: string; novel_title: string; initialized?: boolean; updated_at?: string }>;
+    };
     novels.value = res.novels || [];
 
     if (!form.novelId && novels.value.length > 0) {
@@ -611,6 +933,47 @@ async function loadNovels() {
   } finally {
     novelsLoading.value = false;
   }
+}
+
+async function renameCurrentNovel() {
+  const novelId = String(form.novelId || "").trim();
+  if (!novelId) {
+    ElMessage.warning("请先选择一本小说。");
+    return;
+  }
+  const current = novels.value.find((n) => n.novel_id === novelId);
+  const fallback = current?.novel_title || "未命名小说";
+  const next = window.prompt("请输入新的小说名", fallback);
+  if (next === null) return;
+  const title = String(next || "").trim();
+  if (!title) {
+    ElMessage.warning("小说名不能为空。");
+    return;
+  }
+  await apiJson(`/api/novels/${encodeURIComponent(novelId)}`, "PATCH", { novel_title: title });
+  await loadNovels();
+  ElMessage.success("已更新小说名。");
+}
+
+async function deleteCurrentNovel() {
+  const novelId = String(form.novelId || "").trim();
+  if (!novelId) {
+    ElMessage.warning("请先选择一本小说。");
+    return;
+  }
+  const current = novels.value.find((n) => n.novel_id === novelId);
+  const title = current?.novel_title || novelId;
+  const ok = window.confirm(`确认删除小说《${title}》？此操作不可恢复。`);
+  if (!ok) return;
+  await apiJson(`/api/novels/${encodeURIComponent(novelId)}`, "DELETE", null);
+  if (form.novelId === novelId) {
+    form.novelId = "";
+  }
+  await loadNovels();
+  if (!form.novelId && novels.value.length > 0) {
+    form.novelId = novels.value[0].novel_id;
+  }
+  ElMessage.success("已删除小说。");
 }
 
 async function loadAnchors() {
@@ -645,6 +1008,9 @@ async function loadCharacterOptions() {
   characterTagDraft.value = "";
   form.povCharacterOverride = [];
   form.focusCharacterIds = [];
+  form.conflictChoice = "自动";
+  form.foreshadowChoice = "自动";
+  form.supportingPreset = "自动";
   if (!novelId) return;
   try {
     const res = (await apiJson(
@@ -766,6 +1132,220 @@ async function openTagDialog(tag: string) {
   dialogVisible.value = true;
 }
 
+function openTagManager() {
+  tagManagerVisible.value = true;
+  tagManagerTag.value = "";
+  tagManagerContent.value = "";
+  tagManagerBatchTags.value = [];
+  tagManagerOldPrefix.value = "";
+  tagManagerNewPrefix.value = "";
+}
+
+function selectAllTagsForBatch() {
+  tagManagerBatchTags.value = [...tags.value];
+}
+
+function clearBatchSelection() {
+  tagManagerBatchTags.value = [];
+}
+
+async function onTagManagerTagChange() {
+  const tag = String(tagManagerTag.value || "").trim();
+  if (!tag) {
+    tagManagerContent.value = "";
+    return;
+  }
+  tagManagerBusy.value = true;
+  try {
+    const res = (await apiJson(
+      `/api/lore/preview?tag=${encodeURIComponent(tag)}&max_chars=0&compact=0`,
+      "GET",
+      null
+    )) as { preview?: string };
+    tagManagerContent.value = String(res?.preview || "");
+  } catch (e: unknown) {
+    const err = e as { message?: string };
+    ElMessage.error(`读取Tag内容失败：${err?.message || String(e)}`);
+  } finally {
+    tagManagerBusy.value = false;
+  }
+}
+
+async function createTagFromManager() {
+  const tag = String(tagManagerTag.value || "").trim();
+  if (!tag) {
+    ElMessage.warning("请先输入要新建的Tag。");
+    return;
+  }
+  tagManagerBusy.value = true;
+  try {
+    await apiJson("/api/lore/tags", "POST", {
+      tag,
+      content: tagManagerContent.value || "",
+      overwrite: false,
+    });
+    await loadTags();
+    await loadNovelLoreTags();
+    ElMessage.success("Tag 已新建。");
+  } catch (e: unknown) {
+    const err = e as { message?: string };
+    ElMessage.error(`新建Tag失败：${err?.message || String(e)}`);
+  } finally {
+    tagManagerBusy.value = false;
+  }
+}
+
+async function renameTagFromManager() {
+  const oldTag = String(tagManagerTag.value || "").trim();
+  if (!oldTag) {
+    ElMessage.warning("请先选择要重命名的Tag。");
+    return;
+  }
+  const next = window.prompt("请输入新的 Tag 路径", oldTag);
+  if (next === null) return;
+  const newTag = String(next || "").trim();
+  if (!newTag || newTag === oldTag) return;
+  tagManagerBusy.value = true;
+  try {
+    await apiJson("/api/lore/tags", "PATCH", { old_tag: oldTag, new_tag: newTag });
+    tagManagerTag.value = newTag;
+    await loadTags();
+    await loadNovelLoreTags();
+    await onTagManagerTagChange();
+    ElMessage.success("Tag 已重命名。");
+  } catch (e: unknown) {
+    const err = e as { message?: string };
+    ElMessage.error(`重命名失败：${err?.message || String(e)}`);
+  } finally {
+    tagManagerBusy.value = false;
+  }
+}
+
+async function saveTagContentFromManager() {
+  const tag = String(tagManagerTag.value || "").trim();
+  if (!tag) {
+    ElMessage.warning("请先选择Tag。");
+    return;
+  }
+  tagManagerBusy.value = true;
+  try {
+    await apiJson("/api/lore/tags/content", "PUT", { tag, content: tagManagerContent.value || "" });
+    await loadTags();
+    ElMessage.success("Tag 内容已保存。");
+  } catch (e: unknown) {
+    const err = e as { message?: string };
+    ElMessage.error(`保存内容失败：${err?.message || String(e)}`);
+  } finally {
+    tagManagerBusy.value = false;
+  }
+}
+
+async function deleteTagFromManager() {
+  const tag = String(tagManagerTag.value || "").trim();
+  if (!tag) {
+    ElMessage.warning("请先选择要删除的Tag。");
+    return;
+  }
+  const ok = window.confirm(`确认删除 Tag「${tag}」？此操作不可恢复。`);
+  if (!ok) return;
+  tagManagerBusy.value = true;
+  try {
+    await apiJson("/api/lore/tags", "DELETE", { tag });
+    if (selectedTags.value.includes(tag)) {
+      selectedTags.value = selectedTags.value.filter((x) => x !== tag);
+      syncTagTreeChecked();
+      if ((form.novelId || "").trim()) {
+        await saveNovelLoreTags();
+      }
+    }
+    tagManagerTag.value = "";
+    tagManagerContent.value = "";
+    await loadTags();
+    await loadNovelLoreTags();
+    ElMessage.success("Tag 已删除。");
+  } catch (e: unknown) {
+    const err = e as { message?: string };
+    ElMessage.error(`删除Tag失败：${err?.message || String(e)}`);
+  } finally {
+    tagManagerBusy.value = false;
+  }
+}
+
+async function batchDeleteTagsFromManager() {
+  const rows = Array.from(new Set((tagManagerBatchTags.value || []).map((x) => String(x || "").trim()).filter(Boolean)));
+  if (rows.length === 0) {
+    ElMessage.warning("请先选择要批量删除的Tag。");
+    return;
+  }
+  const ok = window.confirm(`确认批量删除 ${rows.length} 个 Tag？此操作不可恢复。`);
+  if (!ok) return;
+  tagManagerBusy.value = true;
+  try {
+    const res = (await apiJson("/api/lore/tags/batch_delete", "POST", { tags: rows })) as {
+      count?: number;
+      skipped?: Array<{ tag?: string } | string>;
+    };
+    await loadTags();
+    await loadNovelLoreTags();
+    tagManagerBatchTags.value = [];
+    tagManagerTag.value = "";
+    tagManagerContent.value = "";
+    const skippedN = Array.isArray(res?.skipped) ? res.skipped.length : 0;
+    ElMessage.success(`批量删除完成：删除 ${Number(res?.count || 0)}，跳过 ${skippedN}。`);
+  } catch (e: unknown) {
+    const err = e as { message?: string };
+    ElMessage.error(`批量删除失败：${err?.message || String(e)}`);
+  } finally {
+    tagManagerBusy.value = false;
+  }
+}
+
+async function batchReplacePrefixFromManager() {
+  const rows = Array.from(new Set((tagManagerBatchTags.value || []).map((x) => String(x || "").trim()).filter(Boolean)));
+  if (rows.length === 0) {
+    ElMessage.warning("请先选择要批量迁移的Tag。");
+    return;
+  }
+  const oldPrefix = String(tagManagerOldPrefix.value || "").trim();
+  const newPrefix = String(tagManagerNewPrefix.value || "").trim();
+  if (!oldPrefix && !newPrefix) {
+    ElMessage.warning("旧前缀和新前缀不能同时为空。");
+    return;
+  }
+  tagManagerBusy.value = true;
+  try {
+    const res = (await apiJson("/api/lore/tags/batch_replace_prefix", "POST", {
+      tags: rows,
+      old_prefix: oldPrefix,
+      new_prefix: newPrefix,
+    })) as {
+      count?: number;
+      moved?: Array<{ old_tag?: string; new_tag?: string }>;
+      skipped?: Array<{ tag?: string; reason?: string }>;
+      failed?: Array<{ tag?: string; reason?: string }>;
+    };
+    await loadTags();
+    await loadNovelLoreTags();
+    const moved = Array.isArray(res?.moved) ? res.moved : [];
+    tagManagerBatchTags.value = moved.map((x) => String(x?.new_tag || "").trim()).filter(Boolean);
+    if (moved.length > 0) {
+      tagManagerTag.value = String(moved[0]?.new_tag || "").trim();
+      await onTagManagerTagChange();
+    } else {
+      tagManagerTag.value = "";
+      tagManagerContent.value = "";
+    }
+    const skippedN = Array.isArray(res?.skipped) ? res.skipped.length : 0;
+    const failedN = Array.isArray(res?.failed) ? res.failed.length : 0;
+    ElMessage.success(`批量迁移完成：迁移 ${Number(res?.count || 0)}，跳过 ${skippedN}，失败 ${failedN}。`);
+  } catch (e: unknown) {
+    const err = e as { message?: string };
+    ElMessage.error(`批量迁移失败：${err?.message || String(e)}`);
+  } finally {
+    tagManagerBusy.value = false;
+  }
+}
+
 async function createNovel() {
   running.value = true;
   resultText.value = "创建中…";
@@ -777,8 +1357,13 @@ async function createNovel() {
     pov_character_id: pov || null,
     initial_user_task: null,
     lore_tags: selectedTags.value,
+    auto_generate_lore: Boolean(createForm.autoGenerateLore),
+    auto_lore_brief: (createForm.autoLoreBrief || "").trim() || null,
   };
-  let res: { novel_id: string };
+  let res: {
+    novel_id: string;
+    auto_lore?: { generated?: Array<{ tag?: string }>; count?: number };
+  };
   try {
     res = (await apiJson("/api/novels", "POST", payload)) as { novel_id: string };
   } catch (e: unknown) {
@@ -793,9 +1378,22 @@ async function createNovel() {
   createForm.novelTitle = "";
   createForm.startTimeSlot = "";
   createForm.povCharacterId = "";
+  createForm.autoGenerateLore = true;
+  createForm.autoLoreBrief = "";
   createDialogVisible.value = false;
   await loadNovels();
+  await loadTags();
   await loadAnchors();
+  await loadAutoLoreManifest();
+  const generatedTags = (res?.auto_lore?.generated || [])
+    .map((x) => String(x?.tag || "").trim())
+    .filter(Boolean);
+  if (generatedTags.length) {
+    const merged = new Set([...(selectedTags.value || []), ...generatedTags]);
+    selectedTags.value = Array.from(merged);
+    syncTagTreeChecked();
+    ElMessage.success(`已自动生成 ${generatedTags.length} 个设定文件，可在“自动设定”中管理。`);
+  }
   resultText.value = `《${createdTitle}》正在生成本书世界观…`;
   const initPayload = buildAutoInitStatePayload(createdTitle, startSlot, pov);
   await executeRun(createdId, initPayload);
@@ -898,6 +1496,18 @@ function buildRunPayload(runMode: AppRunMode) {
     }
     pendingOptimizeDirection.value = "";
   }
+  const highValueGuidance: Record<string, unknown> = {
+    conflict_type: form.conflictChoice === "自动" ? "" : form.conflictChoice,
+    foreshadow_target:
+      form.foreshadowChoice === "自动"
+        ? ""
+        : form.foreshadowChoice === "优先回收旧伏笔"
+          ? "优先回收开放问题与早期伏笔。"
+          : form.foreshadowChoice === "承接上一章尾钩"
+            ? "优先承接上一章尾部悬念。"
+            : "优先回收并推进当前时间线事件。",
+    supporting_intensity: form.supportingPreset === "自动" ? "" : form.supportingPreset,
+  };
   const payload: Record<string, unknown> = {
     mode: runMode,
     user_task: mergedTask,
@@ -915,6 +1525,7 @@ function buildRunPayload(runMode: AppRunMode) {
       runMode === "optimize_suggestions" && loreTags.length === 0 ? null : loreTags,
     structure_card: null,
     structure_risk_ack: false,
+    shadow_director_guidance: highValueGuidance,
   };
   payload.llm_temperature =
     form.llmTemperature != null && !Number.isNaN(form.llmTemperature)
@@ -1081,14 +1692,14 @@ async function executeRun(novelId: string, payload: Record<string, unknown>) {
           const first = String(blockReasons[0]?.message || "").trim();
           runHint.value = "一致性审计发现高危冲突，已暂停自动下章续写。";
           ElMessage.warning(first || "一致性审计发现高危冲突，请先修复后再续写。");
-          nextChapterHintVisible.value = false;
+          nextChapterHintDraft.value = "";
         } else {
           const prefill =
             modeStr === "optimize_suggestions"
               ? String(donePayload.content || "").trim()
               : String(donePayload.next_status || "").trim();
           nextChapterHintDraft.value = prefill;
-          nextChapterHintVisible.value = true;
+          rightTab.value = "next";
         }
       }
       const chTl = String(donePayload.chapter_timeline_event_id || "").trim();
@@ -1201,11 +1812,12 @@ function buildShadowDigest(
     const short = nextStatus.length > 160 ? `${nextStatus.slice(0, 160)}...` : nextStatus;
     blocks.push(`下章建议摘要：${short}`);
   }
+  const sd = donePayload.shadow_director as Record<string, unknown> | null | undefined;
+  if (sd && typeof sd === "object") {
+    const digest = String(sd.digest || "").trim();
+    if (digest) blocks.push(`导演策略：${digest}`);
+  }
   return blocks.join("\n");
-}
-
-function runInitWorld() {
-  return startPreviewRun("init_state");
 }
 
 async function startPreviewRun(runMode: AppRunMode): Promise<boolean> {
@@ -1214,6 +1826,9 @@ async function startPreviewRun(runMode: AppRunMode): Promise<boolean> {
   suggestedTimelineEventId.value = "";
   suggestedTimelineEventLabel.value = "";
   previewStructureGate.value = null;
+  previewShadowDirector.value = null;
+  shadowDirectorAppliedSummary.value = "";
+  shadowDirectorUndoSnapshot.value = null;
   previewingInput.value = true;
   runPhase.value = "idle";
   runHint.value = "正在生成预览…";
@@ -1230,6 +1845,10 @@ async function startPreviewRun(runMode: AppRunMode): Promise<boolean> {
       asObj?.structure_gate && typeof asObj.structure_gate === "object"
         ? (asObj.structure_gate as Record<string, unknown>)
         : null;
+    previewShadowDirector.value =
+      asObj?.shadow_director && typeof asObj.shadow_director === "object"
+        ? (asObj.shadow_director as Record<string, unknown>)
+        : null;
     setInputPreviewFromApi(data);
     const nextPayload = { ...(built.payload as Record<string, unknown>) };
     if (previewStructureGate.value) {
@@ -1237,8 +1856,28 @@ async function startPreviewRun(runMode: AppRunMode): Promise<boolean> {
         (previewStructureGate.value.card as Record<string, unknown> | undefined) || null;
       nextPayload.structure_risk_ack = false;
     }
+    if (previewShadowDirector.value) {
+      const sugg =
+        previewShadowDirector.value.suggestions && typeof previewShadowDirector.value.suggestions === "object"
+          ? (previewShadowDirector.value.suggestions as Record<string, unknown>)
+          : {};
+      const existing = ((nextPayload.shadow_director_guidance || {}) as Record<string, unknown>) || {};
+      nextPayload.shadow_director_guidance = {
+        ...existing,
+        conflict_type:
+          String(existing.conflict_type || "").trim() || String(sugg.conflict_type || "").trim(),
+        foreshadow_target:
+          String(existing.foreshadow_target || "").trim() || String(sugg.foreshadow_target || "").trim(),
+        supporting_characters: Array.isArray(sugg.supporting_characters)
+          ? (sugg.supporting_characters as Array<Record<string, unknown>>)
+          : [],
+      };
+    } else {
+      nextPayload.shadow_director_guidance = null;
+    }
     pendingRunPayload.value = nextPayload;
     pendingRunNovelId.value = built.novelId;
+    applyShadowDirectorAuto(previewShadowDirector.value);
     runHint.value = "预览已生成，请在弹窗点击「确认并运行」";
     inputPreviewVisible.value = true;
     return true;
@@ -1264,6 +1903,93 @@ function applySuggestedTimelineEvent() {
   form.newEventPrevId = "";
   form.newEventNextId = "";
   ElMessage.success("已采用影子编导建议事件。");
+}
+
+function applyShadowDirectorAuto(packed: Record<string, unknown> | null) {
+  if (!packed || typeof packed !== "object") return;
+  const suggestions =
+    packed.suggestions && typeof packed.suggestions === "object"
+      ? (packed.suggestions as Record<string, unknown>)
+      : null;
+  if (!suggestions) return;
+  shadowDirectorUndoSnapshot.value = {
+    eventMode: form.eventMode,
+    existingEventId: form.existingEventId,
+    newEventTimeSlot: form.newEventTimeSlot,
+    newEventSummary: form.newEventSummary,
+    newEventPrevId: form.newEventPrevId,
+    newEventNextId: form.newEventNextId,
+    focusCharacterIds: [...(form.focusCharacterIds || [])],
+    guidance: null,
+  };
+  const actions: string[] = [];
+  const timelineFocusId = String(suggestions.timeline_focus_id || "").trim();
+  if (
+    timelineFocusId.startsWith("ev:timeline:") &&
+    form.eventMode === "existing" &&
+    !(form.existingEventId || "").trim()
+  ) {
+    form.existingEventId = timelineFocusId;
+    actions.push("事件挂载");
+  }
+  const rows = Array.isArray(suggestions.supporting_characters)
+    ? (suggestions.supporting_characters as Array<Record<string, unknown>>)
+    : [];
+  const merged = new Set((form.focusCharacterIds || []).map((x) => String(x).trim()).filter(Boolean));
+  for (const it of rows) {
+    const id = String(it?.id || "").trim();
+    if (id) merged.add(id);
+  }
+  const mergedList = Array.from(merged);
+  if (mergedList.join("|") !== (form.focusCharacterIds || []).join("|")) {
+    form.focusCharacterIds = mergedList;
+    actions.push("配角补齐");
+  }
+  const conflictType = String(suggestions.conflict_type || "").trim();
+  const foreshadowTarget = String(suggestions.foreshadow_target || "").trim();
+  const guidance: Record<string, unknown> = {
+    conflict_type: conflictType,
+    foreshadow_target: foreshadowTarget,
+    supporting_characters: rows,
+  };
+  if (conflictType || foreshadowTarget || rows.length) {
+    actions.push("冲突与伏笔策略");
+  }
+  const digest = String(packed.digest || "").trim();
+  shadowDirectorAppliedSummary.value = actions.length
+    ? `${actions.join(" + ")}（自动）`
+    : (digest || "已注入导演策略");
+  if (actions.length > 0) {
+    ElMessage.success("影子编导已自动完成细节编排，可继续写作。");
+  }
+  if (pendingRunPayload.value && typeof pendingRunPayload.value === "object") {
+    const next = { ...(pendingRunPayload.value as Record<string, unknown>) };
+    next.shadow_director_guidance = guidance;
+    pendingRunPayload.value = next;
+  }
+}
+
+function undoShadowDirectorApply() {
+  const snap = shadowDirectorUndoSnapshot.value;
+  if (!snap) {
+    ElMessage.info("当前没有可撤销的自动导演动作。");
+    return;
+  }
+  form.eventMode = snap.eventMode;
+  form.existingEventId = snap.existingEventId;
+  form.newEventTimeSlot = snap.newEventTimeSlot;
+  form.newEventSummary = snap.newEventSummary;
+  form.newEventPrevId = snap.newEventPrevId;
+  form.newEventNextId = snap.newEventNextId;
+  form.focusCharacterIds = [...snap.focusCharacterIds];
+  if (pendingRunPayload.value && typeof pendingRunPayload.value === "object") {
+    const next = { ...(pendingRunPayload.value as Record<string, unknown>) };
+    next.shadow_director_guidance = snap.guidance;
+    pendingRunPayload.value = next;
+  }
+  shadowDirectorAppliedSummary.value = "";
+  shadowDirectorUndoSnapshot.value = null;
+  ElMessage.success("已撤销最近一次自动导演。");
 }
 
 function runGenerate() {
@@ -1294,6 +2020,11 @@ async function confirmOptimizeIntent() {
     pendingOptimizeDirection.value = "";
   }
 }
+
+function onNextChapterDraftChange(v: string) {
+  nextChapterHintDraft.value = String(v || "");
+}
+
 async function confirmRunFromPreview() {
   if (!pendingRunPayload.value || !pendingRunNovelId.value) {
     ElMessage.error("没有可运行的预览，请先生成预览。");
@@ -1379,12 +2110,10 @@ async function confirmNextChapterFromHint() {
   }
   userTaskBeforePreviewFromNextChapter.value = form.userTask;
   form.userTask = t;
-  nextChapterHintVisible.value = false;
   const started = await startPreviewRun("write_chapter");
   if (!started) {
     form.userTask = userTaskBeforePreviewFromNextChapter.value;
     userTaskBeforePreviewFromNextChapter.value = null;
-    nextChapterHintVisible.value = true;
   }
 }
 
@@ -1423,8 +2152,10 @@ onMounted(async () => {
     await fetchSettingsPaths();
     await loadTags();
     await loadNovels();
+    await loadNovelLoreTags();
     await loadAnchors();
     await loadCharacterOptions();
+    await graph.loadGraph();
     await preloadAllPreviews();
   } catch (e: unknown) {
     const err = e as { message?: string };
@@ -1436,12 +2167,20 @@ onMounted(async () => {
 watch(
   () => form.novelId,
   async () => {
+    midActiveSection.value = "timeline";
     lastChapterTimelineEventId.value = "";
     suggestedTimelineEventId.value = "";
     suggestedTimelineEventLabel.value = "";
     previewStructureGate.value = null;
+    previewShadowDirector.value = null;
+    shadowDirectorAppliedSummary.value = "";
+    shadowDirectorUndoSnapshot.value = null;
+    autoLoreRows.value = [];
     await loadAnchors();
     await loadCharacterOptions();
+    await graph.loadGraph();
+    await loadAutoLoreManifest();
+    await loadNovelLoreTags();
   }
 );
 
@@ -1451,6 +2190,12 @@ watch(inputPreviewVisible, (visible, prevVisible) => {
       form.userTask = userTaskBeforePreviewFromNextChapter.value;
       userTaskBeforePreviewFromNextChapter.value = null;
     }
+  }
+});
+
+watch(runPhase, (p) => {
+  if (p === "planning" || p === "writing" || p === "error") {
+    insightsDrawerVisible.value = true;
   }
 });
 </script>
@@ -1524,12 +2269,7 @@ watch(inputPreviewVisible, (visible, prevVisible) => {
   box-sizing: border-box;
 }
 .mid-pane {
-  flex: 0 0 auto;
-  min-width: 0;
-  box-sizing: border-box;
-}
-.right-pane {
-  flex: 1 1 0;
+  flex: 1 1 auto;
   min-width: 0;
   box-sizing: border-box;
 }
@@ -1556,6 +2296,9 @@ watch(inputPreviewVisible, (visible, prevVisible) => {
 }
 .resize-handle:hover {
   filter: brightness(0.9);
+}
+.insights-drawer :deep(.el-drawer__body) {
+  padding-top: 8px;
 }
 .muted {
   color: #909399;

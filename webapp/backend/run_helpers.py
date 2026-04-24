@@ -254,6 +254,26 @@ def build_llm_user_task(
     if lore_tags:
         lines.append(f"设定标签（lore_tags）：{', '.join(lore_tags)}")
 
+    sd = req.shadow_director_guidance if isinstance(req.shadow_director_guidance, dict) else None
+    if sd:
+        conflict_type = str(sd.get("conflict_type") or "").strip()
+        foreshadow_target = str(sd.get("foreshadow_target") or "").strip()
+        supporting_rows = sd.get("supporting_characters")
+        if conflict_type:
+            lines.append(f"影子编导推荐冲突类型：{conflict_type}")
+        if foreshadow_target:
+            lines.append(f"影子编导推荐伏笔回收：{foreshadow_target}")
+        if isinstance(supporting_rows, list):
+            sids: List[str] = []
+            for item in supporting_rows:
+                if not isinstance(item, dict):
+                    continue
+                sid = str(item.get("id") or "").strip()
+                if sid:
+                    sids.append(sid)
+            if sids:
+                lines.append(f"影子编导推荐配角：{', '.join(sids)}")
+
     if not lines:
         return base
     suffix = "\n".join(lines)

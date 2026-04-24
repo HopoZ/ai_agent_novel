@@ -36,7 +36,6 @@ def parse_streamed_output_to_pydantic(
     「json_load_with_retry + 第二轮修复」流程解析为 Pydantic。
     """
     log = log or logger
-
     def llm_fix_invoke(fix_prompt: str) -> str:
         fix_messages = [SystemMessage(system), HumanMessage(fix_prompt)]
         resp = model.invoke(fix_messages)
@@ -115,8 +114,12 @@ def parse_streamed_output_to_pydantic(
             return parse_fn(data2)
         except Exception as e2:
             log.exception("Streamed JSON parse failed hard: %s", e2)
+            reason = str(e2).strip().replace("\n", " | ")
+            if len(reason) > 280:
+                reason = reason[:280] + "..."
             raise ValueError(
                 "模型输出 JSON 解析失败（已尝试修复）。"
+                + (f" reason={reason}" if reason else "")
                 + (f" raw_dump={raw_path}" if raw_path else "")
                 + (f" fixed_dump={fixed_path}" if fixed_path else "")
             ) from e2

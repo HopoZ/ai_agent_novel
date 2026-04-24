@@ -60,6 +60,22 @@
               获取模型
             </el-button>
           </div>
+          <div class="api-hint" style="margin-top:6px;">
+            <el-checkbox v-model="forceRefreshModels">强制刷新（跳过缓存）</el-checkbox>
+            <span style="margin-left:8px;">{{ modelCacheHint }}</span>
+          </div>
+          <div v-if="selectedModelCapabilities.length" class="api-hint" style="margin-top:4px;">
+            能力标签：
+            <el-tag
+              v-for="cap in selectedModelCapabilities"
+              :key="`cap-${cap}`"
+              size="small"
+              effect="plain"
+              style="margin-left:6px;"
+            >
+              {{ cap }}
+            </el-tag>
+          </div>
         </el-form-item>
       </template>
       <div class="api-hint">
@@ -94,6 +110,22 @@ const baseUrl = ref("");
 const model = ref("");
 const fetchingModels = ref(false);
 const modelOptions = ref<Array<{ id: string; label: string }>>([]);
+const modelCapabilitiesMap = ref<Record<string, string[]>>({});
+const forceRefreshModels = ref(false);
+const modelCacheHint = ref("");
+const sessionModelCache = new Map<string, {
+  base_url: string;
+  used_endpoint?: string;
+  count: number;
+  model_items: Array<{ id: string; label: string; capabilities: string[] }>;
+  cache_hit?: boolean;
+}>();
+
+const selectedModelCapabilities = computed(() => {
+  const mid = String(model.value || "").trim();
+  if (!mid) return [];
+  return modelCapabilitiesMap.value[mid] || [];
+});
 
 watch(visible, (v) => {
   if (!v) {
@@ -101,6 +133,9 @@ watch(visible, (v) => {
     baseUrl.value = "";
     model.value = "";
     modelOptions.value = [];
+    modelCapabilitiesMap.value = {};
+    modelCacheHint.value = "";
+    forceRefreshModels.value = false;
   }
 });
 
@@ -196,18 +231,36 @@ async function fetchModels() {
     ElMessage.warning("请先填写 Base URL。");
     return;
   }
+  const cacheKey = `${provider.value}|${url}|${key.slice(0, 8)}`;
+  if (!forceRefreshModels.value) {
+    const cached = sessionModelCache.get(cacheKey);
+    if (cached) {
+      modelOptions.value = cached.model_items.map((x) => ({ id: x.id, label: x.label }));
+      modelCapabilitiesMap.value = Object.fromEntries(
+        cached.model_items.map((x) => [x.id, x.capabilities || []])
+      );
+      if (!model.value && cached.model_items.length) {
+        model.value = cached.model_items[0]!.id;
+      }
+      modelCacheHint.value = `已使用会话缓存（${cached.count} 个）`;
+      ElMessage.success("已使用会话缓存模型列表。");
+      return;
+    }
+  }
   fetchingModels.value = true;
   try {
     const res = (await apiJson("/api/settings/models", "POST", {
       provider: provider.value,
       api_key: key,
       base_url: url || null,
+      force_refresh: forceRefreshModels.value,
     })) as {
       base_url?: string;
       used_endpoint?: string;
       models?: string[];
-      model_items?: Array<{ id?: string; name?: string; context_length?: number }>;
+      model_items?: Array<{ id?: string; name?: string; context_length?: number; capabilities?: string[] }>;
       count?: number;
+      cache_hit?: boolean;
     };
     if (res.base_url) {
       baseUrl.value = String(res.base_url);
@@ -219,21 +272,39 @@ async function fetchModels() {
         if (!id) return null;
         const name = String(x?.name || "").trim();
         const ctx = typeof x?.context_length === "number" && x.context_length > 0 ? ` · ${x.context_length} ctx` : "";
+        const caps = Array.isArray(x?.capabilities)
+          ? x.capabilities.map((c) => String(c || "").trim()).filter(Boolean)
+          : [];
+        const capText = caps.length ? ` · [${caps.join("/")}]` : "";
         return {
           id,
-          label: `${id}${name && name !== id ? ` (${name})` : ""}${ctx}`,
+          label: `${id}${name && name !== id ? ` (${name})` : ""}${ctx}${capText}`,
+          capabilities: caps,
         };
       })
-      .filter((x): x is { id: string; label: string } => Boolean(x));
+      .filter((x): x is { id: string; label: string; capabilities: string[] } => Boolean(x));
     modelOptions.value = rows.length
-      ? rows
+      ? rows.map((x) => ({ id: x.id, label: x.label }))
       : (Array.isArray(res.models) ? res.models : [])
           .map((x) => String(x || "").trim())
           .filter(Boolean)
           .map((id) => ({ id, label: id }));
+    modelCapabilitiesMap.value = Object.fromEntries(rows.map((x) => [x.id, x.capabilities || []]));
     if (!model.value && rows.length) {
       model.value = rows[0].id;
     }
+    sessionModelCache.set(cacheKey, {
+      base_url: String(res.base_url || ""),
+      used_endpoint: String(res.used_endpoint || ""),
+      count: Number(res.count ?? modelOptions.value.length),
+      model_items: rows,
+      cache_hit: Boolean(res.cache_hit),
+    });
+    modelCacheHint.value = res.cache_hit
+      ? "后端缓存命中（TTL）"
+      : forceRefreshModels.value
+        ? "已强制刷新（跳过缓存）"
+        : "后端实时拉取并写入缓存";
     ElMessage.success(
       `已获取 ${res.count ?? modelOptions.value.length} 个模型${res.used_endpoint ? `（${res.used_endpoint}）` : ""}`
     );

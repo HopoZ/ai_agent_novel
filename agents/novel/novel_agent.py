@@ -860,7 +860,7 @@ class NovelAgent:
             # 同步写出纯文本到 outputs/（保持脚本版的落盘习惯）
             try:
                 title = state.meta.novel_title or "未命名小说"
-                out_path = write_outputs_txt(title, chapter_index, content_text)
+                out_path = write_outputs_txt(title, chapter_index, content_text, novel_id=novel_id)
                 logger.info("Wrote outputs txt: %s", out_path)
             except Exception as e:
                 logger.warning("Failed to write outputs txt: %s", e)

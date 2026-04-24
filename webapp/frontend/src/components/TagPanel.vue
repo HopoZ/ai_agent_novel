@@ -11,6 +11,15 @@
       <el-button size="small" @click="onSelectAll">全选</el-button>
       <el-button size="small" @click="onInvertSelect">反选</el-button>
       <el-button size="small" type="warning" @click="onClearSelect">清空</el-button>
+      <el-button size="small" :disabled="!canSyncNovelTags" @click="onLoadNovelTags">
+        从本书加载
+      </el-button>
+      <el-button size="small" type="success" :disabled="!canSyncNovelTags" @click="onSaveNovelTags">
+        保存到本书
+      </el-button>
+      <el-button size="small" type="info" @click="onOpenTagManager">
+        管理Tags
+      </el-button>
       <el-button size="small" type="primary" :loading="buildingLoreSummary" @click="onBuildCurrentLoreSummary">
         生成当前Tag摘要
       </el-button>
@@ -79,12 +88,16 @@
 defineProps<{
   tagsLoading: boolean;
   buildingLoreSummary: boolean;
+  canSyncNovelTags: boolean;
   onTagTreeRef: (el: any) => void;
   tagTreeData: any[];
   onSelectAll: () => void;
   onInvertSelect: () => void;
   onClearSelect: () => void;
   onBuildCurrentLoreSummary: () => void;
+  onLoadNovelTags: () => void;
+  onSaveNovelTags: () => void;
+  onOpenTagManager: () => void;
   onTreeCheck: () => void;
   getTagPreview: (tag: string) => string;
   onOpenTagDialog: (tag: string) => void;

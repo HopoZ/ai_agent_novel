@@ -1,8 +1,112 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional
 
 from agents.state.state_models import ChapterRecord, NovelState
+
+
+def _normalize_text(v: str) -> str:
+    return re.sub(r"\s+", "", str(v or "")).lower()
+
+
+def _time_slot_order_value(time_slot: str) -> Optional[int]:
+    """
+    将常见 time_slot 文本映射到可比较序值；无法识别则返回 None。
+    支持：
+    - 数字优先（如 第3日/Day2/2026-04-25）
+    - 中文时段（凌晨/清晨/上午/中午/下午/傍晚/夜）
+    """
+    text = _normalize_text(time_slot)
+    if not text:
+        return None
+    nums = re.findall(r"\d+", text)
+    if nums:
+        # 只取首个数字作为阶段值（保守策略）
+        try:
+            base = int(nums[0]) * 10
+        except Exception:
+            base = 0
+    else:
+        base = 0
+
+    period_rank = 0
+    if any(k in text for k in ("凌晨", "黎明")):
+        period_rank = 1
+    elif any(k in text for k in ("清晨", "早晨", "早上")):
+        period_rank = 2
+    elif any(k in text for k in ("上午",)):
+        period_rank = 3
+    elif any(k in text for k in ("中午", "正午")):
+        period_rank = 4
+    elif any(k in text for k in ("下午",)):
+        period_rank = 5
+    elif any(k in text for k in ("傍晚", "黄昏")):
+        period_rank = 6
+    elif any(k in text for k in ("夜", "深夜", "夜晚")):
+        period_rank = 7
+    if base == 0 and period_rank == 0:
+        return None
+    return base + period_rank
+
+
+def _has_flashback_marker(text: str) -> bool:
+    t = _normalize_text(text)
+    if not t:
+        return False
+    markers = ("回忆", "想起", "往昔", "当年", "昔日", "记得")
+    return any(k in t for k in markers)
+
+
+def _extract_location_hints(text: str) -> set[str]:
+    raw = str(text or "")
+    if not raw.strip():
+        return set()
+    # 提取“在xxx”这类地点短语（保守启发式）
+    matches = re.findall(r"[在于到至往赴回抵达来到进入][\u4e00-\u9fa5A-Za-z0-9]{1,10}", raw)
+    out: set[str] = set()
+    for m in matches:
+        s = _normalize_text(m)
+        if len(s) >= 2:
+            out.add(s)
+    return out
+
+
+def _has_transition_marker(text: str) -> bool:
+    t = _normalize_text(text)
+    if not t:
+        return False
+    markers = (
+        "赶到",
+        "抵达",
+        "前往",
+        "返回",
+        "回到",
+        "转场",
+        "赶路",
+        "一路",
+        "启程",
+        "动身",
+        "传送",
+        "穿梭",
+    )
+    return any(k in t for k in markers)
+
+
+def _chapter_text(chapter: Optional[ChapterRecord]) -> str:
+    if not chapter:
+        return ""
+    beat_text = " ".join(str(b.summary or "") for b in (chapter.beats or []))
+    who_text = " ".join(str(x.status_at_scene or "") for x in (chapter.who_is_present or []))
+    return f"{chapter.content or ''} {beat_text} {who_text}"
+
+
+def _present_ids(chapter: ChapterRecord) -> set[str]:
+    return {
+        str(x.character_id or "").strip()
+        for x in (chapter.who_is_present or [])
+        if str(x.character_id or "").strip()
+    }
 
 
 def _find_timeline_event(state: NovelState, event_id: str) -> Optional[Dict[str, str]]:
@@ -24,6 +128,7 @@ def build_consistency_audit(
     state: NovelState,
     chapter: ChapterRecord,
     mode: str,
+    previous_chapter: Optional[ChapterRecord] = None,
 ) -> Dict[str, Any]:
     """
     第一版一致性审计（规则驱动，无模型调用）：
@@ -114,6 +219,97 @@ def build_consistency_audit(
             }
         )
 
+    # --- 高危规则：时间线反转 ---
+    chapter_text = _chapter_text(chapter)
+    beat_slots = [str(b.time_slot or "").strip() for b in (chapter.beats or []) if str(b.time_slot or "").strip()]
+    slot_values = [_time_slot_order_value(x) for x in beat_slots]
+    checks["timeline_reverse"] = False
+    for idx in range(1, len(slot_values)):
+        cur = slot_values[idx]
+        prev = slot_values[idx - 1]
+        if cur is None or prev is None:
+            continue
+        if cur < prev and (not _has_flashback_marker(chapter_text)):
+            checks["timeline_reverse"] = True
+            issues.append(
+                {
+                    "code": "timeline_reverse",
+                    "level": "high",
+                    "message": f"章节 beats 出现时间逆序：{beat_slots[idx - 1]} -> {beat_slots[idx]}。",
+                    "suggestion": "请重排 beats 时间顺序，或在正文显式补充回忆/倒叙标记。",
+                }
+            )
+            break
+
+    # --- 高危规则：角色瞬移 ---
+    checks["character_teleport"] = False
+    if previous_chapter:
+        prev_ids = _present_ids(previous_chapter)
+        curr_ids = _present_ids(chapter)
+        overlap_ids = [cid for cid in curr_ids if cid in prev_ids]
+        prev_slot_v = _time_slot_order_value(str(previous_chapter.time_slot or ""))
+        curr_slot_v = _time_slot_order_value(chapter_slot)
+        prev_locs = _extract_location_hints(_chapter_text(previous_chapter))
+        curr_locs = _extract_location_hints(chapter_text)
+        same_or_reverse_time = (
+            prev_slot_v is not None
+            and curr_slot_v is not None
+            and curr_slot_v <= prev_slot_v
+        )
+        if overlap_ids and prev_locs and curr_locs and prev_locs.isdisjoint(curr_locs) and same_or_reverse_time:
+            if not _has_transition_marker(chapter_text):
+                checks["character_teleport"] = True
+                issues.append(
+                    {
+                        "code": "character_teleport",
+                        "level": "high",
+                        "message": f"角色 {overlap_ids[0]} 在相邻章节中地点突变且无过渡线索，疑似“瞬移”。",
+                        "suggestion": "请补充移动/转场事件，或修正 time_slot 与出场状态描述。",
+                    }
+                )
+
+    # --- 高危规则：关系突变无事件依据 ---
+    checks["relation_mutation_without_event"] = False
+    relation_mutation_markers = (
+        "反目",
+        "决裂",
+        "背叛",
+        "和解",
+        "结盟",
+        "化敌为友",
+        "从敌对到同盟",
+        "从陌生到亲密",
+    )
+    relation_evidence_markers = (
+        "冲突",
+        "谈判",
+        "误会",
+        "揭露",
+        "救援",
+        "告白",
+        "决斗",
+        "交易",
+        "相认",
+        "事件",
+    )
+    mutation_hit = any(k in chapter_text for k in relation_mutation_markers)
+    if mutation_hit:
+        event_summary = str((event_row or {}).get("summary") or "")
+        beat_text = " ".join(str(b.summary or "") for b in (chapter.beats or []))
+        evidence_text = f"{event_summary} {beat_text}"
+        has_event_binding = bool(chapter_event_id and event_row)
+        has_evidence = any(k in evidence_text for k in relation_evidence_markers)
+        if (not has_event_binding) or (not has_evidence):
+            checks["relation_mutation_without_event"] = True
+            issues.append(
+                {
+                    "code": "relation_mutation_without_event",
+                    "level": "high",
+                    "message": "章节出现关系突变信号，但未提供可追溯事件依据。",
+                    "suggestion": "请绑定支撑该关系变化的时间线事件，并在 beats 中写明触发过程。",
+                }
+            )
+
     score = 100
     for it in issues:
         level = str(it.get("level") or "").lower()
@@ -153,6 +349,12 @@ def build_consistency_audit(
         recommended_actions.append("将 POV 角色加入 who_is_present，保持叙事视角一致。")
     if "beats_too_few" in code_set or "content_too_short" in code_set:
         recommended_actions.append("补齐章节结构卡：目标、冲突、转折、结果。")
+    if "timeline_reverse" in code_set:
+        recommended_actions.append("校正章节时间顺序；若为倒叙，请在章节中显式标注回忆触发点。")
+    if "character_teleport" in code_set:
+        recommended_actions.append("为关键角色补充移动/转场桥段，避免同时间段跨地点瞬移。")
+    if "relation_mutation_without_event" in code_set:
+        recommended_actions.append("为关系变化绑定可追溯事件，并在 beats 标注变化原因与过程。")
 
     return {
         "score": score,
