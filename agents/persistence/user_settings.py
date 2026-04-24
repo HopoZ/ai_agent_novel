@@ -1,4 +1,4 @@
-"""用户级设置（如 DeepSeek API Key），持久化在 storage 目录下，供桌面安装版使用。"""
+"""用户级设置（如 LLM 提供商配置），持久化在 storage 目录下，供桌面安装版使用。"""
 
 from __future__ import annotations
 
@@ -79,3 +79,56 @@ def save_deepseek_api_key(api_key: str) -> None:
 
 def clear_saved_deepseek_api_key() -> None:
     save_deepseek_api_key("")
+
+
+def get_saved_llm_provider() -> str:
+    v = str(load_settings_file().get("llm_provider") or "").strip().lower()
+    return v if v in {"deepseek", "openai_compatible"} else "deepseek"
+
+
+def save_llm_provider(provider: str) -> None:
+    p = str(provider or "").strip().lower()
+    if p not in {"deepseek", "openai_compatible"}:
+        p = "deepseek"
+    data = load_settings_file()
+    data["llm_provider"] = p
+    _atomic_write_json(_settings_path(), data)
+
+
+def get_saved_openai_compatible_settings() -> dict[str, str]:
+    data = load_settings_file()
+    return {
+        "api_key": str(data.get("openai_compatible_api_key") or "").strip(),
+        "base_url": str(data.get("openai_compatible_base_url") or "").strip(),
+        "model": str(data.get("openai_compatible_model") or "").strip(),
+    }
+
+
+def save_openai_compatible_settings(
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+) -> None:
+    data = load_settings_file()
+    k = str(api_key or "").strip()
+    b = str(base_url or "").strip().rstrip("/")
+    m = str(model or "").strip()
+    if k:
+        data["openai_compatible_api_key"] = k
+    else:
+        data.pop("openai_compatible_api_key", None)
+    if b:
+        data["openai_compatible_base_url"] = b
+    else:
+        data.pop("openai_compatible_base_url", None)
+    if m:
+        data["openai_compatible_model"] = m
+    else:
+        data.pop("openai_compatible_model", None)
+    path = _settings_path()
+    if not data:
+        if path.is_file():
+            path.unlink()
+        return
+    _atomic_write_json(path, data)

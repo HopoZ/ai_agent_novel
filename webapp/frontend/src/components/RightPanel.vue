@@ -13,6 +13,24 @@
     <div v-if="tokenUsageText" class="output-path-tip">
       本次 Token：<code>{{ tokenUsageText }}</code>
     </div>
+    <el-alert
+      v-if="shadowDigestText"
+      class="shadow-digest"
+      type="success"
+      :closable="false"
+      title="影子编导 · 结构摘要"
+      :description="shadowDigestText"
+      show-icon
+    />
+    <el-alert
+      v-if="consistencyAuditText"
+      class="shadow-digest"
+      :type="consistencyAuditSeverity === 'high' ? 'error' : 'warning'"
+      :closable="false"
+      title="一致性审计"
+      :description="consistencyAuditText"
+      show-icon
+    />
     <div v-if="lastOutputPath" class="output-path-tip">
       输出文件：<code>{{ lastOutputPath }}</code>
     </div>
@@ -65,6 +83,9 @@ const props = defineProps<{
   runPhaseLabel: string;
   runHint: string;
   tokenUsageText: string;
+  shadowDigestText: string;
+  consistencyAuditText: string;
+  consistencyAuditSeverity: "ok" | "warn" | "high";
   lastOutputPath: string;
   rightTab: "result" | "next" | "plan" | "graph";
   graphView: "people" | "events" | "mixed";
@@ -161,6 +182,9 @@ watch(
   font-size: 12px;
   color: #606266;
   word-break: break-all;
+}
+.shadow-digest {
+  margin-top: 8px;
 }
 .result-pre {
   max-height: 48vh;

@@ -30,11 +30,12 @@ pip install -r requirements.txt
 
 ### 2. 配置 API 密钥
 
-在仓库根目录创建 `.env`：
+统一在 Web 端右上角「API 密钥」里配置并保存（本地 `storage/user_settings.json`）：
 
-```bash
-DEEPSEEK_API_KEY=<your_api_key>
-```
+- `DeepSeek`：填写 API Key
+- `OpenAI 兼容`：填写 API Key + Base URL + Model
+
+当前项目默认按前端/Electron 本地配置生效，不再依赖环境变量优先级。
 
 ### 3. 准备设定
 
@@ -75,8 +76,9 @@ python -m cli
 
 - **先预览再运行**：主流程先请求 `preview_input`，确认后再 `run_stream`，减少误触耗 token。
 - **流式与可中止**：规划 / 正文 / 优化建议等 SSE 阶段可观察；可中止以节省 token。
+- **影子编导（轻介入）**：预输入阶段给出推荐挂载事件；可一键采用，未显式选事件时可自动托底采用，减少时序手工成本。
 - **下章续写**：写章、修订、扩写或优化完成后可弹出「下章提示」，确认后沿用「生成正文」同款预览链，并尽量自动绑定本章时间线事件。
-- **图谱**：人物 / 事件 / 混合视图，全屏编辑节点与边（数据落在 `storage/novels/<id>/novel.db` 中四表与 `novel_state`）。
+- **图谱专业管理**：人物 / 事件 / 混合视图，全屏编辑节点与边；支持节点/边类型筛选、孤立节点检查、命中计数搜索、新建后自动聚焦、导出 JSON 快照（数据落在 `storage/novels/<id>/novel.db` 四表与 `novel_state`）。
 - **前端适配**：窄屏（约 ≤1180px）三栏纵向堆叠；宽屏下随窗口压缩左/中栏宽度，减少横向滚动；中间表单区折叠为手风琴（一次只展开一块）。
 
 ---

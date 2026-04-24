@@ -30,7 +30,7 @@
         @close="dismissFirstRun"
       >
         <ol class="first-run-list">
-          <li>点击右上角「API 密钥」，填写 DeepSeek API（或在本机设置环境变量 <code>DEEPSEEK_API_KEY</code>）。</li>
+          <li>点击右上角「API 密钥」，按提供商填写并保存（DeepSeek 或 OpenAI 兼容）。</li>
           <li>点击左侧「打开输入」，在 <strong>lores</strong> 文件夹内按子目录放入 <strong>.md</strong> 设定（路径即标签）；保存后左侧勾选标签。</li>
           <li>写作生成的正文在「打开输出」对应目录。</li>
         </ol>
@@ -70,11 +70,13 @@
           :anchors-loading="anchorsLoading"
           :anchors="anchors"
           :inferred-time-slot-hint="inferredTimeSlotHint"
+          :suggested-timeline-event-label="suggestedTimelineEventLabel"
           :all-character-options="allCharacterSelectOptions"
           :previewing-input="previewingInput"
           :open-create-dialog="openCreateDialog"
           :on-pov-change="onPovChange"
           :on-focus-change="onFocusChange"
+          :apply-suggested-timeline-event="applySuggestedTimelineEvent"
           :open-role-manager="openRoleManager"
           :run-generate="runGenerate"
           :run-expand="runExpand"
@@ -93,6 +95,9 @@
           :run-phase-label="runPhaseLabel"
           :run-hint="runHint"
           :token-usage-text="tokenUsageText"
+          :shadow-digest-text="shadowDigestText"
+          :consistency-audit-text="consistencyAuditText"
+          :consistency-audit-severity="consistencyAuditSeverity"
           :last-output-path="lastOutputPath"
           :right-tab="rightTab"
           :graph-view="graph.graphView"
@@ -127,8 +132,10 @@
     :running="running"
     :pending-run-starting="pendingRunStarting"
     :pending-run-payload="pendingRunPayload"
+    :structure-gate="previewStructureGate"
     @copy-json="copyInputPreviewJson"
     @confirm="confirmRunFromPreview"
+    @confirm-risk="confirmRunFromPreviewRisk"
   />
 
   <GraphDialogs :novel-id="form.novelId" />
@@ -245,6 +252,9 @@ const runPhase = ref<
 const runHint = ref("");
 const lastOutputPath = ref("");
 const tokenUsageText = ref("");
+const shadowDigestText = ref("");
+const consistencyAuditText = ref("");
+const consistencyAuditSeverity = ref<"ok" | "warn" | "high">("ok");
 
 /** 当前 run_stream 的 mode（用于独立初始化窗口的 running 态等） */
 const currentStreamMode = ref("");
@@ -275,6 +285,7 @@ const previewingInput = ref(false);
 const inputPreviewVisible = ref(false);
 const inputPreviewData = ref<Record<string, unknown> | null>(null);
 const inputPreviewOpenStages = ref<string[]>([]);
+const previewStructureGate = ref<Record<string, unknown> | null>(null);
 
 function setInputPreviewFromApi(data: unknown) {
   inputPreviewData.value = data && typeof data === "object" ? (data as Record<string, unknown>) : null;
@@ -368,6 +379,9 @@ const pendingOptimizeDirection = ref("");
 const userTaskBeforePreviewFromNextChapter = ref<string | null>(null);
 /** 最近一次写章/修订/扩写完成后，本章归属的时间线事件 id（用于「下章提示 → 生成下一章」默认同属该事件） */
 const lastChapterTimelineEventId = ref("");
+/** preview_input 给出的“影子编导”建议挂载事件 */
+const suggestedTimelineEventId = ref("");
+const suggestedTimelineEventLabel = ref("");
 
 const createForm = reactive<{
   novelTitle: string;
@@ -838,6 +852,20 @@ function buildRunPayload(runMode: AppRunMode) {
     return null;
   }
 
+  // 影子编导无感托底：未选已有事件时，自动采用推荐事件，减少手动操作成本。
+  if (
+    runMode !== "optimize_suggestions" &&
+    runMode !== "init_state" &&
+    form.eventMode === "existing" &&
+    !(form.existingEventId || "").trim()
+  ) {
+    const suggested = (suggestedTimelineEventId.value || "").trim();
+    if (suggested.startsWith("ev:timeline:")) {
+      form.existingEventId = suggested;
+      ElMessage.success("已自动采用影子编导推荐事件。");
+    }
+  }
+
   const loreTags = selectedTags.value || [];
   if (loreTags.length === 0 && runMode !== "optimize_suggestions") {
     ElMessage.error("请至少勾选 1 项设定（lores 下对应标签）。");
@@ -885,6 +913,8 @@ function buildRunPayload(runMode: AppRunMode) {
     current_map: (form.currentMap || "").trim() || null,
     lore_tags:
       runMode === "optimize_suggestions" && loreTags.length === 0 ? null : loreTags,
+    structure_card: null,
+    structure_risk_ack: false,
   };
   payload.llm_temperature =
     form.llmTemperature != null && !Number.isNaN(form.llmTemperature)
@@ -920,6 +950,9 @@ async function executeRun(novelId: string, payload: Record<string, unknown>) {
   }
   lastOutputPath.value = "";
   tokenUsageText.value = "";
+  shadowDigestText.value = "";
+  consistencyAuditText.value = "";
+  consistencyAuditSeverity.value = "ok";
   nextStatusText.value = "";
   planStreamText.value = "";
   try {
@@ -1022,24 +1055,50 @@ async function executeRun(novelId: string, payload: Record<string, unknown>) {
       }
       refreshStreamText();
 
+      const blockedByStructure = Boolean(donePayload.blocked) && String(donePayload.block_type || "") === "structure_gate";
+      if (blockedByStructure) {
+        const gate = (donePayload.structure_gate || null) as Record<string, unknown> | null;
+        previewStructureGate.value = gate;
+        const msg = String(gate?.risk_message || "结构卡未满足最小项，已阻断本次生成。").trim();
+        runHint.value = "结构卡最小项未满足，请补齐后再试。";
+        ElMessage.warning(msg);
+        return;
+      }
+
       const modesWithNextChapterHint = new Set([
         "write_chapter",
         "revise_chapter",
         "expand_chapter",
         "optimize_suggestions",
       ]);
+      const auditObj = (donePayload.consistency_audit || null) as Record<string, unknown> | null;
+      const blockReasons = Array.isArray(auditObj?.block_reasons)
+        ? (auditObj?.block_reasons as Array<Record<string, unknown>>)
+        : [];
+      const blockedNextChapterHint = blockReasons.length > 0;
       if (modesWithNextChapterHint.has(modeStr)) {
-        const prefill =
-          modeStr === "optimize_suggestions"
-            ? String(donePayload.content || "").trim()
-            : String(donePayload.next_status || "").trim();
-        nextChapterHintDraft.value = prefill;
-        nextChapterHintVisible.value = true;
+        if (blockedNextChapterHint) {
+          const first = String(blockReasons[0]?.message || "").trim();
+          runHint.value = "一致性审计发现高危冲突，已暂停自动下章续写。";
+          ElMessage.warning(first || "一致性审计发现高危冲突，请先修复后再续写。");
+          nextChapterHintVisible.value = false;
+        } else {
+          const prefill =
+            modeStr === "optimize_suggestions"
+              ? String(donePayload.content || "").trim()
+              : String(donePayload.next_status || "").trim();
+          nextChapterHintDraft.value = prefill;
+          nextChapterHintVisible.value = true;
+        }
       }
       const chTl = String(donePayload.chapter_timeline_event_id || "").trim();
       if (chTl.startsWith("ev:timeline:")) {
         lastChapterTimelineEventId.value = chTl;
       }
+      shadowDigestText.value = buildShadowDigest(donePayload, modeStr, chTl);
+      const audit = formatConsistencyAudit(donePayload.consistency_audit);
+      consistencyAuditText.value = audit.text;
+      consistencyAuditSeverity.value = audit.severity;
     }
     await loadAnchors();
     if (graph.graphFullscreenVisible || rightTab.value === "graph") {
@@ -1068,6 +1127,83 @@ async function executeRun(novelId: string, payload: Record<string, unknown>) {
   }
 }
 
+function formatConsistencyAudit(raw: unknown): { text: string; severity: "ok" | "warn" | "high" } {
+  if (!raw || typeof raw !== "object") return { text: "", severity: "ok" };
+  const x = raw as {
+    score?: unknown;
+    severity?: unknown;
+    issue_count?: unknown;
+    block_reasons?: Array<{ message?: unknown }>;
+    recommended_actions?: Array<unknown>;
+    issues?: Array<{ level?: unknown; message?: unknown; suggestion?: unknown }>;
+  };
+  const sev = String(x.severity || "ok");
+  const severity: "ok" | "warn" | "high" = sev === "high" ? "high" : sev === "warn" ? "warn" : "ok";
+  const score = Number(x.score ?? NaN);
+  const issueCount = Number(x.issue_count ?? 0);
+  const issues = Array.isArray(x.issues) ? x.issues : [];
+  const lines: string[] = [];
+  lines.push(`评分：${Number.isFinite(score) ? score : "-"} / 100`);
+  lines.push(`问题数：${Number.isFinite(issueCount) ? issueCount : issues.length}`);
+  if (!issues.length) {
+    lines.push("未发现明显一致性问题。");
+  } else {
+    const top = issues.slice(0, 4);
+    for (const it of top) {
+      const lvl = String(it?.level || "warn").toUpperCase();
+      const msg = String(it?.message || "").trim();
+      const sug = String(it?.suggestion || "").trim();
+      if (msg) lines.push(`[${lvl}] ${msg}`);
+      if (sug) lines.push(`  建议：${sug}`);
+    }
+    if (issues.length > top.length) {
+      lines.push(`... 另有 ${issues.length - top.length} 条，可在后端返回中查看详情。`);
+    }
+  }
+  const br = Array.isArray(x.block_reasons) ? x.block_reasons : [];
+  if (br.length > 0) {
+    lines.push("阻断原因：");
+    for (const it of br.slice(0, 3)) {
+      const msg = String(it?.message || "").trim();
+      if (msg) lines.push(`- ${msg}`);
+    }
+  }
+  const acts = Array.isArray(x.recommended_actions) ? x.recommended_actions : [];
+  if (acts.length > 0) {
+    lines.push("修复动作：");
+    for (const a of acts.slice(0, 3)) {
+      const txt = String(a || "").trim();
+      if (txt) lines.push(`- ${txt}`);
+    }
+  }
+  return { text: lines.join("\n"), severity };
+}
+
+function buildShadowDigest(
+  donePayload: Record<string, unknown>,
+  modeStr: string,
+  chapterTimelineEventId: string
+): string {
+  const blocks: string[] = [];
+  if (modeStr) blocks.push(`模式：${modeStr}`);
+  const chapterIndex = donePayload.chapter_index;
+  if (chapterIndex != null && chapterIndex !== "") blocks.push(`章节：${String(chapterIndex)}`);
+  if (chapterTimelineEventId) blocks.push(`事件归属：${chapterTimelineEventId}`);
+  const plan = donePayload.plan as Record<string, unknown> | null | undefined;
+  if (plan && typeof plan === "object") {
+    const beats = Array.isArray(plan.beats) ? plan.beats.length : 0;
+    if (beats > 0) blocks.push(`规划节拍：${beats} 条`);
+    const timeSlot = String(plan.time_slot || "").trim();
+    if (timeSlot) blocks.push(`时间段：${timeSlot}`);
+  }
+  const nextStatus = String(donePayload.next_status || "").trim();
+  if (nextStatus) {
+    const short = nextStatus.length > 160 ? `${nextStatus.slice(0, 160)}...` : nextStatus;
+    blocks.push(`下章建议摘要：${short}`);
+  }
+  return blocks.join("\n");
+}
+
 function runInitWorld() {
   return startPreviewRun("init_state");
 }
@@ -1075,6 +1211,9 @@ function runInitWorld() {
 async function startPreviewRun(runMode: AppRunMode): Promise<boolean> {
   const built = buildRunPayload(runMode);
   if (!built) return false;
+  suggestedTimelineEventId.value = "";
+  suggestedTimelineEventLabel.value = "";
+  previewStructureGate.value = null;
   previewingInput.value = true;
   runPhase.value = "idle";
   runHint.value = "正在生成预览…";
@@ -1084,8 +1223,21 @@ async function startPreviewRun(runMode: AppRunMode): Promise<boolean> {
       "POST",
       built.payload
     );
+    const asObj = data as Record<string, unknown>;
+    suggestedTimelineEventId.value = String(asObj?.suggested_timeline_event_id || "").trim();
+    suggestedTimelineEventLabel.value = String(asObj?.suggested_timeline_event_label || "").trim();
+    previewStructureGate.value =
+      asObj?.structure_gate && typeof asObj.structure_gate === "object"
+        ? (asObj.structure_gate as Record<string, unknown>)
+        : null;
     setInputPreviewFromApi(data);
-    pendingRunPayload.value = built.payload;
+    const nextPayload = { ...(built.payload as Record<string, unknown>) };
+    if (previewStructureGate.value) {
+      nextPayload.structure_card =
+        (previewStructureGate.value.card as Record<string, unknown> | undefined) || null;
+      nextPayload.structure_risk_ack = false;
+    }
+    pendingRunPayload.value = nextPayload;
     pendingRunNovelId.value = built.novelId;
     runHint.value = "预览已生成，请在弹窗点击「确认并运行」";
     inputPreviewVisible.value = true;
@@ -1097,6 +1249,21 @@ async function startPreviewRun(runMode: AppRunMode): Promise<boolean> {
   } finally {
     previewingInput.value = false;
   }
+}
+
+function applySuggestedTimelineEvent() {
+  const eid = (suggestedTimelineEventId.value || "").trim();
+  if (!eid.startsWith("ev:timeline:")) {
+    ElMessage.warning("当前没有可采用的事件建议。");
+    return;
+  }
+  form.eventMode = "existing";
+  form.existingEventId = eid;
+  form.newEventTimeSlot = "";
+  form.newEventSummary = "";
+  form.newEventPrevId = "";
+  form.newEventNextId = "";
+  ElMessage.success("已采用影子编导建议事件。");
 }
 
 function runGenerate() {
@@ -1136,10 +1303,30 @@ async function confirmRunFromPreview() {
   runHint.value = "已确认，准备开始运行...";
   inputPreviewVisible.value = false;
   try {
+    const payload = { ...(pendingRunPayload.value as Record<string, unknown>) };
+    payload.structure_risk_ack = false;
     await executeRun(
       pendingRunNovelId.value,
-      pendingRunPayload.value as Record<string, unknown>
+      payload
     );
+  } finally {
+    pendingRunStarting.value = false;
+    userTaskBeforePreviewFromNextChapter.value = null;
+  }
+}
+
+async function confirmRunFromPreviewRisk() {
+  if (!pendingRunPayload.value || !pendingRunNovelId.value) {
+    ElMessage.error("没有可运行的预览，请先生成预览。");
+    return;
+  }
+  pendingRunStarting.value = true;
+  runHint.value = "已确认风险，准备开始运行...";
+  inputPreviewVisible.value = false;
+  try {
+    const payload = { ...(pendingRunPayload.value as Record<string, unknown>) };
+    payload.structure_risk_ack = true;
+    await executeRun(pendingRunNovelId.value, payload);
   } finally {
     pendingRunStarting.value = false;
     userTaskBeforePreviewFromNextChapter.value = null;
@@ -1250,6 +1437,9 @@ watch(
   () => form.novelId,
   async () => {
     lastChapterTimelineEventId.value = "";
+    suggestedTimelineEventId.value = "";
+    suggestedTimelineEventLabel.value = "";
+    previewStructureGate.value = null;
     await loadAnchors();
     await loadCharacterOptions();
   }

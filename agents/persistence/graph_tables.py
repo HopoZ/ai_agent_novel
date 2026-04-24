@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -583,7 +583,7 @@ def persist_chapter_artifacts(
     save_chapter(novel_id, chapter, chapter_preset_name=chapter_preset_name)
 
     next_state.meta.current_chapter_index = chapter.chapter_index
-    next_state.meta.updated_at = datetime.utcnow()
+    next_state.meta.updated_at = datetime.now(UTC)
     save_state(novel_id, next_state)
 
     ensure_graph_tables(novel_id)

@@ -117,6 +117,25 @@
           <div class="muted" style="margin-top:6px;">
             预计本章时间段：{{ inferredTimeSlotHint || "（等待选择事件）" }}
           </div>
+          <el-alert
+            v-if="suggestedTimelineEventLabel"
+            type="success"
+            :closable="false"
+            style="margin-top:8px;"
+          >
+            <template #title>
+              影子编导建议：可挂载到「{{ suggestedTimelineEventLabel }}」
+            </template>
+            <el-button
+              size="small"
+              type="primary"
+              text
+              style="padding:0;"
+              @click="applySuggestedTimelineEvent"
+            >
+              一键采用
+            </el-button>
+          </el-alert>
         </el-collapse-item>
 
         <el-collapse-item name="roles" title="角色">
@@ -284,12 +303,14 @@ defineProps<{
   anchorsLoading: boolean;
   anchors: Array<{ id: string; label: string; type: string; time_slot: string }>;
   inferredTimeSlotHint: string;
+  suggestedTimelineEventLabel: string;
   allCharacterOptions: Array<{ id: string; label: string }>;
   previewingInput: boolean;
   onMidSectionChange: (v: string | string[]) => void;
   openCreateDialog: () => void;
   onPovChange: (v: any) => void;
   onFocusChange: (v: any) => void;
+  applySuggestedTimelineEvent: () => void;
   openRoleManager: () => void;
   runGenerate: () => void;
   runExpand: () => void;

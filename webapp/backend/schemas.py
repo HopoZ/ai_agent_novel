@@ -92,6 +92,14 @@ class RunModeRequest(BaseModel):
         le=200000,
         description="max_tokens（单次生成上限，依供应商支持为准）",
     )
+    structure_card: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="章节结构卡（goal/conflict/turning_point/foreshadow_payoff/event_binding）",
+    )
+    structure_risk_ack: bool = Field(
+        default=False,
+        description="当结构卡未满足最小要求时，是否确认“继续生成（风险）”",
+    )
 
 
 # --- 图谱 API 请求体（原 server.py 内联模型） ---
@@ -136,4 +144,20 @@ class GraphEdgePatchRequest(BaseModel):
 
 class ApiKeyUpdateRequest(BaseModel):
     api_key: str = ""
+    provider: Optional[str] = None  # deepseek | openai_compatible
+    base_url: Optional[str] = None
+    model: Optional[str] = None
+
+
+class ApiModelListRequest(BaseModel):
+    provider: Optional[str] = None  # deepseek | openai_compatible
+    api_key: str = ""
+    base_url: Optional[str] = None
+
+
+class ApiConnectionTestRequest(BaseModel):
+    provider: Optional[str] = None  # deepseek | openai_compatible
+    api_key: str = ""
+    base_url: Optional[str] = None
+    model: Optional[str] = None
 

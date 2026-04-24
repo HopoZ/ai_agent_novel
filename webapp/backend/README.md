@@ -39,6 +39,7 @@ python -m uvicorn webapp.backend.server:app --reload --port 8000
 | `graph_payload.py` | 由 `state` + 四表拼装 `GET /graph` 的 nodes/edges JSON（只读） |
 | `routes/__init__.py` | 路由包 |
 | `routes/pages.py` | `GET /`：Vite `index.html` 或旧模板回退 |
+| `routes/settings.py` | `/api/settings`、`/api/settings/api_key`、`/api/settings/models`、`/api/settings/test_connection`（LLM 提供商配置、模型列表、连通性测试） |
 | `routes/lore.py` | `/api/lore/*`：`POST summary/build`、`GET summary/{id}`、`GET tags`、`GET preview` |
-| `routes/novels.py` | `/api/novels/*`：列表、创建、`state`、`character_entities`、按章 `chapters/{i}`、`anchors`、`run`、`preview_input`、`run_stream` |
+| `routes/novels.py` | `/api/novels/*`：列表、创建、`state`、`character_entities`、按章 `chapters/{i}`、`anchors`、`run`、`preview_input`、`run_stream`；写作模式含结构卡门禁 `structure_gate`（自动锁定 + 风险确认）与写后 `consistency_audit` |
 | `routes/graph.py` | `/api/novels/{id}/graph`（GET）；`PATCH graph/node`、`POST graph/nodes`、`DELETE graph/nodes`、`POST graph/relationship`、`PATCH timeline-neighbors`、`PATCH graph/edge` |

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
@@ -18,8 +18,8 @@ class NovelMeta(BaseModel):
     novel_id: str
     # 前端展示用的小说名（uuid 保持为内部编号）
     novel_title: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     # 当前状态是否已经由 LLM 初始化（填充完整人物/世界）
     initialized: bool = False
@@ -244,7 +244,7 @@ class ChapterRecord(BaseModel):
     chapter_index: int
     # 用户可选的章节预设名，用于生成唯一章节文件名
     chapter_preset_name: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     # 多章可指向同一时间线事件；缺省时仍可用 time_slot 与 timeline 弱对齐
     timeline_event_id: Optional[str] = None
@@ -259,3 +259,6 @@ class ChapterRecord(BaseModel):
 
     # 记录 token 使用，便于后续评测与预算控制
     usage_metadata: Dict[str, Any] = Field(default_factory=dict)
+    # 写前结构卡（C 方案）：默认自动补齐并锁定，供写后复盘与治理
+    structure_card: Dict[str, Any] = Field(default_factory=dict)
+    structure_card_locked: bool = False

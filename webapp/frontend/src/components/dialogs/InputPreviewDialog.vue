@@ -9,11 +9,13 @@ const props = defineProps<{
   running: boolean;
   pendingRunStarting: boolean;
   pendingRunPayload: unknown;
+  structureGate: Record<string, unknown> | null;
 }>();
 
 const emit = defineEmits<{
   copyJson: [];
   confirm: [];
+  confirmRisk: [];
 }>();
 
 const stages = computed(() => {
@@ -64,6 +66,26 @@ function stageDisplayTitle(name: string): string {
         </el-descriptions-item>
       </el-descriptions>
 
+      <section v-if="structureGate" class="structure-card-block">
+        <header class="structure-card-title">
+          章节结构卡（系统已自动锁定）
+        </header>
+        <el-alert
+          :type="(structureGate as any).needs_ack ? 'warning' : 'success'"
+          :closable="false"
+          :title="(structureGate as any).needs_ack ? '最小结构未满足，可返回补齐或继续生成（风险）' : '最小结构已满足，将自动进入生成'"
+          :description="String((structureGate as any).risk_message || '')"
+          show-icon
+        />
+        <el-descriptions :column="1" border size="small" class="structure-card-desc">
+          <el-descriptions-item label="目标">{{ ((structureGate as any).card || {}).goal || "—" }}</el-descriptions-item>
+          <el-descriptions-item label="冲突">{{ ((structureGate as any).card || {}).conflict || "—" }}</el-descriptions-item>
+          <el-descriptions-item label="转折">{{ ((structureGate as any).card || {}).turning_point || "—" }}</el-descriptions-item>
+          <el-descriptions-item label="伏笔回收">{{ ((structureGate as any).card || {}).foreshadow_payoff || "—" }}</el-descriptions-item>
+          <el-descriptions-item label="事件归属">{{ ((structureGate as any).card || {}).event_binding || "—" }}</el-descriptions-item>
+        </el-descriptions>
+      </section>
+
       <el-collapse v-model="openStages" class="input-stages-collapse">
         <el-collapse-item
           v-for="(st, idx) in stages"
@@ -92,9 +114,19 @@ function stageDisplayTitle(name: string): string {
         <el-button @click="emit('copyJson')" :disabled="!inputPreviewData">复制详情</el-button>
         <el-button @click="visible = false">关闭</el-button>
         <el-button
+          v-if="(structureGate as any)?.needs_ack"
+          type="warning"
+          :disabled="running || !pendingRunPayload"
+          :loading="pendingRunStarting"
+          @click="emit('confirmRisk')"
+        >
+          继续生成（风险）
+        </el-button>
+        <el-button
           type="primary"
           :disabled="running || !pendingRunPayload"
           :loading="pendingRunStarting"
+          v-if="!(structureGate as any)?.needs_ack"
           @click="emit('confirm')"
         >
           确认并运行
@@ -131,6 +163,20 @@ function stageDisplayTitle(name: string): string {
 }
 .input-stages-collapse {
   border: none;
+}
+.structure-card-block {
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.structure-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+.structure-card-desc {
+  margin-top: 4px;
 }
 .input-stages-collapse :deep(.el-collapse-item__header) {
   font-weight: 600;

@@ -22,6 +22,9 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
         ]"
       />
       <el-button size="small" :loading="graph.graphLoading" @click="graph.loadGraph">刷新图谱</el-button>
+      <el-button size="small" type="primary" plain @click="graph.exportGraphJson" :disabled="!novelId">
+        导出 JSON
+      </el-button>
       <el-button size="small" type="success" plain @click="graph.openGraphNodeCreate" :disabled="!novelId">
         新建节点
       </el-button>
@@ -33,6 +36,7 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
         placeholder="搜索节点（id、名称、类型、简介等）"
         @clear="graph.clearGraphSearch"
         @keyup.enter="graph.focusNextGraphSearchMatch"
+        @keyup.shift.enter="graph.focusPrevGraphSearchMatch"
       >
         <template #prefix>
           <el-icon class="graph-search-prefix" aria-hidden="true"><Search /></el-icon>
@@ -41,8 +45,47 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
       <el-button size="small" @click="graph.focusNextGraphSearchMatch" :disabled="!novelId">
         下一匹配
       </el-button>
+      <el-button size="small" @click="graph.focusPrevGraphSearchMatch" :disabled="!novelId">
+        上一匹配
+      </el-button>
+      <el-tag v-if="(graph.graphSearchQuery || '').trim()" size="small" type="warning" effect="light">
+        命中 {{ graph.graphSearchMatchCount }} 个节点
+      </el-tag>
       <el-button size="small" text type="primary" @click="graph.clearGraphSearch">清空搜索</el-button>
       <span class="muted">点击节点可编辑/删除；滚轮缩放，拖拽平移。有搜索词时未命中节点变淡，边随之减弱。</span>
+    </div>
+    <div style="height:10px;"></div>
+    <div class="graph-admin-panel">
+      <div class="graph-filter-grid">
+        <div class="graph-filter-col">
+          <el-text size="small" class="muted graph-filter-title">节点筛选</el-text>
+          <el-checkbox-group v-model="graph.graphNodeTypeFilters" class="graph-filter-checks">
+            <el-checkbox label="character">人物</el-checkbox>
+            <el-checkbox label="timeline_event">时间线事件</el-checkbox>
+            <el-checkbox label="chapter_event">章节事件</el-checkbox>
+            <el-checkbox label="faction">势力</el-checkbox>
+          </el-checkbox-group>
+        </div>
+        <div class="graph-filter-col">
+          <el-text size="small" class="muted graph-filter-title">边筛选</el-text>
+          <el-checkbox-group v-model="graph.graphEdgeTypeFilters" class="graph-filter-checks">
+            <el-checkbox label="relationship">relationship</el-checkbox>
+            <el-checkbox label="appear">appear</el-checkbox>
+            <el-checkbox label="timeline_next">timeline_next</el-checkbox>
+            <el-checkbox label="chapter_belongs">chapter_belongs</el-checkbox>
+          </el-checkbox-group>
+        </div>
+      </div>
+      <el-space wrap style="margin-top:8px;">
+        <el-checkbox v-model="graph.graphOnlyIsolatedNodes">只看孤立节点</el-checkbox>
+        <el-button size="small" text type="primary" @click="graph.resetGraphFilters">重置筛选</el-button>
+        <el-tag size="small">节点 {{ graph.graphStats.nodeTotal }}</el-tag>
+        <el-tag size="small" type="success">边 {{ graph.graphStats.edgeTotal }}</el-tag>
+        <el-tag size="small">人物 {{ graph.graphStats.nodeByType.character }}</el-tag>
+        <el-tag size="small">时间线 {{ graph.graphStats.nodeByType.timeline_event }}</el-tag>
+        <el-tag size="small">章节 {{ graph.graphStats.nodeByType.chapter_event }}</el-tag>
+        <el-tag size="small">势力 {{ graph.graphStats.nodeByType.faction }}</el-tag>
+      </el-space>
     </div>
     <div style="height:10px;"></div>
     <div class="graph-box-fullscreen">
@@ -227,7 +270,7 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
         <el-form label-position="top">
           <el-form-item label="关联到哪个角色（target）">
             <el-select v-model="graph.relTarget" filterable clearable placeholder="选择一个角色">
-              <el-option v-for="c in graph.graphCharacterNodeIds" :key="c" :label="c" :value="c" />
+              <el-option v-for="c in graph.relationTargetOptions" :key="c" :label="c" :value="c" />
             </el-select>
           </el-form-item>
           <el-form-item label="怎么关联（label）">
@@ -346,6 +389,38 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
   border-radius: 10px;
   background: #fff;
   overflow: hidden;
+}
+.graph-admin-panel {
+  border: 1px solid #ebeef5;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fcfcfd;
+}
+.graph-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(260px, 1fr));
+  gap: 10px 16px;
+}
+.graph-filter-col {
+  border: 1px solid #eef1f6;
+  border-radius: 8px;
+  background: #fff;
+  padding: 8px 10px;
+}
+.graph-filter-title {
+  display: inline-block;
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+.graph-filter-checks {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(120px, 1fr));
+  gap: 6px 8px;
+}
+@media (max-width: 980px) {
+  .graph-filter-grid {
+    grid-template-columns: 1fr;
+  }
 }
 .graph-canvas-fullscreen {
   width: 100%;

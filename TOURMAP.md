@@ -39,11 +39,96 @@
 
 ## TODO（待完成）
 
-- [ ] **Electron 安装包持续维护**
-  - 发布流程与踩坑记录：[electron/ELECTRON_RELEASE.md](../electron/ELECTRON_RELEASE.md)；详细参数见 [electron/README.md](../electron/README.md)、[packaging/pyinstaller/README.md](../packaging/pyinstaller/README.md)。
-  - 构建产物勿入库：见根目录 `.gitignore`（`electron/release/`、`dist/`、`novel-backend.spec`、内置 `novel-backend.exe` 等）。
+### 写小说模式现状判断（2026-04）
 
-- [ ] **知识图谱可视化继续重构完善**
-  - 优化大图性能（节点多时布局、缩放、渲染帧率）。
-  - 补充批量编辑/过滤视图（按章节、按角色、按事件类型）。
-  - 强化边编辑的可解释性（来源、修改历史、冲突提示）。
+- 结论：**仍差一点“专业编导感”**。当前已具备“可生成 + 可编辑 + 可观测”，但在“结构约束、自动纠偏、长程回收”上仍偏工具化。
+- 主要短板：
+  - 写前结构骨架弱（作者仍需手工组织章节目标与伏笔回收）。
+  - 写后审计虽已上线（一致性审计 v1），但规则深度不足、未形成强闭环。
+  - 图谱虽强可视化，但批量治理/质量审计仍不够“生产级”。
+
+### P0（优先，两周内）
+
+- [~] **一致性审计 v2（从提示走向约束）**
+  - [x] `run_stream done` 增加 `block_reasons` 与 `recommended_actions`，高危冲突时阻断“下章续写”自动链。
+  - [x] 前端展示审计等级 + 阻断原因 + 修复动作。
+  - [ ] 增加更多高危规则：时间线反转、角色瞬移、关系突变未给事件依据。
+
+- [x] **章节结构卡（写前强引导）**
+  - [x] 预览阶段自动补齐并锁定结构卡：目标 / 冲突 / 转折 / 回收伏笔 / 事件归属（默认无感）。
+  - [x] 未满足最小结构项时，提供“继续生成（风险）/返回补齐”二选一，并在后端强校验 `structure_risk_ack`。
+
+- [ ] **影子编导 v2（更无感）**
+  - 推荐事件外，补充“推荐配角/推荐冲突类型/推荐回收伏笔”。
+  - 自动采用后支持一键撤销（避免“系统替你决定”的失控感）。
+
+### P1（次优，1-2 月）
+
+- [ ] **图谱治理能力（大图可维护）**
+  - 批量编辑：按角色/章节/事件类型批量改边。
+  - 质量审计：孤立节点、悬空边、自环、重复关系、断链时间线。
+  - 导入导出校验：schema 校验 + dry-run + 错误行定位。
+
+- [ ] **运行可观测性升级**
+  - 每次 run 增加 request_id、阶段耗时、错误分类码。
+  - 后台记录失败类型分布（网络/模型/解析/持久化）用于持续改进。
+
+- [ ] **模型提供商体验对齐 Chatbox**
+  - 已完成基础：OpenAI 兼容 provider、模型列表获取、保存前连通性测试。
+  - 待补：模型列表缓存、模型能力标签（vision/reasoning/tool-use）与提示。
+
+### P2（长期，产品化）
+
+- [ ] **连载骨架与回收系统**
+  - 主线/支线/伏笔生命周期管理（埋设 -> 推进 -> 回收 -> 验证）。
+  - 章节覆盖率与回收率看板，减少后期“坑没填”。
+
+- [ ] **协作与安全**
+  - 配置与图谱修改审计日志、快照回滚、多人协作冲突处理。
+
+### 修改名单（按功能分组）
+
+#### 1) 一致性审计 v2
+- 后端：
+  - `agents/state/consistency_audit.py`
+  - `webapp/backend/routes/novels.py`
+  - `agents/novel/novel_agent.py`（如需将审计结果参与 prompt）
+- 前端：
+  - `webapp/frontend/src/App.vue`
+  - `webapp/frontend/src/components/RightPanel.vue`
+  - `webapp/frontend/src/components/MidFormPanel.vue`
+
+#### 2) 章节结构卡（写前约束）
+- 后端：
+  - `webapp/backend/schemas.py`
+  - `webapp/backend/run_helpers.py`
+  - `webapp/backend/routes/novels.py`
+- 前端：
+  - `webapp/frontend/src/components/MidFormPanel.vue`
+  - `webapp/frontend/src/components/dialogs/InputPreviewDialog.vue`
+  - `webapp/frontend/src/App.vue`
+
+#### 3) 图谱治理
+- 后端：
+  - `webapp/backend/routes/graph.py`
+  - `agents/persistence/graph_tables.py`
+  - `webapp/backend/graph_payload.py`
+- 前端：
+  - `webapp/frontend/src/composables/useGraph.ts`
+  - `webapp/frontend/src/components/graph/GraphDialogs.vue`
+
+#### 4) 观测性与错误分类
+- 后端：
+  - `webapp/backend/routes/novels.py`
+  - `webapp/backend/sse.py`
+  - `webapp/backend/app.py`
+- 前端：
+  - `webapp/frontend/src/App.vue`
+  - `webapp/frontend/src/components/RightPanel.vue`
+
+#### 5) Electron 安装包持续维护
+- 文档与脚本：
+  - `electron/ELECTRON_RELEASE.md`
+  - `electron/README.md`
+  - `packaging/pyinstaller/README.md`
+  - `build-windows-release.bat`

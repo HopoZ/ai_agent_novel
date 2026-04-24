@@ -325,6 +325,12 @@ class NovelAgent:
 
         strict_no_supporting = bool(pov_character_ids_override) and not bool(supporting_character_ids)
         lorebook = self._lorebook(lore_tags or state.meta.lore_tags, lore_summary_id=lore_summary_id)
+        search_block = self.lore_loader.search_lore_by_query(
+            query=user_task,
+            tags=(lore_tags or state.meta.lore_tags),
+        )
+        if search_block:
+            lorebook = f"{lorebook}\n\n{search_block}"
         focus_eid = resolve_timeline_focus_event_id(
             novel_id,
             state,
@@ -332,6 +338,12 @@ class NovelAgent:
             time_slot_override,
             timeline_event_focus_id,
         )
+        if focus_eid:
+            out["suggested_timeline_event_id"] = focus_eid
+            for ev in state.world.timeline or []:
+                if (ev.event_id or "").strip() == focus_eid:
+                    out["suggested_timeline_event_label"] = f"{ev.time_slot}：{ev.summary}"
+                    break
         state_context = self._compact_state_for_prompt(
             state=state,
             user_task=user_task,
@@ -709,6 +721,8 @@ class NovelAgent:
         llm_options: Optional[Dict[str, Any]] = None,
         timeline_event_focus_id: Optional[str] = None,
         omit_world_timeline: bool = False,
+        structure_card: Optional[Dict[str, Any]] = None,
+        structure_card_locked: bool = False,
     ) -> RunResult:
         state = self._load_state_hydrated(novel_id)
         if not state:
@@ -782,6 +796,8 @@ class NovelAgent:
                     beats=plan.beats,
                     content="",
                     usage_metadata={},
+                    structure_card=dict(structure_card or {}),
+                    structure_card_locked=bool(structure_card_locked),
                 )
                 persist_chapter_artifacts(
                     novel_id=novel_id,
@@ -830,6 +846,8 @@ class NovelAgent:
                 beats=plan.beats,
                 content=content_text,
                 usage_metadata=usage,
+                structure_card=dict(structure_card or {}),
+                structure_card_locked=bool(structure_card_locked),
             )
             next_state = plan.next_state
             persist_chapter_artifacts(

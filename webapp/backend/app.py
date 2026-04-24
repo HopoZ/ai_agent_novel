@@ -5,6 +5,7 @@ FastAPI 应用工厂：中间件、静态资源、子路由挂载。
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -31,8 +32,14 @@ def _ensure_packaged_relative_dirs() -> None:
         Path(rel).mkdir(parents=True, exist_ok=True)
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    run_frontend_startup(app, logger, VITE_FRONTEND_DIR, VITE_DIST_DIR)
+    yield
+
+
 def create_app() -> FastAPI:
-    app = FastAPI(title="AI Novel Agent")
+    app = FastAPI(title="AI Novel Agent", lifespan=_lifespan)
 
     app.add_middleware(
         CORSMiddleware,
@@ -44,10 +51,6 @@ def create_app() -> FastAPI:
 
     _ensure_packaged_relative_dirs()
     app.mount("/static", StaticFiles(directory="webapp/static"), name="static")
-
-    @app.on_event("startup")
-    def _maybe_build_frontend():
-        run_frontend_startup(app, logger, VITE_FRONTEND_DIR, VITE_DIST_DIR)
 
     @app.middleware("http")
     async def log_http_requests(request: Request, call_next):

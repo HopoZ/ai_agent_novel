@@ -17,6 +17,8 @@ from agents.persistence.graph_tables import (
     validate_timeline_event_id,
 )
 from agents.persistence.storage import load_chapter, load_state, save_state, list_chapters
+from agents.state.chapter_structure import build_locked_structure_card, evaluate_structure_gate
+from agents.state.consistency_audit import build_consistency_audit
 from agents.state.state_models import ChapterPlan, ChapterRecord
 from webapp.backend.deps import agent, logger
 from webapp.backend.paths import STORAGE_NOVELS_DIR
@@ -60,6 +62,33 @@ def _sync_after_run_if_event(novel_id: str, req: RunModeRequest, chapter_index: 
                 new_event_next_id=req.new_event_next_id,
             )
         replace_timeline_next_edges_from_state(novel_id, st_now)
+
+
+def _build_structure_gate(
+    *,
+    novel_id: str,
+    req: RunModeRequest,
+    inferred_time_slot: Optional[str],
+    chapter_index: int,
+    timeline_focus_id: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    if req.mode not in {"plan_only", "write_chapter", "revise_chapter", "expand_chapter"}:
+        return None
+    st = load_state(novel_id)
+    if not st:
+        return None
+    card = build_locked_structure_card(
+        state=st,
+        user_task=req.user_task,
+        chapter_index=chapter_index,
+        inferred_time_slot=inferred_time_slot,
+        timeline_event_focus_id=timeline_focus_id,
+        req_existing_event_id=req.existing_event_id,
+        req_new_event_time_slot=req.new_event_time_slot,
+        req_new_event_summary=req.new_event_summary,
+        existing_card=(req.structure_card if isinstance(req.structure_card, dict) else None),
+    )
+    return evaluate_structure_gate(card)
 
 
 @router.get("")
@@ -203,6 +232,7 @@ def list_event_anchors(novel_id: str):
 @router.post("/{novel_id}/run")
 def run_mode(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
     inferred = infer_time_slot(novel_id, req)
+    timeline_focus_id = req_timeline_focus_id(req)
     manual_time_slot = bool((req.time_slot_override or "").strip())
     pov_ids = list(req.pov_character_ids_override or [])
     if (not pov_ids) and req.pov_character_id_override:
@@ -210,6 +240,23 @@ def run_mode(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
     llm_user_task = build_llm_user_task(novel_id, req.user_task, req, inferred, pov_ids)
     st0 = load_state(novel_id)
     pre_chapter_index = req.chapter_index or ((st0.meta.current_chapter_index + 1) if st0 else 1)
+    structure_gate = _build_structure_gate(
+        novel_id=novel_id,
+        req=req,
+        inferred_time_slot=inferred,
+        chapter_index=int(pre_chapter_index),
+        timeline_focus_id=timeline_focus_id,
+    )
+    if structure_gate and structure_gate.get("needs_ack") and (not req.structure_risk_ack):
+        return {
+            "novel_id": novel_id,
+            "mode": req.mode,
+            "chapter_index": int(pre_chapter_index),
+            "state_updated": False,
+            "blocked": True,
+            "block_type": "structure_gate",
+            "structure_gate": structure_gate,
+        }
     if req.mode in {"plan_only", "write_chapter", "revise_chapter", "expand_chapter"}:
         try:
             prebuild_chapter_graph_records(
@@ -235,8 +282,10 @@ def run_mode(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
             supporting_character_ids=(req.supporting_character_ids or []),
             lore_tags=req.lore_tags,
             llm_options=llm_call_options(req),
-            timeline_event_focus_id=req_timeline_focus_id(req),
+            timeline_event_focus_id=timeline_focus_id,
             omit_world_timeline=uses_new_timeline_event_for_chapter(req),
+            structure_card=(structure_gate.get("card") if structure_gate else None),
+            structure_card_locked=bool(structure_gate),
         )
     except Exception as e:
         logger.exception("run_mode failed novel_id=%s mode=%s", novel_id, req.mode)
@@ -257,21 +306,34 @@ def run_mode(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
         resp["plan"] = result.plan.model_dump(mode="json")
     if result.next_status:
         resp["next_status"] = result.next_status
+    if structure_gate:
+        resp["structure_gate"] = structure_gate
     state_obj = load_state(novel_id)
     resp["state"] = state_obj.model_dump(mode="json") if state_obj else None
+    if req.mode in {"write_chapter", "revise_chapter", "expand_chapter"} and result.chapter_index and state_obj:
+        chapter_row = load_chapter(novel_id, int(result.chapter_index))
+        if chapter_row:
+            resp["consistency_audit"] = build_consistency_audit(
+                state=state_obj,
+                chapter=chapter_row,
+                mode=req.mode,
+            )
     return resp
 
 
 @router.post("/{novel_id}/preview_input")
 def preview_mode_input(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
     inferred = infer_time_slot(novel_id, req)
+    timeline_focus_id = req_timeline_focus_id(req)
     manual_time_slot = bool((req.time_slot_override or "").strip())
     pov_ids = list(req.pov_character_ids_override or [])
     if (not pov_ids) and req.pov_character_id_override:
         pov_ids = [req.pov_character_id_override]
     llm_user_task = build_llm_user_task(novel_id, req.user_task, req, inferred, pov_ids)
+    st0 = load_state(novel_id)
+    pre_chapter_index = req.chapter_index or ((st0.meta.current_chapter_index + 1) if st0 else 1)
     try:
-        return agent.preview_input(
+        out = agent.preview_input(
             novel_id=novel_id,
             mode=req.mode,
             user_task=llm_user_task,
@@ -281,9 +343,19 @@ def preview_mode_input(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
             pov_character_ids_override=pov_ids,
             supporting_character_ids=(req.supporting_character_ids or []),
             lore_tags=req.lore_tags,
-            timeline_event_focus_id=req_timeline_focus_id(req),
+            timeline_event_focus_id=timeline_focus_id,
             omit_world_timeline=uses_new_timeline_event_for_chapter(req),
         )
+        structure_gate = _build_structure_gate(
+            novel_id=novel_id,
+            req=req,
+            inferred_time_slot=inferred,
+            chapter_index=int(pre_chapter_index),
+            timeline_focus_id=timeline_focus_id,
+        )
+        if structure_gate:
+            out["structure_gate"] = structure_gate
+        return out
     except Exception as e:
         logger.exception("preview_input failed novel_id=%s mode=%s", novel_id, req.mode)
         raise HTTPException(status_code=400, detail=str(e))
@@ -301,6 +373,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
         yield sse_pack("start", {"novel_id": novel_id, "mode": req.mode})
 
         inferred = infer_time_slot(novel_id, req)
+        timeline_focus_id = req_timeline_focus_id(req)
         manual_time_slot = bool((req.time_slot_override or "").strip())
         pov_ids = list(req.pov_character_ids_override or [])
         if (not pov_ids) and req.pov_character_id_override:
@@ -308,6 +381,34 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
         llm_user_task = build_llm_user_task(novel_id, req.user_task, req, inferred, pov_ids)
         llm_opts = llm_call_options(req)
         omit_world_timeline = uses_new_timeline_event_for_chapter(req)
+        st0 = load_state(novel_id)
+        pre_chapter_index = req.chapter_index or ((st0.meta.current_chapter_index + 1) if st0 else 1)
+        structure_gate = _build_structure_gate(
+            novel_id=novel_id,
+            req=req,
+            inferred_time_slot=inferred,
+            chapter_index=int(pre_chapter_index),
+            timeline_focus_id=timeline_focus_id,
+        )
+        if structure_gate and structure_gate.get("needs_ack") and (not req.structure_risk_ack):
+            yield sse_pack(
+                "done",
+                {
+                    "novel_id": novel_id,
+                    "mode": req.mode,
+                    "chapter_index": int(pre_chapter_index),
+                    "state_updated": False,
+                    "blocked": True,
+                    "block_type": "structure_gate",
+                    "structure_gate": structure_gate,
+                    "usage_metadata": {},
+                    "content": None,
+                    "plan": None,
+                    "state": (st0.model_dump(mode="json") if st0 else None),
+                    "next_status": None,
+                },
+            )
+            return
 
         try:
             if req.mode in {"write_chapter", "revise_chapter", "expand_chapter"}:
@@ -344,7 +445,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     minimal_state_for_prompt=manual_time_slot,
                     lore_tags=req.lore_tags,
                     llm_options=llm_opts,
-                    timeline_event_focus_id=req_timeline_focus_id(req),
+                    timeline_event_focus_id=timeline_focus_id,
                     omit_world_timeline=omit_world_timeline,
                 ):
                     if await _disconnected():
@@ -384,7 +485,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     pov_character_ids_override=pov_ids,
                     supporting_character_ids=(req.supporting_character_ids or []),
                     llm_options=llm_opts,
-                    timeline_event_focus_id=req_timeline_focus_id(req),
+                    timeline_event_focus_id=timeline_focus_id,
                     write_mode=write_mode,
                     omit_world_timeline=omit_world_timeline,
                 ):
@@ -417,13 +518,15 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                 record = ChapterRecord(
                     chapter_index=chapter_index,
                     chapter_preset_name=req.chapter_preset_name,
-                    timeline_event_id=validate_timeline_event_id(next_state, req_timeline_focus_id(req)),
+                    timeline_event_id=validate_timeline_event_id(next_state, timeline_focus_id),
                     time_slot=plan.time_slot,
                     pov_character_id=plan.pov_character_id,
                     who_is_present=plan.who_is_present,
                     beats=plan.beats,
                     content=content_text,
                     usage_metadata=usage_meta,
+                    structure_card=(structure_gate.get("card") if structure_gate else {}),
+                    structure_card_locked=bool(structure_gate),
                 )
                 persist_chapter_artifacts(
                     novel_id=novel_id,
@@ -461,7 +564,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                         chapter_index=chapter_index,
                         latest_content=content_text,
                         llm_options=llm_opts,
-                        timeline_event_focus_id=req_timeline_focus_id(req),
+                        timeline_event_focus_id=timeline_focus_id,
                     )
                     yield sse_pack("phase", {"name": "next_status_done", "has_text": bool((next_status or "").strip())})
                 except Exception as e:
@@ -471,6 +574,11 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                 st_done = load_state(novel_id)
                 chapter_timeline_event_id = (
                     resolve_chapter_timeline_event_id(st_done, record) if st_done else None
+                )
+                consistency_audit = (
+                    build_consistency_audit(state=st_done, chapter=record, mode=req.mode)
+                    if st_done
+                    else None
                 )
 
                 yield sse_pack(
@@ -485,6 +593,8 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                         "state": (st_done.model_dump(mode="json") if st_done else None),
                         "next_status": next_status or None,
                         "chapter_timeline_event_id": chapter_timeline_event_id,
+                        "consistency_audit": consistency_audit,
+                        "structure_gate": structure_gate,
                     },
                 )
             elif req.mode == "optimize_suggestions":
@@ -599,11 +709,22 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     supporting_character_ids=(req.supporting_character_ids or []),
                     lore_tags=req.lore_tags,
                     llm_options=llm_opts,
-                    timeline_event_focus_id=req_timeline_focus_id(req),
+                    timeline_event_focus_id=timeline_focus_id,
                     omit_world_timeline=omit_world_timeline,
+                    structure_card=(structure_gate.get("card") if structure_gate else None),
+                    structure_card_locked=bool(structure_gate),
                 )
                 _sync_after_run_if_event(novel_id, req, result.chapter_index)
                 state_obj = load_state(novel_id)
+                consistency_audit = None
+                if req.mode in {"write_chapter", "revise_chapter", "expand_chapter"} and result.chapter_index and state_obj:
+                    chapter_row = load_chapter(novel_id, int(result.chapter_index))
+                    if chapter_row:
+                        consistency_audit = build_consistency_audit(
+                            state=state_obj,
+                            chapter=chapter_row,
+                            mode=req.mode,
+                        )
                 yield sse_pack(
                     "done",
                     {
@@ -615,6 +736,8 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                         "content": result.content,
                         "plan": (result.plan.model_dump(mode="json") if result.plan else None),
                         "state": (state_obj.model_dump(mode="json") if state_obj else None),
+                        "consistency_audit": consistency_audit,
+                        "structure_gate": structure_gate,
                     },
                 )
         except Exception as e:

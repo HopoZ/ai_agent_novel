@@ -1,8 +1,9 @@
 # 负责加载设定文件并构建创作百科全书的上下文信息
 
 import os
+import re
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from agents.persistence.env_paths import get_storage_root, try_get_lores_dir_from_env
 
@@ -143,3 +144,97 @@ class LoreLoader:
     def get_all_lore(self):
         """扫描目录并读取所有设定文件"""
         return self.get_lore_by_tags(self.get_lore_tags())
+
+    @staticmethod
+    def _extract_query_terms(query: str) -> list[str]:
+        """
+        近似 grep 的关键词切分：
+        - 先按中英文常见分隔符切词
+        - 保留长度 >= 2 的词，去重且保序
+        """
+        raw = [p.strip() for p in re.split(r"[\s,，。！？、;；:：()（）\[\]{}<>\"'`]+", str(query or "")) if p.strip()]
+        terms: list[str] = []
+        seen: set[str] = set()
+        for t in raw:
+            if len(t) < 2:
+                continue
+            if t in seen:
+                continue
+            seen.add(t)
+            terms.append(t)
+        return terms
+
+    @staticmethod
+    def _best_snippet(md: str, terms: list[str], max_lines: int = 10) -> str:
+        if not md.strip():
+            return ""
+        lines = md.splitlines()
+        lowered_terms = [t.lower() for t in terms]
+        hit_idx: list[int] = []
+        for i, ln in enumerate(lines):
+            low = ln.lower()
+            if any(t in low for t in lowered_terms):
+                hit_idx.append(i)
+        if not hit_idx:
+            return ""
+        chosen: list[int] = []
+        for i in hit_idx:
+            for j in (i - 1, i, i + 1):
+                if 0 <= j < len(lines):
+                    chosen.append(j)
+        # 保序去重
+        uniq: list[int] = []
+        seen: set[int] = set()
+        for j in chosen:
+            if j in seen:
+                continue
+            seen.add(j)
+            uniq.append(j)
+        uniq = uniq[: max(1, max_lines)]
+        snippet = "\n".join(lines[j] for j in uniq).strip()
+        return snippet
+
+    def search_lore_by_query(
+        self,
+        query: str,
+        tags: Optional[list[str]] = None,
+        max_hits: int = 5,
+        max_chars_per_hit: int = 600,
+    ) -> str:
+        """
+        在 lores 中做“类 grep”检索，返回可直接拼入 prompt 的文本块。
+        """
+        terms = self._extract_query_terms(query)
+        if not terms:
+            return ""
+        if not self.data_path.exists():
+            return ""
+
+        want = {str(t).strip() for t in (tags or []) if str(t).strip()}
+        rows: list[tuple[int, str, str]] = []
+        for file_path in self._scan_markdown_files():
+            tag = self._path_to_tag(file_path)
+            if want and tag not in want:
+                continue
+            try:
+                md = file_path.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            lower_md = md.lower()
+            score = sum(lower_md.count(t.lower()) for t in terms)
+            if score <= 0:
+                continue
+            snippet = self._best_snippet(md, terms)
+            if not snippet:
+                continue
+            if max_chars_per_hit > 0 and len(snippet) > max_chars_per_hit:
+                snippet = snippet[:max_chars_per_hit]
+            rows.append((score, tag, snippet))
+
+        if not rows:
+            return ""
+        rows.sort(key=lambda x: (-x[0], x[1]))
+        parts: list[str] = []
+        for score, tag, snippet in rows[: max(1, max_hits)]:
+            parts.append(f"【{tag}｜match={score}】\n{snippet}")
+        return "### 背景设定检索（grep） ###\n\n" + "\n\n".join(parts)

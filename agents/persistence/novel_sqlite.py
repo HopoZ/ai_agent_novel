@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import UUID
@@ -156,7 +156,7 @@ def delete_all_chapters(novel_id: str) -> None:
 
 def insert_chapter_row(novel_id: str, chapter: ChapterRecord) -> None:
     payload = chapter.model_dump_json(ensure_ascii=False)
-    created = chapter.created_at.isoformat() if chapter.created_at else datetime.utcnow().isoformat()
+    created = chapter.created_at.isoformat() if chapter.created_at else datetime.now(UTC).isoformat()
     with sqlite_connection(novel_id) as conn:
         conn.execute(
             "INSERT INTO chapters(chapter_index, created_at, json) VALUES(?,?,?)",
