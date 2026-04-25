@@ -252,6 +252,8 @@ class ChapterRecord(BaseModel):
 
     # 多章可指向同一时间线事件；缺省时仍可用 time_slot 与 timeline 弱对齐
     timeline_event_id: Optional[str] = None
+    # 写作所使用的事件计划版本（event_plan_id）
+    source_event_plan_id: Optional[str] = None
 
     time_slot: str
     pov_character_id: Optional[str]
@@ -266,3 +268,27 @@ class ChapterRecord(BaseModel):
     # 写前结构卡（C 方案）：默认自动补齐并锁定，供写后复盘与治理
     structure_card: Dict[str, Any] = Field(default_factory=dict)
     structure_card_locked: bool = False
+
+
+class EventPlan(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    # 由后端按绑定事件强制回填；模型可省略
+    event_id: str = ""
+    time_slot: str = ""
+    event_summary: str = ""
+    objective: str
+    conflict: str
+    progression: List[str] = Field(default_factory=list)
+    turning_points: List[str] = Field(default_factory=list)
+    resolution_target: str
+    constraints: List[str] = Field(default_factory=list)
+
+
+class EventPlanRecord(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    event_plan_id: str
+    novel_id: str
+    event_id: str
+    plan: EventPlan
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

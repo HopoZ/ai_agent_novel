@@ -1,16 +1,16 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  在仓库根目录一键构建：前端静态资源 → PyInstaller 后端 → Electron NSIS 安装包。
+  Build release from repo root: frontend dist -> PyInstaller backend -> Electron NSIS installer.
 
 .DESCRIPTION
-  产物：electron/release/ 下的 *-Setup.exe（名称与 electron/package.json 中 version、productName 一致）。
+  Output: *-Setup.exe under electron/release/ (name follows electron/package.json version/productName).
 
 .PARAMETER SkipPyInstaller
-  跳过 PyInstaller；请事先将 novel-backend.exe 放到 electron/resources/backend/（仅重打 Electron 壳时可用）。
+  Skip PyInstaller; requires electron/resources/backend/novel-backend.exe to already exist.
 
 .PARAMETER SkipFrontendBuild
-  跳过 webapp/frontend 的 npm run build（需已有 webapp/frontend/dist）。
+  Skip webapp/frontend npm run build; requires webapp/frontend/dist to already exist.
 
 .EXAMPLE
   .\scripts\build-windows-release.ps1
@@ -34,17 +34,17 @@ function Test-Command([string] $Name) {
 }
 
 if (-not (Test-Command "npm")) {
-    throw "未找到 npm，请先安装 Node.js 18+。"
+    throw "npm not found. Install Node.js 18+ first."
 }
 if (-not $SkipPyInstaller -and -not (Test-Command "py") -and -not (Test-Command "python")) {
-    throw "未找到 py/python；若要用 -SkipPyInstaller，请显式传入该开关。"
+    throw "py/python not found. If you want to skip backend build, pass -SkipPyInstaller."
 }
 
-# --- 1) 前端 dist（PyInstaller 与运行时静态资源依赖）---
+# --- 1) Build frontend dist ---
 $frontendDir = Join-Path $RepoRoot "webapp/frontend"
 $distDir = Join-Path $frontendDir "dist"
 if (-not $SkipFrontendBuild) {
-    Write-Host "[1/4] webapp/frontend: npm install && npm run build" -ForegroundColor Cyan
+    Write-Host "[1/4] webapp/frontend: npm install and npm run build" -ForegroundColor Cyan
     Push-Location $frontendDir
     try {
         npm install
@@ -54,7 +54,7 @@ if (-not $SkipFrontendBuild) {
     }
 }
 if (-not (Test-Path (Join-Path $distDir "index.html"))) {
-    throw "缺少 webapp/frontend/dist/index.html，请先构建前端或去掉 -SkipFrontendBuild。"
+    throw "Missing webapp/frontend/dist/index.html. Build frontend first or remove -SkipFrontendBuild."
 }
 
 # --- 2) PyInstaller ---
@@ -82,23 +82,23 @@ if (-not $SkipPyInstaller) {
     & $py @pyArgs
     $built = Join-Path $RepoRoot "dist/novel-backend.exe"
     if (-not (Test-Path $built)) {
-        throw "未生成 dist/novel-backend.exe，请根据终端报错补充 --hidden-import / --collect-all（见 packaging/pyinstaller/README.md）。"
+        throw "dist/novel-backend.exe was not generated. Add required --hidden-import/--collect-all entries."
     }
     $destDir = Split-Path $backendDest -Parent
     if (-not (Test-Path $destDir)) {
         New-Item -ItemType Directory -Path $destDir -Force | Out-Null
     }
     Copy-Item -Force $built $backendDest
-    Write-Host "已复制到 $backendDest" -ForegroundColor Green
+    Write-Host "Copied to $backendDest" -ForegroundColor Green
 } else {
-    Write-Host "[2/4] 跳过 PyInstaller" -ForegroundColor Yellow
+    Write-Host "[2/4] Skip PyInstaller" -ForegroundColor Yellow
     if (-not (Test-Path $backendDest)) {
-        throw "未找到 $backendDest，无法 -SkipPyInstaller。"
+        throw "$backendDest not found, cannot use -SkipPyInstaller."
     }
 }
 
 # --- 3) Electron ---
-Write-Host "[3/4] electron: npm install && npm run dist" -ForegroundColor Cyan
+Write-Host "[3/4] electron: npm install and npm run dist" -ForegroundColor Cyan
 $electronDir = Join-Path $RepoRoot "electron"
 Push-Location $electronDir
 try {
@@ -108,7 +108,7 @@ try {
     Pop-Location
 }
 
-Write-Host "[4/4] 完成。安装包目录: electron/release/" -ForegroundColor Green
+Write-Host "[4/4] Done. Installer output: electron/release/" -ForegroundColor Green
 $releaseDir = Join-Path $RepoRoot "electron/release"
 if (Test-Path $releaseDir) {
     Get-ChildItem $releaseDir -Filter "*.exe" | ForEach-Object { Write-Host "  $($_.FullName)" }

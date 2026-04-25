@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, HTTPException, Query
 
 from agents.persistence.graph_tables import (
@@ -27,6 +29,7 @@ from agents.state.state_models import CharacterState, TimelineEvent
 from webapp.backend.deps import logger
 from webapp.backend.graph_payload import build_novel_graph_payload
 from webapp.backend.schemas import (
+    GraphBatchDeleteEdgesRequest,
     GraphEdgePatchRequest,
     GraphNodeCreateRequest,
     GraphNodePatchRequest,
@@ -35,6 +38,24 @@ from webapp.backend.schemas import (
 )
 
 router = APIRouter(tags=["graph"])
+
+
+def _node_type_from_id(node_id: str) -> str:
+    nid = str(node_id or "").strip()
+    if nid.startswith("char:"):
+        return "character"
+    if nid.startswith("ev:timeline:"):
+        return "timeline_event"
+    if nid.startswith("ev:chapter:"):
+        return "chapter_event"
+    if nid.startswith("fac:"):
+        return "faction"
+    return "other"
+
+
+def _save_chapter_revision(novel_id: str, chap) -> None:
+    chap.created_at = datetime.now(UTC)
+    save_chapter(novel_id, chap, chapter_preset_name=chap.chapter_preset_name)
 
 
 @router.get("/{novel_id}/graph")
@@ -144,7 +165,7 @@ def patch_graph_node(novel_id: str, req: GraphNodePatchRequest):
                 raise HTTPException(status_code=400, detail="timeline_event_id not in state.world.timeline")
             chap.timeline_event_id = eid
         ensure_graph_tables(novel_id)
-        save_chapter(novel_id, chap, chapter_preset_name=chap.chapter_preset_name)
+        _save_chapter_revision(novel_id, chap)
         replace_chapter_belongs_for_chapter(novel_id, state, chap)
         return {"ok": True, "node_id": node_id}
 
@@ -318,7 +339,7 @@ def delete_graph_node(novel_id: str, node_id: str = Query(..., description="char
         for chap in list_chapters_latest_per_index(novel_id):
             if (chap.timeline_event_id or "").strip() == tid:
                 chap.timeline_event_id = None
-                save_chapter(novel_id, chap, chapter_preset_name=chap.chapter_preset_name)
+                _save_chapter_revision(novel_id, chap)
                 replace_chapter_belongs_for_chapter(novel_id, state, chap)
         return {"ok": True, "node_id": nid}
 
@@ -479,12 +500,12 @@ def patch_graph_edge(novel_id: str, req: GraphEdgePatchRequest):
             raise HTTPException(status_code=404, detail="chapter not found")
         if op == "delete":
             chap.timeline_event_id = None
-            save_chapter(novel_id, chap, chapter_preset_name=chap.chapter_preset_name)
+            _save_chapter_revision(novel_id, chap)
             replace_chapter_belongs_for_chapter(novel_id, state, chap)
             return {"ok": True}
         if not ntgt:
             chap.timeline_event_id = None
-            save_chapter(novel_id, chap, chapter_preset_name=chap.chapter_preset_name)
+            _save_chapter_revision(novel_id, chap)
             replace_chapter_belongs_for_chapter(novel_id, state, chap)
             return {"ok": True}
         if not ntgt.startswith("ev:timeline:"):
@@ -492,8 +513,93 @@ def patch_graph_edge(novel_id: str, req: GraphEdgePatchRequest):
         if not validate_timeline_event_id(state, ntgt):
             raise HTTPException(status_code=400, detail="target timeline event not found")
         chap.timeline_event_id = ntgt
-        save_chapter(novel_id, chap, chapter_preset_name=chap.chapter_preset_name)
+        _save_chapter_revision(novel_id, chap)
         replace_chapter_belongs_for_chapter(novel_id, state, chap)
         return {"ok": True}
 
     raise HTTPException(status_code=400, detail="unsupported edge_type")
+
+
+@router.post("/{novel_id}/graph/edges/batch-delete")
+def batch_delete_graph_edges(novel_id: str, req: GraphBatchDeleteEdgesRequest):
+    state = load_state(novel_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="novel not found")
+    ensure_graph_tables(novel_id)
+
+    allowed_edge_types = {"relationship", "appear", "timeline_next", "chapter_belongs"}
+    picked_edge_types = {str(x or "").strip().lower() for x in (req.edge_types or []) if str(x or "").strip()}
+    if not picked_edge_types:
+        raise HTTPException(status_code=400, detail="edge_types is required")
+    if not picked_edge_types.issubset(allowed_edge_types):
+        raise HTTPException(status_code=400, detail="edge_types contains unsupported type")
+
+    allowed_node_types = {"character", "timeline_event", "chapter_event", "faction"}
+    src_type = str(req.source_node_type or "").strip().lower()
+    tgt_type = str(req.target_node_type or "").strip().lower()
+    if src_type and src_type not in allowed_node_types:
+        raise HTTPException(status_code=400, detail="source_node_type is invalid")
+    if tgt_type and tgt_type not in allowed_node_types:
+        raise HTTPException(status_code=400, detail="target_node_type is invalid")
+
+    def _match_types(row: dict) -> bool:
+        src_ok = True
+        tgt_ok = True
+        if src_type:
+            src_ok = _node_type_from_id(str(row.get("source", "")).strip()) == src_type
+        if tgt_type:
+            tgt_ok = _node_type_from_id(str(row.get("target", "")).strip()) == tgt_type
+        return src_ok and tgt_ok
+
+    deleted_by_type: dict[str, int] = {"relationship": 0, "appear": 0, "timeline_next": 0, "chapter_belongs": 0}
+
+    if "relationship" in picked_edge_types:
+        rel_rows = load_character_relations(novel_id)
+        kept_rows = []
+        for r in rel_rows:
+            kind = str(r.get("kind", "")).strip().lower()
+            if kind == "relationship" and _match_types(r):
+                deleted_by_type["relationship"] += 1
+                continue
+            kept_rows.append(r)
+        if len(kept_rows) != len(rel_rows):
+            save_character_relations(novel_id, kept_rows)
+
+    event_edge_types = {"appear", "timeline_next", "chapter_belongs"} & picked_edge_types
+    if event_edge_types:
+        event_rows = load_event_relations(novel_id)
+        kept_rows = []
+        cleared_chapters: set[int] = set()
+        for r in event_rows:
+            kind = str(r.get("kind", "")).strip().lower()
+            if kind in event_edge_types and _match_types(r):
+                deleted_by_type[kind] += 1
+                if kind == "chapter_belongs":
+                    src = str(r.get("source", "")).strip()
+                    if src.startswith("ev:chapter:"):
+                        try:
+                            cleared_chapters.add(int(src.split("ev:chapter:", 1)[1].strip()))
+                        except Exception:
+                            pass
+                continue
+            kept_rows.append(r)
+        if len(kept_rows) != len(event_rows):
+            save_event_relations(novel_id, kept_rows)
+        if cleared_chapters:
+            for cidx in sorted(cleared_chapters):
+                chap = load_chapter(novel_id, cidx)
+                if not chap:
+                    continue
+                chap.timeline_event_id = None
+                _save_chapter_revision(novel_id, chap)
+                replace_chapter_belongs_for_chapter(novel_id, state, chap)
+
+    total_deleted = sum(deleted_by_type.values())
+    return {
+        "ok": True,
+        "deleted_total": total_deleted,
+        "deleted_by_type": deleted_by_type,
+        "edge_types": sorted(picked_edge_types),
+        "source_node_type": src_type or None,
+        "target_node_type": tgt_type or None,
+    }

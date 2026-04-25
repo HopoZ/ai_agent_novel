@@ -88,6 +88,8 @@ def build_novel_graph_payload(novel_id: str, state: NovelState, view: str) -> Di
                     add_node(src, src.split("char:", 1)[1], "character")
                 if tgt and tgt.startswith("ev:chapter:"):
                     add_edge(src, tgt, label, "appear")
+                elif tgt and tgt.startswith("ev:timeline:") and (":draft_" not in str(tgt)):
+                    add_edge(src, tgt, label, "appear")
 
         for chap in list_chapters_latest_per_index(novel_id):
             cid = f"ev:chapter:{chap.chapter_index}"

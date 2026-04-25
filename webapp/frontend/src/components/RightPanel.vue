@@ -1,10 +1,10 @@
 <template>
-  <el-card shadow="never">
-    <div style="display:flex; gap:8px; align-items:baseline; flex-wrap:wrap;">
-      <div style="font-weight:600;">运行结果</div>
-      <div class="muted" style="font-size:12px;">会自动显示 state.continuity / content / plan 等</div>
+  <el-card class="right-panel" shadow="never">
+    <div class="panel-title-row">
+      <div class="panel-title">运行结果</div>
+      <div class="muted">会自动显示 state.continuity / content / plan 等</div>
     </div>
-    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px;">
+    <div class="status-row">
       <el-tag size="small" :type="running ? 'warning' : (runPhase === 'error' ? 'danger' : 'success')">
         {{ running ? `进行中：${runPhaseLabel}` : `状态：${runPhaseLabel}` }}
       </el-tag>
@@ -13,6 +13,22 @@
     <div v-if="tokenUsageText" class="output-path-tip">
       本次 Token：<code>{{ tokenUsageText }}</code>
     </div>
+    <div v-if="currentNovelOutputDir" class="output-path-tip">
+      当前小说输出目录：<code>{{ currentNovelOutputDir }}</code>
+    </div>
+    <div v-if="runRequestId || lastErrorCode" class="output-path-tip">
+      <span v-if="runRequestId">request_id：<code>{{ runRequestId }}</code></span>
+      <span v-if="lastErrorCode" class="error-code-inline">error_code：<code>{{ lastErrorCode }}</code></span>
+    </div>
+    <el-alert
+      v-if="autoRejudgeText"
+      class="shadow-digest"
+      type="info"
+      :closable="false"
+      title="自动重判（本章）"
+      :description="autoRejudgeText"
+      show-icon
+    />
     <el-alert
       v-if="shadowDigestText"
       class="shadow-digest"
@@ -52,7 +68,7 @@
           @scroll.passive="onNextScroll"
         ></pre>
         <div class="next-actions">
-          <div class="muted" style="margin-bottom:6px;">可编辑后直接生成下一章（先走预览）。</div>
+          <div class="muted next-hint">可编辑后直接生成下一章（先走预览）。</div>
           <el-input
             :model-value="nextChapterDraft"
             type="textarea"
@@ -60,7 +76,7 @@
             placeholder="编辑下章方向后点击“生成下一章”"
             @update:model-value="onNextChapterDraftChange"
           />
-          <div style="margin-top:8px;">
+          <div class="next-submit-row">
             <el-button
               type="primary"
               :disabled="!novelId || running || !String(nextChapterDraft || '').trim()"
@@ -81,12 +97,12 @@
         ></pre>
       </el-tab-pane>
       <el-tab-pane label="图谱可视化" name="graph">
-        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+        <div class="graph-toolbar">
           <el-button size="small" type="primary" @click="openGraphDialog" :disabled="!novelId">
             打开全屏图谱
           </el-button>
         </div>
-        <div class="muted" style="margin-top:8px;">
+        <div class="muted graph-hint">
           {{ novelId ? `当前视图：${graphViewLabel}` : "请先选择/创建小说，再查看图谱。" }}
         </div>
       </el-tab-pane>
@@ -103,6 +119,10 @@ const props = defineProps<{
   runPhaseLabel: string;
   runHint: string;
   tokenUsageText: string;
+  currentNovelOutputDir: string;
+  runRequestId: string;
+  lastErrorCode: string;
+  autoRejudgeText: string;
   shadowDigestText: string;
   consistencyAuditText: string;
   consistencyAuditSeverity: "ok" | "warn" | "high";
@@ -197,14 +217,36 @@ watch(
 </script>
 
 <style scoped>
+.right-panel {
+  border: 1px solid var(--app-panel-border, rgba(126, 163, 227, 0.45));
+}
+.panel-title-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.panel-title {
+  font-weight: 700;
+}
+.status-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.error-code-inline {
+  margin-left: 8px;
+}
 .muted {
-  color: #909399;
+  color: var(--lit-muted, #909399);
   font-size: 12px;
 }
 .output-path-tip {
   margin-top: 6px;
   font-size: 12px;
-  color: #606266;
+  color: var(--lit-text-2, #606266);
   word-break: break-all;
 }
 .shadow-digest {
@@ -214,9 +256,10 @@ watch(
   max-height: 48vh;
   overflow: auto;
   padding: 10px;
-  background: #fff;
+  background: var(--app-result-bg, #fff);
   border-radius: 10px;
-  border: 1px solid #ebeef5;
+  border: 1px solid var(--lit-border, #ebeef5);
+  color: var(--app-result-text, inherit);
   white-space: pre-wrap;
   word-break: break-word;
   margin: 0;
@@ -226,6 +269,21 @@ watch(
 }
 .next-actions {
   margin-top: 10px;
+}
+.next-hint {
+  margin-bottom: 6px;
+}
+.next-submit-row {
+  margin-top: 8px;
+}
+.graph-toolbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.graph-hint {
+  margin-top: 8px;
 }
 </style>
 

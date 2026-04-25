@@ -6,7 +6,7 @@ import json
 from typing import Optional
 
 from agents._internal_marks import z7_module_mark
-from agents.state.state_models import ChapterPlan
+from agents.state.state_models import ChapterPlan, EventPlan
 
 _MODULE_REV = z7_module_mark("pb")
 
@@ -81,6 +81,7 @@ def build_write_chapter_prompt(
     state_context: str,
     lorebook: str,
     plan: Optional[ChapterPlan] = None,
+    event_plan: Optional[EventPlan] = None,
     strict_no_supporting: bool = False,
     write_mode: str = "generate",
 ) -> tuple[str, str]:
@@ -109,6 +110,8 @@ def build_write_chapter_prompt(
         "正文写作不额外注入相邻章节的章节 JSON。\n\n"
         "ChapterPlan（用于写作）：\n"
         f"{plan_text}\n\n"
+        "EventPlan（事件级规划）：\n"
+        f"{(event_plan.model_dump_json(ensure_ascii=False, indent=2) if event_plan is not None else '[未提供事件计划]')}\n\n"
         "lorebook（静态设定）：\n"
         f"{lorebook}\n\n"
         "请输出纯文本章节正文（不要输出 JSON、不要输出标题前的解释）。\n"
@@ -121,6 +124,41 @@ def build_write_chapter_prompt(
         )
     if strict_no_supporting:
         human += "\n补充约束：未指定 supporting_character_ids，本章不要主动扩展知名配角出场。"
+    return system, human
+
+
+def build_plan_event_prompt(
+    *,
+    user_task: str,
+    event_id: str,
+    event_time_slot: str,
+    event_summary: str,
+    state_context: str,
+    lorebook: str,
+) -> tuple[str, str]:
+    system = (
+        "你是事件级剧情规划器。"
+        "你必须输出严格 JSON（只包含一个 JSON 对象），结构需符合 EventPlan。"
+    )
+    human = (
+        f"用户任务：{user_task}\n\n"
+        f"目标事件ID：{event_id}\n"
+        f"目标事件 time_slot：{event_time_slot}\n"
+        f"目标事件 summary：{event_summary}\n\n"
+        "当前小说状态（压缩）：\n"
+        f"{state_context}\n\n"
+        "lorebook（静态设定）：\n"
+        f"{lorebook}\n\n"
+        "请输出 EventPlan，要求：\n"
+        "- objective：该事件阶段要达成的剧情目标\n"
+        "- conflict：该事件核心冲突\n"
+        "- progression：3~6 条推进要点（按执行顺序）\n"
+        "- turning_points：1~3 条关键转折\n"
+        "- resolution_target：该事件阶段的收束目标\n"
+        "- constraints：3~8 条硬约束（设定一致性、角色动机、图谱关系、时间线边界）\n"
+        "- 所有内容必须与 event_id/time_slot/summary 以及当前状态一致\n"
+        "严格要求：只输出 JSON 对象，不要 markdown，不要代码块，不要解释。"
+    )
     return system, human
 
 

@@ -1,23 +1,23 @@
 <template>
-  <el-card class="panel" shadow="never">
-    <div style="display:flex; justify-content:space-between; align-items:center;">
-      <div style="font-weight:600;">设定标签</div>
+  <el-card class="panel tag-panel" shadow="never">
+    <div class="panel-head">
+      <div class="panel-title">设定标签</div>
       <span class="muted">可勾选 / 预览摘要</span>
     </div>
 
     <el-divider></el-divider>
 
-    <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
-      <el-button size="small" @click="onSelectAll">全选</el-button>
-      <el-button size="small" @click="onInvertSelect">反选</el-button>
-      <el-button size="small" type="warning" @click="onClearSelect">清空</el-button>
-      <el-button size="small" :disabled="!canSyncNovelTags" @click="onLoadNovelTags">
+    <div class="tag-actions">
+      <el-button size="small" type="primary" plain @click="onSelectAll">全选</el-button>
+      <el-button size="small" type="primary" plain @click="onInvertSelect">反选</el-button>
+      <el-button size="small" type="danger" plain @click="onClearSelect">清空</el-button>
+      <el-button size="small" type="primary" plain :disabled="!canSyncNovelTags" @click="onLoadNovelTags">
         从本书加载
       </el-button>
       <el-button size="small" type="success" :disabled="!canSyncNovelTags" @click="onSaveNovelTags">
         保存到本书
       </el-button>
-      <el-button size="small" type="info" @click="onOpenTagManager">
+      <el-button size="small" type="primary" plain @click="onOpenTagManager">
         管理Tags
       </el-button>
       <el-button size="small" type="primary" :loading="buildingLoreSummary" @click="onBuildCurrentLoreSummary">
@@ -25,7 +25,7 @@
       </el-button>
     </div>
 
-    <div v-if="tagsLoading" style="color:#909399;">正在加载设定文件...</div>
+    <div v-if="tagsLoading" class="muted">正在加载设定文件...</div>
     <div v-else class="tag-list-scroll">
       <el-tree
         :ref="onTagTreeRef"
@@ -56,8 +56,9 @@
                 <template #reference>
                   <el-button
                     size="small"
-                    link
+                    plain
                     type="primary"
+                    class="tag-inline-action"
                     @click.stop
                   >
                     预览摘要
@@ -66,8 +67,9 @@
               </el-popover>
               <el-button
                 size="small"
-                link
+                plain
                 type="primary"
+                class="tag-inline-action"
                 @click.stop.prevent="onOpenTagDialog(data.tag)"
               >
                 详情
@@ -105,8 +107,29 @@ defineProps<{
 </script>
 
 <style scoped>
+.tag-panel {
+  border: 1px solid var(--app-panel-border, rgba(126, 163, 227, 0.45));
+}
+.panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.panel-title {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.tag-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.tag-inline-action {
+  min-width: 72px;
+}
 .muted {
-  color: #909399;
+  color: var(--lit-muted, #909399);
   font-size: 12px;
 }
 .tag-list-scroll {
@@ -116,6 +139,10 @@ defineProps<{
 }
 .tag-tree {
   font-size: 13px;
+  border: 1px solid var(--app-tag-tree-border, rgba(130, 151, 190, 0.24));
+  border-radius: 10px;
+  padding: 6px;
+  background: var(--app-tag-tree-bg, transparent);
 }
 .tree-node-row {
   width: 100%;
@@ -132,7 +159,7 @@ defineProps<{
 .tag-hint {
   margin-top: 6px;
   font-size: 12px;
-  color: #909399;
+  color: var(--lit-muted, #909399);
 }
 .preview-scroll {
   max-height: 420px;

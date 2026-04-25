@@ -10,7 +10,7 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
 
 <template>
   <el-dialog v-model="graph.graphFullscreenVisible" title="图谱可视化（全屏）" fullscreen append-to-body>
-    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+    <div class="graph-toolbar">
       <el-button size="small" type="warning" class="back-btn-highlight" @click="graph.closeGraphDialog">返回</el-button>
       <el-segmented
         :model-value="graph.graphView"
@@ -21,12 +21,33 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
           { label: '混合网', value: 'mixed' },
         ]"
       />
+      <template v-if="graph.graphView === 'events'">
+        <el-button
+          size="small"
+          :type="graph.graphEventsShowAllChapters ? 'primary' : 'default'"
+          plain
+          @click="graph.graphEventsToggleAllChapters"
+        >
+          {{ graph.graphEventsShowAllChapters ? "收起全部章节" : "展开全部章节" }}
+        </el-button>
+        <el-tag v-if="graph.graphEventsShowAllChapters" size="small" type="success" effect="light">已展开全部章节</el-tag>
+        <el-tag
+          v-else-if="(graph.graphEventsSelectedTimelineId || '').trim()"
+          size="small"
+          type="info"
+          effect="light"
+        >章节：当前选中时间线</el-tag>
+        <el-tag v-else size="small" type="warning" effect="light">章节：已隐藏（点击时间线以展开该事件的章节）</el-tag>
+      </template>
       <el-button size="small" :loading="graph.graphLoading" @click="graph.loadGraph">刷新图谱</el-button>
       <el-button size="small" type="primary" plain @click="graph.exportGraphJson" :disabled="!novelId">
         导出 JSON
       </el-button>
       <el-button size="small" type="success" plain @click="graph.openGraphNodeCreate" :disabled="!novelId">
         新建节点
+      </el-button>
+      <el-button size="small" plain @click="graph.graphAdvancedVisible = true" :disabled="!novelId">
+        高级操作
       </el-button>
       <el-input
         v-model="graph.graphSearchQuery"
@@ -51,10 +72,11 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
       <el-tag v-if="(graph.graphSearchQuery || '').trim()" size="small" type="warning" effect="light">
         命中 {{ graph.graphSearchMatchCount }} 个节点
       </el-tag>
-      <el-button size="small" text type="primary" @click="graph.clearGraphSearch">清空搜索</el-button>
-      <span class="muted">点击节点可编辑/删除；滚轮缩放，拖拽平移。有搜索词时未命中节点变淡，边随之减弱。</span>
+      <el-button size="small" plain type="primary" @click="graph.clearGraphSearch">清空搜索</el-button>
+      <span class="muted"
+        >点击节点可编辑/删除；滚轮缩放，拖拽平移；按住右键从节点拖向另一节点可快速连线。有搜索词时未命中节点变淡，边随之减弱。</span>
     </div>
-    <div style="height:10px;"></div>
+    <div class="gap-10"></div>
     <div class="graph-admin-panel">
       <div class="graph-filter-grid">
         <div class="graph-filter-col">
@@ -76,20 +98,24 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
           </el-checkbox-group>
         </div>
       </div>
-      <el-space wrap style="margin-top:8px;">
+      <el-space wrap class="top-8">
         <el-checkbox v-model="graph.graphOnlyIsolatedNodes">只看孤立节点</el-checkbox>
-        <el-button size="small" text type="primary" @click="graph.resetGraphFilters">重置筛选</el-button>
+        <el-button size="small" @click="graph.focusNextIsolatedNode">检查孤立节点</el-button>
+        <el-button size="small" @click="graph.focusNextTimelineGap">检查断链时间线</el-button>
+        <el-button size="small" plain type="primary" @click="graph.resetGraphFilters">重置筛选</el-button>
         <el-tag size="small">节点 {{ graph.graphStats.nodeTotal }}</el-tag>
         <el-tag size="small" type="success">边 {{ graph.graphStats.edgeTotal }}</el-tag>
+        <el-tag size="small" type="warning">孤立 {{ graph.graphIsolatedCount }}</el-tag>
+        <el-tag size="small" type="warning">断链 {{ graph.graphTimelineGapCount }}</el-tag>
         <el-tag size="small">人物 {{ graph.graphStats.nodeByType.character }}</el-tag>
         <el-tag size="small">时间线 {{ graph.graphStats.nodeByType.timeline_event }}</el-tag>
         <el-tag size="small">章节 {{ graph.graphStats.nodeByType.chapter_event }}</el-tag>
         <el-tag size="small">势力 {{ graph.graphStats.nodeByType.faction }}</el-tag>
       </el-space>
     </div>
-    <div style="height:10px;"></div>
+    <div class="gap-10"></div>
     <div class="graph-box-fullscreen">
-      <div v-if="!novelId" style="color:#909399;">请先选择/创建小说，再查看图谱。</div>
+      <div v-if="!novelId" class="muted">请先选择/创建小说，再查看图谱。</div>
       <div v-else :ref="graph.onGraphRef" class="graph-canvas-fullscreen"></div>
     </div>
   </el-dialog>
@@ -97,7 +123,7 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
   <el-dialog v-model="graph.graphCreateVisible" title="新建图谱节点" width="480px" append-to-body destroy-on-close>
     <el-form label-position="top">
       <el-form-item label="节点类型">
-        <el-select v-model="graph.graphCreateType" style="width:100%;">
+        <el-select v-model="graph.graphCreateType" class="w-full">
           <el-option label="人物（character）" value="character" />
           <el-option label="时间线事件（timeline_event）" value="timeline_event" />
           <el-option label="势力（faction）" value="faction" />
@@ -112,7 +138,7 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
         </el-form-item>
       </template>
       <template v-else-if="graph.graphCreateType === 'timeline_event'">
-        <div class="muted" style="margin-bottom:12px; line-height:1.55;">
+        <div class="muted muted-bottom-12">
           事件文案存在 <code>state.json</code> → <code>world.timeline</code>；先后顺序由
           <code>event_relations.json</code> 的 <code>timeline_next</code> 边表示。
           与章节的弱关联靠<strong>相同的 time_slot 文本</strong>（不再写章号）。
@@ -149,8 +175,8 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
     </div>
     <template v-else-if="graph.graphEditEdge">
       <div class="muted">边：<code>{{ graph.graphEditEdge.source }}</code> -> <code>{{ graph.graphEditEdge.target }}</code></div>
-      <div class="muted" style="margin-top:4px;">类型：{{ graph.graphEditEdge.type || "relationship" }}</div>
-      <div style="height:10px;"></div>
+      <div class="muted muted-top-4">类型：{{ graph.graphEditEdge.type || "relationship" }}</div>
+      <div class="gap-10"></div>
       <template v-if="String(graph.graphEditEdge.type || '').toLowerCase() === 'relationship'">
         <el-form label-position="top">
           <el-form-item label="source">
@@ -166,7 +192,7 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
           <el-form-item label="怎么关联（label）">
             <el-input v-model="graph.edgeRelLabel" placeholder="例如：师徒 / 敌对 / 欠人情 / 互相利用" />
           </el-form-item>
-          <div style="display:flex; gap:8px;">
+          <div class="row-actions">
             <el-button type="primary" @click="graph.saveEdgeRelationship">保存边关系</el-button>
             <el-button type="danger" plain @click="graph.deleteEdgeRelationship">删除这条边</el-button>
           </div>
@@ -187,7 +213,7 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
           <el-form-item label="出场/角色定位（label）">
             <el-input v-model="graph.edgeRelLabel" placeholder="例如：出场 / 指挥 / 旁观 / 受伤撤离" />
           </el-form-item>
-          <div style="display:flex; gap:8px;">
+          <div class="row-actions">
             <el-button type="primary" @click="graph.saveEdgeRelationship">保存边</el-button>
             <el-button type="danger" plain @click="graph.deleteEdgeRelationship">删除这条边</el-button>
           </div>
@@ -207,11 +233,11 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
               <el-option v-for="t in graph.graphTimelineOptions" :key="`tt-${t.id}`" :label="t.label" :value="t.id" />
             </el-select>
           </el-form-item>
-          <div style="display:flex; gap:8px;">
+          <div class="row-actions">
             <el-button type="primary" @click="graph.saveEdgeRelationship">保存边</el-button>
             <el-button type="danger" plain @click="graph.deleteEdgeRelationship">删除当前边</el-button>
           </div>
-          <div class="muted" style="margin-top:8px;">提示：timeline_next 现在直接写入“事件关系表”；手工编辑的连线会保留，未定义下跳才会自动补默认顺序边。</div>
+          <div class="muted muted-top-8">提示：timeline_next 现在直接写入“事件关系表”；手工编辑的连线会保留，未定义下跳才会自动补默认顺序边。</div>
         </el-form>
       </template>
       <template v-else-if="String(graph.graphEditEdge.type || '').toLowerCase() === 'chapter_belongs'">
@@ -220,7 +246,7 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
             <el-input v-model="graph.edgeSourceDraft" disabled />
           </el-form-item>
           <el-form-item label="归属时间线事件（target）">
-            <el-select v-model="graph.edgeTargetDraft" filterable clearable placeholder="选择事件（清空则仅按 time_slot 弱对齐）" style="width:100%;">
+            <el-select v-model="graph.edgeTargetDraft" filterable clearable placeholder="选择事件（清空则仅按 time_slot 弱对齐）" class="w-full">
               <el-option label="（清空显式归属）" value="" />
               <el-option
                 v-for="t in graph.graphTimelineOptions"
@@ -230,11 +256,11 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
               />
             </el-select>
           </el-form-item>
-          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <div class="row-actions-wrap">
             <el-button type="primary" @click="graph.saveEdgeRelationship" :disabled="!novelId">保存归属</el-button>
             <el-button type="danger" plain @click="graph.deleteEdgeRelationship" :disabled="!novelId">清除显式归属</el-button>
           </div>
-          <div class="muted" style="margin-top:8px;">
+          <div class="muted muted-top-8">
             多章可指向同一事件；未选事件时，若章节 <code>time_slot</code> 与某时间线事件一致，仍会画出弱对齐边。
           </div>
         </el-form>
@@ -245,7 +271,7 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
     </template>
     <template v-else>
       <div class="muted">节点：<code>{{ graph.graphEditNode.id }}</code>（{{ graph.graphEditNode.type }}）</div>
-      <div style="height:10px;"></div>
+      <div class="gap-10"></div>
 
       <template v-if="graph.graphEditNode.type === 'character'">
         <el-form label-position="top">
@@ -258,15 +284,15 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
           <el-form-item label="known_facts（每行一条）">
             <el-input v-model="graph.graphCharFacts" type="textarea" :rows="4" />
           </el-form-item>
-          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <div class="row-actions-wrap">
             <el-button type="primary" @click="graph.saveGraphNodePatch" :disabled="!novelId">保存节点</el-button>
             <el-button type="danger" plain @click="graph.deleteCurrentGraphNode" :disabled="!novelId">删除节点</el-button>
           </div>
         </el-form>
 
         <el-divider />
-        <div style="font-weight:600; margin-bottom:6px;">人物关系（relationship）</div>
-        <div class="muted" style="margin-bottom:10px;">修改 source 角色 -> target 角色 的关系描述。</div>
+        <div class="section-subtitle">人物关系（relationship）</div>
+        <div class="muted muted-bottom-10">修改 source 角色 -> target 角色 的关系描述。</div>
         <el-form label-position="top">
           <el-form-item label="关联到哪个角色（target）">
             <el-select v-model="graph.relTarget" filterable clearable placeholder="选择一个角色">
@@ -276,7 +302,7 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
           <el-form-item label="怎么关联（label）">
             <el-input v-model="graph.relLabel" placeholder="例如：师徒 / 敌对 / 欠人情 / 互相利用" />
           </el-form-item>
-          <div style="display:flex; gap:8px;">
+          <div class="row-actions">
             <el-button type="primary" @click="graph.setRelationship">新增/更新关系</el-button>
             <el-button type="danger" plain @click="graph.deleteRelationship">删除关系</el-button>
           </div>
@@ -288,7 +314,7 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
           <el-form-item label="description">
             <el-input v-model="graph.graphFacDesc" type="textarea" :rows="6" />
           </el-form-item>
-          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <div class="row-actions-wrap">
             <el-button type="primary" @click="graph.saveGraphNodePatch" :disabled="!novelId">保存节点</el-button>
             <el-button type="danger" plain @click="graph.deleteCurrentGraphNode" :disabled="!novelId">删除节点</el-button>
           </div>
@@ -325,12 +351,12 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
               />
             </el-select>
           </el-form-item>
-          <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+          <div class="row-actions-wrap row-actions-align">
             <el-button @click="graph.saveTimelineNeighbors" :disabled="!novelId">保存上下关系</el-button>
             <el-button type="primary" @click="graph.saveGraphNodePatch" :disabled="!novelId">保存节点</el-button>
             <el-button type="danger" plain @click="graph.deleteCurrentGraphNode" :disabled="!novelId">删除节点</el-button>
           </div>
-          <div class="muted" style="margin-top:10px;">
+          <div class="muted muted-top-10">
             删除时间线事件会移除该事件的稳定 id，并清理所有以该 id 为端点的关系边；其余事件 id 不变。
           </div>
         </el-form>
@@ -344,7 +370,7 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
               filterable
               clearable
               placeholder="选择事件；清空则仅按 time_slot 弱对齐"
-              style="width:100%;"
+              class="w-full"
             >
               <el-option label="（清空显式归属）" value="" />
               <el-option
@@ -355,10 +381,10 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
               />
             </el-select>
           </el-form-item>
-          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <div class="row-actions-wrap">
             <el-button type="primary" @click="graph.saveChapterEventTimeline" :disabled="!novelId">保存归属</el-button>
           </div>
-          <div class="muted" style="margin-top:10px;">
+          <div class="muted muted-top-10">
             同一事件可挂多章；正文文件 <code>ChapterRecord.timeline_event_id</code> 为真源，落盘会同步
             <code>event_relations</code> 中 <code>chapter_belongs</code> 边。
           </div>
@@ -370,11 +396,117 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
       </template>
     </template>
   </el-drawer>
+
+  <el-drawer v-model="graph.graphAdvancedVisible" title="图谱高级操作" size="560px" append-to-body>
+    <div class="muted muted-bottom-10">用于低频维护操作，避免占用主面板空间。</div>
+    <el-divider />
+    <div class="section-subtitle">批量删除边</div>
+    <div class="advanced-row">
+      <el-select
+        v-model="graph.graphBatchEdgeTypes"
+        multiple
+        collapse-tags
+        collapse-tags-tooltip
+        clearable
+        placeholder="选择要删除的边类型"
+        class="advanced-select-wide"
+      >
+        <el-option label="relationship" value="relationship" />
+        <el-option label="appear" value="appear" />
+        <el-option label="timeline_next" value="timeline_next" />
+        <el-option label="chapter_belongs" value="chapter_belongs" />
+      </el-select>
+      <el-select
+        v-model="graph.graphBatchSourceNodeType"
+        clearable
+        placeholder="source 节点类型（可选）"
+        class="advanced-select-medium"
+      >
+        <el-option label="人物" value="character" />
+        <el-option label="时间线事件" value="timeline_event" />
+        <el-option label="章节事件" value="chapter_event" />
+        <el-option label="势力" value="faction" />
+      </el-select>
+      <el-select
+        v-model="graph.graphBatchTargetNodeType"
+        clearable
+        placeholder="target 节点类型（可选）"
+        class="advanced-select-medium"
+      >
+        <el-option label="人物" value="character" />
+        <el-option label="时间线事件" value="timeline_event" />
+        <el-option label="章节事件" value="chapter_event" />
+        <el-option label="势力" value="faction" />
+      </el-select>
+      <div class="row-actions-wrap">
+        <el-button type="danger" plain @click="graph.batchDeleteEdges" :disabled="!novelId">执行批量删边</el-button>
+      </div>
+    </div>
+  </el-drawer>
 </template>
 
 <style scoped>
+.graph-toolbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.gap-10 {
+  height: 10px;
+}
+.top-8 {
+  margin-top: 8px;
+}
+.w-full {
+  width: 100%;
+}
+.muted-top-4 {
+  margin-top: 4px;
+}
+.muted-top-8 {
+  margin-top: 8px;
+}
+.muted-top-10 {
+  margin-top: 10px;
+}
+.muted-bottom-10 {
+  margin-bottom: 10px;
+}
+.muted-bottom-12 {
+  margin-bottom: 12px;
+  line-height: 1.55;
+}
+.row-actions {
+  display: flex;
+  gap: 8px;
+}
+.row-actions-wrap {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.row-actions-align {
+  align-items: center;
+}
+.section-subtitle {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.advanced-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+.advanced-select-wide {
+  min-width: 320px;
+}
+.advanced-select-medium {
+  min-width: 230px;
+}
 .muted {
-  color: #909399;
+  color: var(--lit-muted, #909399);
   font-size: 12px;
 }
 .graph-drawer-empty {
@@ -385,16 +517,16 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
 }
 .graph-box-fullscreen {
   height: calc(100vh - 180px);
-  border: 1px solid #ebeef5;
+  border: 1px solid var(--app-graph-box-border, rgba(111, 146, 214, 0.4));
   border-radius: 10px;
-  background: #fff;
+  background: var(--app-graph-box-bg, linear-gradient(180deg, rgba(14, 24, 43, 0.95), rgba(10, 18, 33, 0.95)));
   overflow: hidden;
 }
 .graph-admin-panel {
-  border: 1px solid #ebeef5;
+  border: 1px solid var(--app-graph-admin-border, rgba(111, 146, 214, 0.4));
   border-radius: 10px;
   padding: 10px 12px;
-  background: #fcfcfd;
+  background: var(--app-graph-admin-bg, linear-gradient(180deg, rgba(17, 28, 52, 0.78), rgba(12, 22, 41, 0.84)));
 }
 .graph-filter-grid {
   display: grid;
@@ -402,9 +534,9 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
   gap: 10px 16px;
 }
 .graph-filter-col {
-  border: 1px solid #eef1f6;
+  border: 1px solid var(--app-graph-filter-border, rgba(123, 155, 211, 0.33));
   border-radius: 8px;
-  background: #fff;
+  background: var(--app-graph-filter-bg, rgba(19, 31, 56, 0.82));
   padding: 8px 10px;
 }
 .graph-filter-title {
@@ -435,38 +567,29 @@ const graph = inject(GRAPH_INJECTION_KEY) as GraphController;
   flex-shrink: 0;
 }
 .graph-search-prefix {
-  color: #a67c2a;
+  color: var(--app-graph-search-prefix, #76bcff);
   font-size: 16px;
   margin-right: 2px;
 }
 .graph-search-input :deep(.el-input__wrapper) {
-  background: linear-gradient(180deg, #fffef9 0%, #faf4e8 100%);
+  background: var(--app-graph-search-bg, linear-gradient(180deg, rgba(23, 35, 64, 0.9) 0%, rgba(16, 26, 48, 0.92) 100%));
   border-radius: 10px;
-  box-shadow:
-    0 0 0 1px rgba(196, 165, 116, 0.65) inset,
-    0 2px 10px rgba(74, 102, 118, 0.08);
+  box-shadow: var(--app-graph-search-shadow, 0 0 0 1px rgba(95, 167, 255, 0.6) inset, 0 2px 10px rgba(3, 13, 31, 0.35));
   transition:
     box-shadow 0.2s ease,
     background 0.2s ease;
 }
 .graph-search-input :deep(.el-input__wrapper:hover) {
-  box-shadow:
-    0 0 0 1px #c4a574 inset,
-    0 4px 14px rgba(184, 134, 11, 0.12);
+  box-shadow: var(--app-graph-search-hover-shadow, 0 0 0 1px rgba(123, 195, 255, 0.85) inset, 0 4px 14px rgba(42, 140, 231, 0.2));
 }
 .graph-search-input :deep(.el-input__wrapper.is-focus) {
-  background: #fffdf8;
-  box-shadow:
-    0 0 0 2px #b8860b inset,
-    0 0 0 4px rgba(184, 134, 11, 0.18),
-    0 6px 20px rgba(184, 134, 11, 0.15);
+  background: var(--app-graph-search-focus-bg, rgba(21, 34, 62, 0.96));
+  box-shadow: var(--app-graph-search-focus-shadow, 0 0 0 2px rgba(123, 195, 255, 0.9) inset, 0 0 0 4px rgba(91, 171, 255, 0.2), 0 6px 20px rgba(42, 140, 231, 0.28));
 }
 .graph-search-input--active :deep(.el-input__wrapper:not(.is-focus)) {
-  box-shadow:
-    0 0 0 2px rgba(184, 134, 11, 0.45) inset,
-    0 2px 12px rgba(184, 134, 11, 0.14);
+  box-shadow: var(--app-graph-search-active-shadow, 0 0 0 2px rgba(91, 171, 255, 0.45) inset, 0 2px 12px rgba(42, 140, 231, 0.22));
 }
 .graph-search-input :deep(.el-input__inner::placeholder) {
-  color: #a8987a;
+  color: var(--app-graph-search-placeholder, #88a7d3);
 }
 </style>

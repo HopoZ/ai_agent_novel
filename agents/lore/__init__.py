@@ -11,12 +11,17 @@ from .lore_summary import (
     save_summary,
     source_hash_from_map,
 )
-from .lore_runtime import build_lorebook, build_lore_summary_llm
+from .lore_runtime import (
+    build_lorebook,
+    build_lore_summary_llm,
+    regenerate_auto_lore_with_graph,
+)
 
 __all__ = [
     "LoreLoader",
     "build_lorebook",
     "build_lore_summary_llm",
+    "regenerate_auto_lore_with_graph",
     "build_source_map",
     "get_lore_summary",
     "load_cached_summary",

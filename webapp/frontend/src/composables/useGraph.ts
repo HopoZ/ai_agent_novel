@@ -9,6 +9,10 @@ export function useGraph(novelId: Ref<string>) {
   const graphFullscreenVisible = ref(false);
   function onGraphViewChange(v: "people" | "events" | "mixed") {
     graphView.value = v;
+    if (v === "events") {
+      graphEventsShowAllChapters.value = false;
+      graphEventsSelectedTimelineId.value = null;
+    }
   }
   const graphViewLabel = computed(() => {
     if (graphView.value === "people") return "人物关系网";
@@ -69,6 +73,20 @@ export function useGraph(novelId: Ref<string>) {
     "chapter_belongs",
   ]);
   const graphOnlyIsolatedNodes = ref(false);
+  const graphRenderedNodes = ref<Record<string, unknown>[]>([]);
+  const graphRenderedNodeIndexById = ref<Record<string, number>>({});
+  const graphIsolatedNodeIds = ref<string[]>([]);
+  const graphTimelineGapNodeIds = ref<string[]>([]);
+  const graphIsolatedFocusIdx = ref(0);
+  const graphTimelineGapFocusIdx = ref(0);
+  const graphAdvancedVisible = ref(false);
+  const graphBatchEdgeTypes = ref<string[]>([]);
+  const graphBatchSourceNodeType = ref("");
+  const graphBatchTargetNodeType = ref("");
+  /** 剧情事件网：为 true 时显示全部章节节点；否则仅显示「当前选中的时间线」下的章节。 */
+  const graphEventsShowAllChapters = ref(false);
+  /** 事件图中当前选中的时间线事件 id（控制可见章节）。 */
+  const graphEventsSelectedTimelineId = ref<string | null>(null);
 
   function graphNodeSearchBlob(n: Record<string, unknown>): string {
     const parts: string[] = [
@@ -97,11 +115,13 @@ export function useGraph(novelId: Ref<string>) {
   }
 
   const graphSearchMatchCount = computed(() => {
-    const payload = graphData.value;
     const q = graphSearchQuery.value.trim();
-    if (!payload?.nodes?.length || !q) return 0;
-    return (payload.nodes as Record<string, unknown>[]).filter((n) => graphNodeMatchesQuery(n, q)).length;
+    if (!graphRenderedNodes.value.length || !q) return 0;
+    return graphRenderedNodes.value.filter((n) => graphNodeMatchesQuery(n, q)).length;
   });
+
+  const graphIsolatedCount = computed(() => graphIsolatedNodeIds.value.length);
+  const graphTimelineGapCount = computed(() => graphTimelineGapNodeIds.value.length);
 
   const graphStats = computed(() => {
     const payload = graphData.value;
@@ -535,12 +555,21 @@ export function useGraph(novelId: Ref<string>) {
     onResize();
   }
 
+  function graphEventsToggleAllChapters() {
+    graphEventsShowAllChapters.value = !graphEventsShowAllChapters.value;
+  }
+
   function closeGraphDialog() {
     graphFullscreenVisible.value = false;
   }
 
   function onResize() {
-    if (graphChart) graphChart.resize();
+    if (graphChart) {
+      graphChart.resize();
+      if (graphFullscreenVisible.value && graphView.value === "events" && graphData.value) {
+        void nextTick(() => renderGraph());
+      }
+    }
   }
 
   function typeColor(t: string) {
@@ -551,20 +580,499 @@ export function useGraph(novelId: Ref<string>) {
     return "#A3B1BF";
   }
 
+  /** 右键从节点拖向另一节点快速连线 */
+  let rmbLinkDrag: { sourceId: string; x1: number; y1: number } | null = null;
+
+  function findGraphDataIndexAtLocalPixel(x: number, y: number): number {
+    if (!graphChart) return -1;
+    const model = (graphChart as unknown as { getModel: () => { getSeriesByIndex: (i: number) => unknown } }).getModel();
+    const series = model.getSeriesByIndex(0) as { getData?: () => { count: () => number; getItemLayout: (i: number) => number[] } };
+    const d = series?.getData?.();
+    if (!d) return -1;
+    const n = d.count();
+    let best = -1;
+    let bestDist = Infinity;
+    for (let i = 0; i < n; i += 1) {
+      const layout = d.getItemLayout(i);
+      if (!layout || layout.length < 2) continue;
+      const px = graphChart!.convertToPixel({ seriesIndex: 0 }, [layout[0]!, layout[1]!]);
+      if (!px || !Array.isArray(px)) continue;
+      const dist = Math.hypot((px[0] ?? 0) - x, (px[1] ?? 0) - y);
+      const r = 32;
+      if (dist < r && dist < bestDist) {
+        bestDist = dist;
+        best = i;
+      }
+    }
+    return best;
+  }
+
+  function clearRmbLinkGraphic() {
+    if (!graphChart) return;
+    graphChart.setOption({ graphic: [] as unknown as echarts.GraphicComponentOption[] }, { replaceMerge: ["graphic"] });
+  }
+
+  function updateRmbLinkGraphic(x2: number, y2: number) {
+    if (!graphChart || !rmbLinkDrag) return;
+    const { x1, y1 } = rmbLinkDrag;
+    graphChart.setOption(
+      {
+        graphic: [
+          {
+            id: "graph-rmb-link",
+            type: "line" as const,
+            shape: { x1, y1, x2, y2 },
+            style: { stroke: "#5B8FF9", lineWidth: 2, lineDash: [5, 4] },
+            z: 200,
+            silent: true,
+          },
+        ] as echarts.GraphicComponentOption[],
+      },
+      { replaceMerge: ["graphic"] }
+    );
+  }
+
+  async function completeRmbLink(a: Record<string, unknown>, b: Record<string, unknown>) {
+    const id = nid();
+    if (!id) return;
+    const ida = String(a.id || "");
+    const idb = String(b.id || "");
+    const ta = String(a.type || "");
+    const tb = String(b.type || "");
+    if (ida && idb && ida === idb) {
+      ElMessage.info("起止为同一节点，已取消。");
+      return;
+    }
+    if (ta === "faction" || tb === "faction") {
+      ElMessage.warning("势力节点暂不支持拖线连边，请在编辑面板中处理。");
+      return;
+    }
+
+    try {
+      if (ta === "character" && tb === "character") {
+        if (!ida.startsWith("char:") || !idb.startsWith("char:")) {
+          ElMessage.error("人物关系只支持 char:* 与 char:* 之间。");
+          return;
+        }
+        let label = "认识";
+        try {
+          const res = await ElMessageBox.prompt("填写人物关系说明（会写入图谱边）", "建立人物关系", {
+            inputValue: "认识",
+            inputPlaceholder: "如：师徒、密友、敌对",
+            confirmButtonText: "连接",
+            cancelButtonText: "取消",
+            inputPattern: /[\s\S]{1,200}/,
+            inputErrorMessage: "请填写 1～200 字的关系说明。",
+          });
+          label = String((res as { value?: string })?.value || "").trim();
+        } catch {
+          return;
+        }
+        if (!label) {
+          ElMessage.error("未填写关系说明。");
+          return;
+        }
+        await apiJson(`/api/novels/${encodeURIComponent(id)}/graph/relationship`, "POST", {
+          source: ida,
+          target: idb,
+          label,
+          op: "set",
+        });
+        ElMessage.success("已建立人物关系");
+        await loadGraph();
+        return;
+      }
+
+      if (ta === "timeline_event" && tb === "timeline_event") {
+        if (!ida.startsWith("ev:timeline:") || !idb.startsWith("ev:timeline:")) {
+          ElMessage.error("时间推进边只能连接时间线事件节点。");
+          return;
+        }
+        if (ida.includes(":draft_") || idb.includes(":draft_")) {
+          ElMessage.error("请连接非草稿的正式时间线事件。");
+          return;
+        }
+        await apiJson(`/api/novels/${encodeURIComponent(id)}/graph/edge`, "PATCH", {
+          edge_type: "timeline_next",
+          source: ida,
+          target: idb,
+          new_source: ida,
+          new_target: idb,
+          label: "时间推进",
+          op: "set",
+        });
+        ElMessage.success("已添加时间线推进");
+        await loadGraph();
+        return;
+      }
+
+      let appearSrc = "";
+      let appearTgt = "";
+      if (ta === "character" && (tb === "chapter_event" || tb === "timeline_event")) {
+        if (!ida.startsWith("char:")) {
+          ElMessage.error("出场关系起点需为人物。");
+          return;
+        }
+        if (tb === "chapter_event" && !idb.startsWith("ev:chapter:")) {
+          ElMessage.error("无效章节节点。");
+          return;
+        }
+        if (tb === "timeline_event" && (!idb.startsWith("ev:timeline:") || idb.includes(":draft_"))) {
+          ElMessage.error("出场终点需为正式时间线事件。");
+          return;
+        }
+        appearSrc = ida;
+        appearTgt = idb;
+      } else if (tb === "character" && (ta === "chapter_event" || ta === "timeline_event")) {
+        if (!idb.startsWith("char:")) {
+          ElMessage.error("出场关系起点需为人物。");
+          return;
+        }
+        if (ta === "chapter_event" && !ida.startsWith("ev:chapter:")) {
+          ElMessage.error("无效章节节点。");
+          return;
+        }
+        if (ta === "timeline_event" && (!ida.startsWith("ev:timeline:") || ida.includes(":draft_"))) {
+          ElMessage.error("出场终点需为正式时间线事件。");
+          return;
+        }
+        appearSrc = idb;
+        appearTgt = ida;
+      }
+
+      if (appearSrc && appearTgt) {
+        await apiJson(`/api/novels/${encodeURIComponent(id)}/graph/edge`, "PATCH", {
+          edge_type: "appear",
+          source: appearSrc,
+          target: appearTgt,
+          new_source: appearSrc,
+          new_target: appearTgt,
+          label: "出场",
+          op: "set",
+        });
+        ElMessage.success("已添加出场关系");
+        await loadGraph();
+        return;
+      }
+
+      let chap: string;
+      let tev: string;
+      if (ta === "chapter_event" && tb === "timeline_event") {
+        if (!ida.startsWith("ev:chapter:") || !idb.startsWith("ev:timeline:") || idb.includes(":draft_")) {
+          ElMessage.error("章节归属需从章节连向正式时间线事件。");
+          return;
+        }
+        chap = ida;
+        tev = idb;
+      } else if (tb === "chapter_event" && ta === "timeline_event") {
+        if (!idb.startsWith("ev:chapter:") || !ida.startsWith("ev:timeline:") || ida.includes(":draft_")) {
+          ElMessage.error("章节归属需从章节连向正式时间线事件。");
+          return;
+        }
+        chap = idb;
+        tev = ida;
+      } else {
+        ElMessage.warning("当前起止类型不支持拖线快速连边。人物↔人物、时间线↔时间线、人物↔章/时间线、章节↔时间线（归属）可试。");
+        return;
+      }
+
+      await apiJson(`/api/novels/${encodeURIComponent(id)}/graph/edge`, "PATCH", {
+        edge_type: "chapter_belongs",
+        source: chap,
+        target: "",
+        new_source: chap,
+        new_target: tev,
+        label: "属于事件",
+        op: "set",
+      });
+      ElMessage.success("已设置章节所属时间线事件");
+      await loadGraph();
+    } catch (e: unknown) {
+      const err = e as { message?: string };
+      ElMessage.error(err?.message || String(e));
+    }
+  }
+
+  function onRmbLinkMove(e: MouseEvent) {
+    if (!rmbLinkDrag || !graphEl.value) return;
+    const r = graphEl.value.getBoundingClientRect();
+    updateRmbLinkGraphic(e.clientX - r.left, e.clientY - r.top);
+  }
+
+  function onRmbLinkUp(e: MouseEvent) {
+    if (!rmbLinkDrag) return;
+    if (!graphEl.value || !graphChart) {
+      rmbLinkDrag = null;
+      return;
+    }
+    const r = graphEl.value.getBoundingClientRect();
+    const x = e.clientX - r.left;
+    const y = e.clientY - r.top;
+    const srcId = rmbLinkDrag.sourceId;
+    rmbLinkDrag = null;
+    document.removeEventListener("mousemove", onRmbLinkMove, true);
+    document.removeEventListener("mouseup", onRmbLinkUp, true);
+    clearRmbLinkGraphic();
+
+    const tIdx = findGraphDataIndexAtLocalPixel(x, y);
+    if (tIdx < 0) return;
+    const nlist = graphRenderedNodes.value;
+    const target = tIdx < nlist.length ? nlist[tIdx] : null;
+    if (!target) return;
+    if (String(target.id || "") === srcId) return;
+    const source = nlist.find((n) => String(n.id || "") === srcId);
+    if (!source) return;
+    void completeRmbLink(source as Record<string, unknown>, target as Record<string, unknown>);
+  }
+
   function ensureGraphChart() {
     if (!graphEl.value) return;
     if (graphChart) return;
     graphChart = echarts.init(graphEl.value, undefined, { renderer: "canvas" });
     window.addEventListener("resize", onResize);
+    const dom = graphChart.getDom();
+    dom.addEventListener("contextmenu", (ev) => {
+      ev.preventDefault();
+    });
     graphChart.on("click", (params: any) => {
       const pData = params?.data;
       if (params?.dataType === "node" && pData && typeof pData === "object" && !Array.isArray(pData)) {
-        openGraphEditor(pData as Record<string, unknown>);
+        const rec = pData as Record<string, unknown>;
+        if (graphView.value === "events" && String(rec.type) === "timeline_event") {
+          graphEventsShowAllChapters.value = false;
+          graphEventsSelectedTimelineId.value = String(rec.id || "");
+        }
+        openGraphEditor(rec);
       }
       if (params?.dataType === "edge" && pData && typeof pData === "object" && !Array.isArray(pData)) {
         openGraphEdgeEditor(pData as Record<string, unknown>);
       }
     });
+    graphChart.on("mousedown", (params: any) => {
+      const ne = (params?.event?.event ?? params?.event) as MouseEvent | undefined;
+      if (!ne || (ne as MouseEvent).button !== 2) return;
+      if (params?.dataType !== "node" || !params?.data) return;
+      (ne as MouseEvent).preventDefault();
+      (ne as MouseEvent).stopPropagation?.();
+      const zev = params?.event;
+      const x1 =
+        typeof zev?.zrX === "number" ? zev.zrX : typeof zev?.offsetX === "number" ? zev.offsetX : 0;
+      const y1 =
+        typeof zev?.zrY === "number" ? zev.zrY : typeof zev?.offsetY === "number" ? zev.offsetY : 0;
+      const src = params.data as Record<string, unknown>;
+      const sourceId = String(src.id || "");
+      if (!sourceId) return;
+      rmbLinkDrag = { sourceId, x1, y1 };
+      document.addEventListener("mousemove", onRmbLinkMove, true);
+      document.addEventListener("mouseup", onRmbLinkUp, true);
+      clearRmbLinkGraphic();
+      updateRmbLinkGraphic(x1, y1);
+    });
+  }
+
+  function refreshGraphGovernanceIssues(
+    nodes: Record<string, unknown>[],
+    links: Record<string, unknown>[]
+  ) {
+    const degree = new Map<string, number>();
+    for (const n of nodes) degree.set(String(n.id || ""), 0);
+    for (const e of links) {
+      const sid = String(e.source || "");
+      const tid = String(e.target || "");
+      if (degree.has(sid)) degree.set(sid, (degree.get(sid) || 0) + 1);
+      if (tid && degree.has(tid)) degree.set(tid, (degree.get(tid) || 0) + 1);
+    }
+    const isolated = nodes
+      .filter((n) => (degree.get(String(n.id || "")) || 0) === 0)
+      .map((n) => String(n.id || ""));
+    graphIsolatedNodeIds.value = isolated;
+    graphIsolatedFocusIdx.value = 0;
+
+    const timelineIds = new Set(
+      nodes
+        .map((n) => String(n?.id || ""))
+        .filter((id) => id.startsWith("ev:timeline:") && !id.includes(":draft_"))
+    );
+    const inCnt = new Map<string, number>();
+    const outCnt = new Map<string, number>();
+    for (const id of timelineIds) {
+      inCnt.set(id, 0);
+      outCnt.set(id, 0);
+    }
+    for (const e of links) {
+      if (String(e?.type || "") !== "timeline_next") continue;
+      const s = String(e?.source || "");
+      const t = String(e?.target || "");
+      if (outCnt.has(s)) outCnt.set(s, (outCnt.get(s) || 0) + 1);
+      if (inCnt.has(t)) inCnt.set(t, (inCnt.get(t) || 0) + 1);
+    }
+    const gaps = Array.from(timelineIds).filter((id) => (inCnt.get(id) || 0) === 0 || (outCnt.get(id) || 0) === 0);
+    graphTimelineGapNodeIds.value = gaps;
+    graphTimelineGapFocusIdx.value = 0;
+  }
+
+  function focusGraphNodeById(nodeId: string): boolean {
+    ensureGraphChart();
+    if (!graphChart) return false;
+    const idx = graphRenderedNodeIndexById.value[nodeId];
+    if (idx == null || idx < 0) return false;
+    try {
+      graphChart.dispatchAction({ type: "focusNodeAdjacency", seriesIndex: 0, dataIndex: idx });
+      graphChart.dispatchAction({ type: "showTip", seriesIndex: 0, dataIndex: idx });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function focusNextInList(ids: string[], cursor: { value: number }, emptyMsg: string) {
+    if (!ids.length) {
+      ElMessage.info(emptyMsg);
+      return;
+    }
+    const idx = cursor.value % ids.length;
+    const nodeId = ids[idx]!;
+    cursor.value += 1;
+    if (!focusGraphNodeById(nodeId)) {
+      ElMessage.warning("定位节点失败，可先刷新图谱后重试。");
+    }
+  }
+
+  /** 剧情事件网：按 timeline_next 的依赖层级从左到右，同层按 time_slot 与 id 排序。 */
+  function applyEventsViewHorizontalLayout(
+    nodeArr: Record<string, unknown>[],
+    linkList: Record<string, unknown>[],
+    chartW: number,
+    chartH: number
+  ) {
+    const colW = 200;
+    const rowH = 60;
+    const w = Math.max(chartW, 400);
+    const h = Math.max(chartH, 300);
+
+    const byId: Record<string, Record<string, unknown>> = {};
+    for (const n of nodeArr) {
+      byId[String(n.id || "")] = n;
+    }
+    const cmpTimelineData = (a: Record<string, unknown>, b: Record<string, unknown>): number => {
+      const da = (a.data as Record<string, unknown>) || {};
+      const db = (b.data as Record<string, unknown>) || {};
+      const sa = String(da.time_slot || "");
+      const sb = String(db.time_slot || "");
+      if (sa !== sb) return sa < sb ? -1 : sa > sb ? 1 : 0;
+      return String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0;
+    };
+
+    const tids = nodeArr.map((n) => String(n.id || "")).filter((id) => id.startsWith("ev:timeline:"));
+    const tidSet = new Set(tids);
+    const tlEdges: { s: string; t: string }[] = [];
+    for (const e of linkList) {
+      if (String(e.type || "") !== "timeline_next") continue;
+      const s = String(e.source || "");
+      const t = String(e.target || "");
+      if (tidSet.has(s) && tidSet.has(t)) tlEdges.push({ s, t });
+    }
+
+    const rank: Record<string, number> = {};
+    for (const id of tids) rank[id] = 0;
+    const n = tids.length;
+    for (let it = 0; it < n + 2; it++) {
+      for (const { s, t } of tlEdges) {
+        if ((rank[s] ?? 0) + 1 > (rank[t] ?? 0)) rank[t] = (rank[s] ?? 0) + 1;
+      }
+    }
+    const maxR = tids.length ? Math.max(0, ...tids.map((id) => rank[id] ?? 0)) : 0;
+    if (n > 0 && maxR > 2 * n) {
+      tids.sort((a, b) => cmpTimelineData(byId[a] || {}, byId[b] || {}));
+      tids.forEach((id, i) => {
+        rank[id] = i;
+      });
+    } else {
+      const uniq = [...new Set(tids.map((id) => rank[id] ?? 0))].sort((a, b) => a - b);
+      const compress = new Map(uniq.map((r, i) => [r, i]));
+      for (const id of tids) {
+        const r0 = rank[id] ?? 0;
+        rank[id] = compress.get(r0) ?? 0;
+      }
+    }
+
+    const byRank = new Map<number, string[]>();
+    for (const id of tids) {
+      const r = rank[id] ?? 0;
+      if (!byRank.has(r)) byRank.set(r, []);
+      byRank.get(r)!.push(id);
+    }
+    for (const list of byRank.values()) {
+      list.sort((a, b) => cmpTimelineData(byId[a] || {}, byId[b] || {}));
+    }
+    const sortedRanks = [...byRank.keys()].sort((a, b) => a - b);
+    const pos: Record<string, { x: number; y: number }> = {};
+    for (const r of sortedRanks) {
+      const list = byRank.get(r) || [];
+      const x = r * colW;
+      list.forEach((id, j) => {
+        pos[id] = { x, y: j * rowH };
+      });
+    }
+    const chIds = nodeArr
+      .map((no) => String(no.id || ""))
+      .filter((id) => id.startsWith("ev:chapter:"));
+    const chaptersByTev: Record<string, string[]> = {};
+    for (const ch of chIds) {
+      const e = linkList.find(
+        (L) => String(L.type) === "chapter_belongs" && String(L.source) === ch
+      );
+      const tev = e ? String(e.target || "") : "";
+      if (tev) {
+        if (!chaptersByTev[tev]) chaptersByTev[tev] = [];
+        chaptersByTev[tev].push(ch);
+      }
+    }
+    for (const [tev, clist] of Object.entries(chaptersByTev)) {
+      clist.sort();
+      const base = pos[tev];
+      if (base) {
+        clist.forEach((ch, i) => {
+          pos[ch] = { x: base.x + colW * 0.42, y: base.y + 36 + i * 32 };
+        });
+      } else {
+        const rightCol = sortedRanks.length ? (sortedRanks[sortedRanks.length - 1] ?? 0) + 1 : 0;
+        clist.forEach((ch, i) => {
+          pos[ch] = { x: rightCol * colW, y: i * rowH };
+        });
+      }
+    }
+    let orphanCh = 0;
+    for (const ch of chIds) {
+      if (!pos[ch]) {
+        const rightCol = sortedRanks.length ? (sortedRanks[sortedRanks.length - 1] ?? 0) + 1 : 0;
+        pos[ch] = { x: rightCol * colW + orphanCh * 16, y: Math.floor(orphanCh / 6) * rowH };
+        orphanCh += 1;
+      }
+    }
+
+    const xs: number[] = [];
+    const ys: number[] = [];
+    for (const p of Object.values(pos)) {
+      xs.push(p.x);
+      ys.push(p.y);
+    }
+    if (!xs.length) return;
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const shiftX = w / 2 - (minX + maxX) / 2;
+    const shiftY = h / 2 - (minY + maxY) / 2;
+
+    for (const n1 of nodeArr) {
+      const id = String(n1.id || "");
+      const p = pos[id];
+      if (p) {
+        n1.x = p.x + shiftX;
+        n1.y = p.y + shiftY;
+      }
+    }
   }
 
   function renderGraph() {
@@ -579,7 +1087,24 @@ export function useGraph(novelId: Ref<string>) {
     const qRaw = graphSearchQuery.value.trim().toLowerCase();
     const rawNodeList = (payload.nodes || []) as Record<string, unknown>[];
     const allowedNodeTypes = new Set(graphNodeTypeFilters.value);
-    const filteredNodes = rawNodeList.filter((n) => allowedNodeTypes.has(String(n.type || "")));
+    let filteredNodes = rawNodeList.filter((n) => allowedNodeTypes.has(String(n.type || "")));
+    if (graphView.value === "events") {
+      const chToTev = new Map<string, string>();
+      for (const e of (payload.edges || []) as Record<string, unknown>[]) {
+        if (String(e.type) !== "chapter_belongs") continue;
+        const s = String(e.source || "");
+        const t = String(e.target || "");
+        if (s.startsWith("ev:chapter:") && t.startsWith("ev:timeline:")) chToTev.set(s, t);
+      }
+      const showAll = graphEventsShowAllChapters.value;
+      const sel = (graphEventsSelectedTimelineId.value || "").trim();
+      filteredNodes = filteredNodes.filter((n) => {
+        if (String(n.type || "") !== "chapter_event") return true;
+        if (showAll) return true;
+        if (sel) return chToTev.get(String(n.id || "")) === sel;
+        return false;
+      });
+    }
     const nodeIdSet = new Set(filteredNodes.map((n) => String(n.id || "")));
     const allowedEdgeTypes = new Set(graphEdgeTypeFilters.value);
     const preLinks = ((payload.edges || []) as Record<string, unknown>[]).filter((e) => {
@@ -677,8 +1202,8 @@ export function useGraph(novelId: Ref<string>) {
       if (!timelineIds.has(id)) continue;
       const noPrev = (inCnt.get(id) || 0) === 0;
       const noNext = (outCnt.get(id) || 0) === 0;
-      if (!(noPrev || noNext) || (noPrev && noNext)) continue;
-      const flag = noPrev && !noNext ? "待定(上)" : "待定(下)";
+      if (!(noPrev || noNext)) continue;
+      const flag = noPrev && noNext ? "待定(上下)" : noPrev ? "待定(上)" : "待定(下)";
       n.label = {
         show: true,
         position: "right",
@@ -698,6 +1223,29 @@ export function useGraph(novelId: Ref<string>) {
       };
     }
 
+    const eventsHorizontal = graphView.value === "events";
+    if (eventsHorizontal) {
+      const el = graphEl.value;
+      applyEventsViewHorizontalLayout(
+        nodes as Record<string, unknown>[],
+        shownLinks,
+        el?.clientWidth || 0,
+        el?.clientHeight || 0
+      );
+      for (const e of links) {
+        const ls = (e.lineStyle as Record<string, unknown>) || {};
+        e.lineStyle = { ...ls, curveness: 0.12 };
+      }
+    }
+
+    graphRenderedNodes.value = shownNodes;
+    const indexMap: Record<string, number> = {};
+    nodes.forEach((n: Record<string, unknown>, i: number) => {
+      indexMap[String(n.id || "")] = i;
+    });
+    graphRenderedNodeIndexById.value = indexMap;
+    refreshGraphGovernanceIssues(shownNodes, shownLinks);
+
     graphChart.setOption(
       {
         tooltip: {
@@ -713,14 +1261,16 @@ export function useGraph(novelId: Ref<string>) {
         series: [
           {
             type: "graph",
-            layout: "force",
+            layout: eventsHorizontal ? "none" : "force",
             roam: true,
             data: nodes,
             links,
             edgeSymbol: ["none", "arrow"],
             edgeSymbolSize: 6,
             label: { show: true, position: "right", formatter: "{b}" },
-            force: { repulsion: 220, edgeLength: [60, 140], gravity: 0.06 },
+            ...(eventsHorizontal
+              ? {}
+              : { force: { repulsion: 220, edgeLength: [60, 140], gravity: 0.06 } }),
           },
         ],
       },
@@ -776,6 +1326,12 @@ export function useGraph(novelId: Ref<string>) {
     }
   });
 
+  watch([graphEventsShowAllChapters, graphEventsSelectedTimelineId], () => {
+    if (graphFullscreenVisible.value && graphView.value === "events" && graphData.value) {
+      void nextTick(() => renderGraph());
+    }
+  });
+
   watch(relTarget, (v) => {
     const node = graphEditNode.value;
     if (!node || String(node.type || "") !== "character") return;
@@ -802,10 +1358,9 @@ export function useGraph(novelId: Ref<string>) {
       ElMessage.info("请先输入搜索关键词。");
       return;
     }
-    const payload = graphData.value;
-    if (!payload?.nodes?.length) return;
+    if (!graphRenderedNodes.value.length) return;
     const indices: number[] = [];
-    (payload.nodes as Record<string, unknown>[]).forEach((n, i) => {
+    graphRenderedNodes.value.forEach((n, i) => {
       if (graphNodeMatchesQuery(n, q)) indices.push(i);
     });
     if (indices.length === 0) {
@@ -830,10 +1385,9 @@ export function useGraph(novelId: Ref<string>) {
       ElMessage.info("请先输入搜索关键词。");
       return;
     }
-    const payload = graphData.value;
-    if (!payload?.nodes?.length) return;
+    if (!graphRenderedNodes.value.length) return;
     const indices: number[] = [];
-    (payload.nodes as Record<string, unknown>[]).forEach((n, i) => {
+    graphRenderedNodes.value.forEach((n, i) => {
       if (graphNodeMatchesQuery(n, q)) indices.push(i);
     });
     if (indices.length === 0) {
@@ -854,6 +1408,14 @@ export function useGraph(novelId: Ref<string>) {
     graphSearchQuery.value = "";
     graphSearchFocusIdx.value = 0;
     void nextTick(() => renderGraph());
+  }
+
+  function focusNextIsolatedNode() {
+    focusNextInList(graphIsolatedNodeIds.value, graphIsolatedFocusIdx, "当前筛选下没有孤立节点。");
+  }
+
+  function focusNextTimelineGap() {
+    focusNextInList(graphTimelineGapNodeIds.value, graphTimelineGapFocusIdx, "当前筛选下没有断链时间线节点。");
   }
 
   function resetGraphFilters() {
@@ -888,6 +1450,37 @@ export function useGraph(novelId: Ref<string>) {
     ElMessage.success("已导出图谱 JSON。");
   }
 
+  async function batchDeleteEdges() {
+    const id = nid();
+    if (!id) {
+      ElMessage.warning("请先选择小说。");
+      return;
+    }
+    const edgeTypes = Array.from(
+      new Set((graphBatchEdgeTypes.value || []).map((x) => String(x || "").trim()).filter(Boolean))
+    );
+    if (!edgeTypes.length) {
+      ElMessage.warning("请至少选择一种边类型。");
+      return;
+    }
+    try {
+      await ElMessageBox.confirm(
+        `将批量删除 ${edgeTypes.join(", ")} 边，且仅作用于当前小说。是否继续？`,
+        "批量删边确认",
+        { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" }
+      );
+    } catch {
+      return;
+    }
+    const res = (await apiJson(`/api/novels/${encodeURIComponent(id)}/graph/edges/batch-delete`, "POST", {
+      edge_types: edgeTypes,
+      source_node_type: (graphBatchSourceNodeType.value || "").trim() || null,
+      target_node_type: (graphBatchTargetNodeType.value || "").trim() || null,
+    })) as { deleted_total?: number };
+    ElMessage.success(`批量删除完成：${Number(res?.deleted_total || 0)} 条边。`);
+    await loadGraph();
+  }
+
   watch([graphView, novelId, graphFullscreenVisible], async ([, , opened]) => {
     if (!opened) return;
     await nextTick();
@@ -895,6 +1488,12 @@ export function useGraph(novelId: Ref<string>) {
   });
 
   onBeforeUnmount(() => {
+    if (rmbLinkDrag) {
+      rmbLinkDrag = null;
+      document.removeEventListener("mousemove", onRmbLinkMove, true);
+      document.removeEventListener("mouseup", onRmbLinkUp, true);
+      if (graphChart) clearRmbLinkGraphic();
+    }
     window.removeEventListener("resize", onResize);
     if (graphChart) {
       graphChart.dispose();
@@ -939,12 +1538,16 @@ export function useGraph(novelId: Ref<string>) {
     graphNodeTypeFilters,
     graphEdgeTypeFilters,
     graphOnlyIsolatedNodes,
+    graphAdvancedVisible,
     graphCharacterNodeIds,
     relationTargetOptions,
     graphTimelineOptions,
     graphChapterNodeIds,
     graphStats,
     onGraphViewChange,
+    graphEventsShowAllChapters,
+    graphEventsSelectedTimelineId,
+    graphEventsToggleAllChapters,
     openGraphDialog,
     closeGraphDialog,
     openGraphNodeCreate,
@@ -963,11 +1566,19 @@ export function useGraph(novelId: Ref<string>) {
     renderGraph,
     graphSearchQuery,
     graphSearchMatchCount,
+    graphIsolatedCount,
+    graphTimelineGapCount,
+    graphBatchEdgeTypes,
+    graphBatchSourceNodeType,
+    graphBatchTargetNodeType,
     focusNextGraphSearchMatch,
     focusPrevGraphSearchMatch,
+    focusNextIsolatedNode,
+    focusNextTimelineGap,
     clearGraphSearch,
     resetGraphFilters,
     exportGraphJson,
+    batchDeleteEdges,
   });
 }
 

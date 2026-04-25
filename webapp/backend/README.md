@@ -36,10 +36,16 @@ python -m uvicorn webapp.backend.server:app --reload --port 8000
 | `frontend_assets.py` | `dist` 新鲜度、`npm build`、挂载 `/assets` |
 | `sse.py` | `run_stream` 的 SSE 帧封装 |
 | `run_helpers.py` | 时间段推导、`user_task` 拼接、章节-事件辅助、写前图骨架；含影子编导 guidance 注入；**无** FastAPI 依赖 |
+| `domain/README.md` | 领域规则目录说明（本次新增） |
+| `domain/novel_lore_tags.py` | 小说 lore tag 作用域与规范化规则（从 routes/novels.py 下沉） |
+| `services/README.md` | 服务编排目录说明（本次新增） |
+| `services/auto_lore.py` | 自动设定构建/重写/原子写入/manifest 逻辑（从 routes/novels.py 下沉） |
+| `services/novel_run.py` | 运行流程共用逻辑（事件绑定校验、错误码推断、plan payload 解包） |
 | `graph_payload.py` | 由 `state` + 四表拼装 `GET /graph` 的 nodes/edges JSON（只读） |
 | `routes/__init__.py` | 路由包 |
+| `routes/README.md` | 路由层职责边界说明（薄路由约定） |
 | `routes/pages.py` | `GET /`：Vite `index.html` 或旧模板回退 |
 | `routes/settings.py` | `/api/settings`、`/api/settings/api_key`、`/api/settings/models`、`/api/settings/test_connection`（LLM 提供商配置、模型列表、连通性测试；模型列表支持后端 TTL 缓存 + `force_refresh` 强刷，并返回 `model_items.capabilities`） |
 | `routes/lore.py` | `/api/lore/*`：`POST summary/build`、`GET summary/{id}`、`GET tags`、`GET preview`，以及 Tag 文件管理：`POST/PATCH/DELETE /tags`、`PUT /tags/content`、`POST /tags/batch_delete`、`POST /tags/batch_replace_prefix`（批量操作会同步小说已绑定 lore_tags） |
-| `routes/novels.py` | `/api/novels/*`：列表、创建、`state`、`character_entities`、按章 `chapters/{i}`、`anchors`、`run`、`preview_input`、`run_stream`；支持创建时自动生成 lores 草案、`/auto_lore` 查询与 `/auto_lore/regenerate` 重生成；写作模式含结构卡门禁 `structure_gate`、影子编导策略 `shadow_director`（自动细节接管 + 可撤销）与写后 `consistency_audit`（含时间线反转/角色瞬移/关系突变无依据等高危阻断规则） |
+| `routes/novels.py` | `/api/novels/*`：列表、创建、`state`、`character_entities`、按章 `chapters/{i}`、`anchors`、`run`、`preview_input`、`run_stream`；支持创建时自动生成 lores 草案、`/auto_lore` 查询与 `/auto_lore/regenerate` 重生成；写作模式含结构卡门禁 `structure_gate`、影子编导策略 `shadow_director`（自动细节接管 + 可撤销）与写后 `consistency_audit`（含时间线反转/角色瞬移/关系突变无依据等高危阻断规则）；流式 planning 支持 `ChapterPlan/result/output` 包装解包；正文 outputs 按小说分目录落盘 |
 | `routes/graph.py` | `/api/novels/{id}/graph`（GET）；`PATCH graph/node`、`POST graph/nodes`、`DELETE graph/nodes`、`POST graph/relationship`、`PATCH timeline-neighbors`、`PATCH graph/edge` |

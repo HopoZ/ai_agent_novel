@@ -1,5 +1,5 @@
 <template>
-  <el-card class="panel" shadow="never">
+  <el-card class="panel mid-panel" shadow="never">
     <el-form label-position="top">
       <div class="workbench-head">
         <div class="wb-title">导演工作台</div>
@@ -21,7 +21,7 @@
             size="small"
             class="stage-chip"
             :class="{ 'is-active': autoStage === 'roles' }"
-            :disabled="autoStage === 'roles'"
+            :disabled="autoStage === 'roles' || !step1ReadyForFlow()"
             @click="goToStage('roles')"
           >
             Step 2
@@ -30,7 +30,7 @@
             size="small"
             class="stage-chip"
             :class="{ 'is-active': autoStage === 'task' }"
-            :disabled="autoStage === 'task'"
+            :disabled="autoStage === 'task' || !step1ReadyForFlow()"
             @click="goToStage('task')"
           >
             Step 3
@@ -39,40 +39,40 @@
             size="small"
             class="stage-chip"
             :class="{ 'is-active': autoStage === 'confirm' }"
-            :disabled="autoStage === 'confirm'"
+            :disabled="autoStage === 'confirm' || !step1ReadyForFlow()"
             @click="goToStage('confirm')"
           >
             Step 4
           </el-button>
         </div>
       </div>
+      <GraphSliceCard
+        :novel-id="form.novelId"
+        :graph-loading="graphLoading"
+        :node-total="graphNodeTotal"
+        :edge-total="graphEdgeTotal"
+        :character-total="graphCharacterTotal"
+        :current-event-label="currentEventLabel"
+        :graph-view-label="graphViewLabel"
+        :reload-graph="reloadGraphSlice"
+        :open-graph-dialog="openGraphDialog"
+      />
 
       <section v-show="autoStage === 'timeline'" ref="timelineRef" class="workbench-section">
         <header class="section-title">Step 1 · 时序决策</header>
-          <GraphSliceCard
-            :novel-id="form.novelId"
-            :graph-loading="graphLoading"
-            :node-total="graphNodeTotal"
-            :edge-total="graphEdgeTotal"
-            :character-total="graphCharacterTotal"
-            :current-event-label="currentEventLabel"
-            :graph-view-label="graphViewLabel"
-            :reload-graph="reloadGraphSlice"
-            :open-graph-dialog="openGraphDialog"
-          />
           <el-form-item label="选择已有小说">
             <el-input
               v-model="novelKeyword"
               clearable
               placeholder="按小说名或ID筛选"
-              style="margin-bottom:6px;"
+              class="input-gap-bottom"
             />
             <el-select
               v-model="form.novelId"
               :loading="novelsLoading"
               clearable
               placeholder="请选择已有小说（显示小说名）"
-              style="width:100%;"
+              class="w-full"
             >
               <el-option
                 v-for="n in filteredNovels"
@@ -81,7 +81,7 @@
                 :value="n.novel_id"
               />
             </el-select>
-            <div class="muted" style="margin-top:4px;">
+            <div class="muted muted-top-4">
               当前匹配 {{ filteredNovels.length }} / {{ novels.length }} 本
             </div>
           </el-form-item>
@@ -89,15 +89,15 @@
             <el-input :model-value="currentNovelTitle" disabled></el-input>
           </el-form-item>
           <el-form-item>
-            <div style="display:flex; gap:8px; width:100%;">
-              <el-button style="flex:1;" @click="openCreateDialog" :disabled="running">
+            <div class="row-actions-full">
+              <el-button class="grow-1" type="primary" plain @click="openCreateDialog" :disabled="running">
                 新建小说
               </el-button>
-              <el-button style="flex:1;" :disabled="!form.novelId || running" @click="renameCurrentNovel">
+              <el-button class="grow-1" type="primary" plain :disabled="!form.novelId || running" @click="renameCurrentNovel">
                 重命名
               </el-button>
               <el-button
-                style="flex:1;"
+                class="grow-1"
                 type="danger"
                 plain
                 :disabled="!form.novelId || running"
@@ -107,95 +107,75 @@
               </el-button>
             </div>
           </el-form-item>
-          <div class="muted" style="margin-top:4px;">
-            章节必须归属一个事件：可直接绑定已有事件，或新建后绑定。
+          <div class="muted muted-top-4">
+            写作流程只消费“已有时间线事件”。新建事件统一在图谱工作室完成。
           </div>
-          <div style="height:8px;"></div>
-          <el-form-item label="章节归属事件（二选一）">
-            <el-radio-group v-model="form.eventMode" class="choice-cards">
-              <el-radio-button label="existing">归属到已有事件</el-radio-button>
-              <el-radio-button label="new">新建事件并归属</el-radio-button>
-            </el-radio-group>
-            <div class="muted" style="margin-top:6px;">
-              章节必须归属一个事件：可直接选择已有事件，或新建一个事件并指定它位于哪些事件前后。
+          <div class="gap-8"></div>
+          <el-form-item label="章节归属事件（已有时间线事件）">
+            <el-select
+              v-model="form.existingEventId"
+              :loading="anchorsLoading"
+              clearable
+              placeholder="选择本章归属的已有事件"
+              class="w-full"
+            >
+              <el-option
+                v-for="a in timelineEventAnchors"
+                :key="a.id"
+                :label="a.label"
+                :value="a.id"
+              />
+            </el-select>
+            <div class="muted muted-top-6">
+              若当前没有可选事件，请先到图谱工作室新建 timeline_event，再回到此处绑定。
             </div>
+            <el-button
+              size="small"
+              type="primary"
+              plain
+              class="compact-text-btn"
+              @click="openGraphDialog"
+            >
+              去图谱工作室新建事件
+            </el-button>
           </el-form-item>
-
-          <template v-if="form.eventMode === 'existing'">
-            <el-form-item label="选择已有事件（时间线事件）">
-              <el-select
-                v-model="form.existingEventId"
-                :loading="anchorsLoading"
-                clearable
-                placeholder="选择本章归属的已有事件"
-                style="width:100%;"
-              >
-                <el-option
-                  v-for="a in anchors.filter((x:any) => String(x?.id || '').startsWith('ev:timeline:'))"
-                  :key="a.id"
-                  :label="a.label"
-                  :value="a.id"
-                />
-              </el-select>
-            </el-form-item>
-          </template>
-
-          <template v-else>
-            <el-form-item label="新事件时间段（time_slot）">
-              <el-input v-model="form.newEventTimeSlot" placeholder="例如：战争后期·反攻前夜"></el-input>
-            </el-form-item>
-            <el-form-item label="新事件摘要（summary）">
-              <el-input
-                v-model="form.newEventSummary"
-                type="textarea"
-                :rows="3"
-                placeholder="一句话描述该事件"
-              ></el-input>
-            </el-form-item>
-            <el-form-item label="放在这个事件之后">
-              <el-select
-                v-model="form.newEventPrevId"
-                :loading="anchorsLoading"
-                clearable
-                placeholder="不选则无前驱 timeline_next 边"
-                style="width:100%;"
-              >
-                <el-option
-                  v-for="a in anchors.filter((x:any) => String(x?.id || '').startsWith('ev:timeline:'))"
-                  :key="`prev-${a.id}`"
-                  :label="a.label"
-                  :value="a.id"
-                />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="放在这个事件之前">
-              <el-select
-                v-model="form.newEventNextId"
-                :loading="anchorsLoading"
-                clearable
-                placeholder="不选则无后继 timeline_next 边"
-                style="width:100%;"
-              >
-                <el-option
-                  v-for="a in anchors.filter((x:any) => String(x?.id || '').startsWith('ev:timeline:'))"
-                  :key="`next-${a.id}`"
-                  :label="a.label"
-                  :value="a.id"
-                />
-              </el-select>
-            </el-form-item>
-            <div class="muted" style="margin-top:4px;">
-              上下沿仅写你选中的关系；都不选则图谱不自动按列表顺序连 timeline_next，仅插入时间线条目。
-            </div>
-          </template>
-          <div class="muted" style="margin-top:6px;">
+          <div class="muted muted-top-6">
             预计本章时间段：{{ inferredTimeSlotHint || "（等待选择事件）" }}
           </div>
+          <el-alert
+            type="warning"
+            :closable="false"
+            class="alert-top-8"
+          >
+            <template #title>
+              事件计划：{{ eventPlanStatusText || "未绑定事件" }}
+            </template>
+            <div class="muted muted-top-4">计划完整度：{{ eventPlanQualityText || "未知" }}</div>
+            <el-button
+              size="small"
+              type="primary"
+              plain
+              class="compact-text-btn"
+              :disabled="!step1Done() || running"
+              @click="generateBoundEventPlan"
+            >
+              为当前事件生成/重生成计划
+            </el-button>
+            <el-button
+              size="small"
+              type="primary"
+              plain
+              class="compact-text-btn"
+              @click="openEventPlanManager"
+            >
+              打开事件计划管理
+            </el-button>
+          </el-alert>
           <el-alert
             v-if="suggestedTimelineEventLabel"
             type="success"
             :closable="false"
-            style="margin-top:8px;"
+            class="alert-top-8"
           >
             <template #title>
               影子编导建议：可挂载到「{{ suggestedTimelineEventLabel }}」
@@ -203,8 +183,8 @@
             <el-button
               size="small"
               type="primary"
-              text
-              style="padding:0;"
+              link
+              class="compact-text-btn"
               @click="applySuggestedTimelineEvent"
             >
               一键采用
@@ -214,27 +194,26 @@
             v-if="shadowDirectorAppliedSummary"
             type="info"
             :closable="false"
-            style="margin-top:8px;"
+            class="alert-top-8"
           >
             <template #title>
               影子编导已自动接管细节：{{ shadowDirectorAppliedSummary }}
             </template>
             <el-button
               size="small"
-              type="primary"
-              text
-              style="padding:0;"
+              type="danger"
+              plain
               @click="undoShadowDirectorApply"
             >
-              撤销最近自动导演
+              撤销最近自动导演系统接管
             </el-button>
           </el-alert>
           <div class="section-step-actions">
             <el-button
               type="primary"
               size="small"
-              :disabled="!step1Done()"
-              :class="{ 'next-ready': step1Done() }"
+              :disabled="!step1ReadyForFlow()"
+              :class="{ 'next-ready': step1ReadyForFlow() }"
               @click="goToStage('roles')"
             >
               下一步：角色与冲突
@@ -255,7 +234,7 @@
               allow-create
               default-first-option
               placeholder="多选表示与本章最相关的核心人物"
-              style="width:100%;"
+              class="w-full"
               @change="onPovChangeAndArm"
             >
               <el-option
@@ -277,7 +256,7 @@
               allow-create
               default-first-option
               placeholder="点击快速多选作为配角设定（可清空）"
-              style="width:100%;"
+              class="w-full"
               @change="onFocusChangeAndArm"
             >
               <el-option
@@ -293,25 +272,25 @@
             <el-segmented
               v-model="form.conflictChoice"
               :options="['自动', '动作对抗', '信息差冲突', '价值观冲突', '利益博弈冲突']"
-              style="width:100%;"
+              class="w-full"
             />
           </el-form-item>
           <el-form-item label="伏笔回收策略">
             <el-segmented
               v-model="form.foreshadowChoice"
               :options="['自动', '优先回收旧伏笔', '承接上一章尾钩', '回收时间线事件']"
-              style="width:100%;"
+              class="w-full"
             />
           </el-form-item>
           <el-form-item label="配角介入强度">
             <el-segmented
               v-model="form.supportingPreset"
               :options="['自动', '克制', '平衡', '强化']"
-              style="width:100%;"
+              class="w-full"
             />
           </el-form-item>
           <el-form-item label="角色标签管理（本次会话）">
-            <div style="display:flex; width:100%; justify-content:space-between; align-items:center;">
+            <div class="row-between-full">
               <span class="muted">当前标签数：{{ allCharacterOptions.length }}</span>
               <el-button size="small" @click="openRoleManager">打开管理面板</el-button>
             </div>
@@ -339,7 +318,7 @@
               :rows="3"
               placeholder="例如：青石镇东市、地下遗迹二层、星舰舰桥"
             />
-            <div class="muted" style="margin-top:6px;">
+            <div class="muted muted-top-6">
               留空不写；填写后会与本次写作要求一并使用。
             </div>
           </el-form-item>
@@ -352,9 +331,9 @@
               @focus="onUserTaskFocus"
               @blur="onUserTaskBlur"
             ></el-input>
-            <div class="muted" style="margin-top:6px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+            <div class="muted muted-with-actions">
               <span>为空时会自动推测任务草案，你可直接修改后确认。</span>
-              <el-button size="small" text type="primary" @click="resetAutoTaskDraft">
+              <el-button size="small" plain type="primary" @click="resetAutoTaskDraft">
                 重置为自动推测
               </el-button>
             </div>
@@ -363,7 +342,7 @@
             <el-input v-model="form.chapterPresetName" placeholder="例如：重逢夜 / 石碑共鸣 / 古墟初探"></el-input>
           </el-form-item>
           <el-divider content-position="left">模型采样（可选）</el-divider>
-          <div class="muted" style="margin-bottom:8px;">
+          <div class="muted muted-bottom-8">
             调整随机性与长度。留空则用默认（temperature {{ defaultLlmTemperature }}，max_tokens {{ defaultLlmMaxTokens }}）。
           </div>
           <el-form-item :label="`temperature（默认 ${defaultLlmTemperature}）`">
@@ -374,7 +353,7 @@
               :step="0.1"
               :precision="2"
               controls-position="right"
-              style="width:100%;"
+              class="w-full"
             />
           </el-form-item>
           <el-form-item label="top_p（可选）">
@@ -385,7 +364,7 @@
               :step="0.05"
               :precision="2"
               controls-position="right"
-              style="width:100%;"
+              class="w-full"
               clearable
             />
           </el-form-item>
@@ -396,7 +375,7 @@
               :max="200000"
               :step="256"
               controls-position="right"
-              style="width:100%;"
+              class="w-full"
             />
           </el-form-item>
           <div class="section-step-actions">
@@ -415,7 +394,7 @@
 
       <section v-show="autoStage === 'confirm'" ref="confirmRef" class="workbench-section">
         <header class="section-title">Step 4 · 预览与运行</header>
-          <div class="muted" style="margin-bottom:8px;">
+          <div class="muted muted-bottom-8">
             建议先预览后运行。需要看流式输出/审计时，打开右上角运行面板。
           </div>
           <el-button size="small" @click="openInsightsDrawer" :disabled="!form.novelId">
@@ -427,10 +406,10 @@
       </section>
 
       <div class="mid-actions-sticky">
-        <div class="muted" style="margin-bottom:8px;">
+        <div class="muted muted-bottom-8">
           写作：先预览，再运行。
         </div>
-        <div style="display:flex; flex-direction:column; gap:8px; width:100%;">
+        <div class="actions-column-full">
           <el-button type="primary" @click="runGenerate" :disabled="running" :loading="running">
             {{ running ? "运行中..." : "生成内容" }}
           </el-button>
@@ -463,6 +442,9 @@ const props = defineProps<{
   anchorsLoading: boolean;
   anchors: Array<{ id: string; label: string; type: string; time_slot: string }>;
   inferredTimeSlotHint: string;
+  eventPlanStatusText: string;
+  eventPlanReady: boolean;
+  eventPlanQualityText: string;
   suggestedTimelineEventLabel: string;
   allCharacterOptions: Array<{ id: string; label: string }>;
   previewingInput: boolean;
@@ -481,6 +463,8 @@ const props = defineProps<{
   runOptimize: () => void;
   abortRun: () => void;
   openInsightsDrawer: () => void;
+  openEventPlanManager: () => void;
+  generateBoundEventPlan: () => void;
   graphLoading: boolean;
   graphNodeTotal: number;
   graphEdgeTotal: number;
@@ -513,6 +497,9 @@ const filteredNovels = computed(() => {
     return title.includes(kw) || id.includes(kw);
   });
 });
+const timelineEventAnchors = computed(() =>
+  (props.anchors || []).filter((x: any) => String(x?.id || "").startsWith("ev:timeline:"))
+);
 
 function _shortId(v: string): string {
   const s = String(v || "").trim();
@@ -523,13 +510,9 @@ function _shortId(v: string): string {
 
 function buildAutoTaskDraft(): string {
   const title = String(props.currentNovelTitle || "").trim() || "当前小说";
-  const mode = String(props.form?.eventMode || "existing").trim();
   const inferredSlot = String(props.inferredTimeSlotHint || "").trim();
   const slotLine = inferredSlot || "（待确认）";
-  const eventHint =
-    mode === "existing"
-      ? `绑定已有事件：${_shortId(String(props.form?.existingEventId || "").trim()) || "（待选择）"}`
-      : `新建事件：${String(props.form?.newEventSummary || "").trim() || "（待补充摘要）"}`;
+  const eventHint = `绑定已有事件：${_shortId(String(props.form?.existingEventId || "").trim()) || "（待选择）"}`;
   const pov = Array.isArray(props.form?.povCharacterOverride)
     ? props.form.povCharacterOverride.filter((x: unknown) => String(x || "").trim()).join("、")
     : "";
@@ -585,9 +568,11 @@ function goToStage(name: "timeline" | "roles" | "task" | "confirm") {
 }
 
 function step1Done(): boolean {
-  const mode = String((props.form?.eventMode || "existing")).trim();
-  if (mode === "existing") return Boolean(String(props.form?.existingEventId || "").trim());
-  return Boolean(String(props.form?.newEventTimeSlot || "").trim() && String(props.form?.newEventSummary || "").trim());
+  return Boolean(String(props.form?.existingEventId || "").trim());
+}
+
+function step1ReadyForFlow(): boolean {
+  return step1Done() && Boolean(props.eventPlanReady);
 }
 
 function step2Touched(): boolean {
@@ -624,8 +609,22 @@ function onUserTaskBlur() {
 watch(
   () => props.form?.novelId,
   () => {
+    props.form.eventMode = "existing";
+    props.form.newEventTimeSlot = "";
+    props.form.newEventSummary = "";
+    props.form.newEventPrevId = "";
+    props.form.newEventNextId = "";
     autoStage.value = "timeline";
     scrollToSection("timeline");
+  }
+);
+
+watch(
+  () => props.form?.eventMode,
+  (mode) => {
+    if (String(mode || "").trim() !== "existing") {
+      props.form.eventMode = "existing";
+    }
   }
 );
 
@@ -654,19 +653,23 @@ watch(
 </script>
 
 <style scoped>
+.mid-panel {
+  border: 1px solid var(--app-panel-border, rgba(126, 163, 227, 0.45));
+}
 .workbench-head {
   margin-bottom: 8px;
 }
 .wb-title {
   font-size: 15px;
   font-weight: 700;
+  letter-spacing: 0.03em;
 }
 .current-stage-banner {
   margin: 6px 0 10px;
   padding: 8px 10px;
-  border: 1px solid #d6e4ff;
+  border: 1px solid var(--app-stage-banner-border, rgba(108, 161, 234, 0.58));
   border-radius: 8px;
-  background: #f5f9ff;
+  background: var(--app-stage-banner-bg, linear-gradient(180deg, rgba(29, 47, 84, 0.72), rgba(18, 31, 56, 0.78)));
   display: flex;
   align-items: center;
   gap: 10px;
@@ -677,20 +680,72 @@ watch(
   flex: 0 0 auto;
 }
 .workbench-section {
-  border: 1px solid #dbe8f8;
+  border: 1px solid var(--app-workbench-border, rgba(111, 146, 214, 0.4));
   border-radius: 10px;
-  padding: 10px;
+  padding: 12px;
   margin-bottom: 10px;
+  background: var(--app-workbench-bg, linear-gradient(180deg, rgba(20, 32, 58, 0.72), rgba(13, 24, 45, 0.8)));
 }
 .section-title {
   font-size: 14px;
   font-weight: 700;
-  color: #1d4f91;
+  color: var(--app-workbench-title, #d6e9ff);
   margin-bottom: 8px;
 }
 .muted {
-  color: #909399;
+  color: var(--lit-muted, #909399);
   font-size: 12px;
+}
+.w-full {
+  width: 100%;
+}
+.input-gap-bottom {
+  margin-bottom: 6px;
+}
+.muted-top-4 {
+  margin-top: 4px;
+}
+.muted-top-6 {
+  margin-top: 6px;
+}
+.muted-bottom-8 {
+  margin-bottom: 8px;
+}
+.row-actions-full {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+}
+.row-between-full {
+  display: flex;
+  width: 100%;
+  justify-content: space-between;
+  align-items: center;
+}
+.grow-1 {
+  flex: 1;
+}
+.gap-8 {
+  height: 8px;
+}
+.alert-top-8 {
+  margin-top: 8px;
+}
+.compact-text-btn {
+  padding: 4px 10px;
+}
+.muted-with-actions {
+  margin-top: 6px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.actions-column-full {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
 }
 .choice-cards {
   width: 100%;
@@ -705,8 +760,8 @@ watch(
   flex-wrap: wrap;
 }
 .next-ready {
-  box-shadow: 0 0 0 2px rgba(103, 194, 58, 0.25);
-  border-color: #67c23a;
+  box-shadow: 0 0 0 2px rgba(67, 213, 140, 0.24);
+  border-color: #43d58c;
 }
 .stage-nav-row {
   display: flex;
@@ -719,21 +774,24 @@ watch(
 }
 .stage-chip {
   min-width: 78px;
-  border: 1px solid #b7d2ff;
-  background: linear-gradient(180deg, #f8fbff 0%, #edf4ff 100%);
-  color: #2d4e78;
+  border: 1px solid var(--app-stage-chip-border, rgba(111, 146, 214, 0.45));
+  background: var(--app-stage-chip-bg, linear-gradient(180deg, rgba(34, 52, 89, 0.74) 0%, rgba(24, 38, 69, 0.82) 100%));
+  color: var(--app-stage-chip-text, #d4e7ff);
   letter-spacing: 0.02em;
 }
 .stage-chip.is-active {
-  border-color: #5aa0ff;
-  background: linear-gradient(180deg, #2c66d1 0%, #3f8bff 100%);
-  color: #fff;
-  box-shadow: 0 0 0 1px rgba(64, 158, 255, 0.35) inset;
+  border-color: var(--app-stage-chip-active-border, #7bc4ff);
+  background: var(--app-stage-chip-active-bg, linear-gradient(180deg, #48a8ff 0%, #2a85f4 100%));
+  color: var(--app-stage-chip-active-text, #081628);
+  box-shadow: var(--app-stage-chip-active-shadow, 0 0 0 1px rgba(191, 230, 255, 0.35) inset);
 }
 .mid-actions-sticky {
   position: sticky;
   bottom: 8px;
-  background: #fff;
+  background: var(--app-sticky-bg, linear-gradient(180deg, rgba(16, 25, 46, 0.86), rgba(12, 20, 37, 0.92)));
+  border-top: 1px solid var(--app-sticky-border, rgba(111, 146, 214, 0.3));
+  border-radius: 10px;
+  padding: 10px;
   padding-top: 8px;
   z-index: 3;
 }

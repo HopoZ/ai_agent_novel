@@ -20,6 +20,16 @@ class AutoLoreRegenerateRequest(BaseModel):
     overwrite: bool = True
 
 
+class EventPlanGenerateRequest(BaseModel):
+    event_id: str
+    user_task: str = "基于当前图谱与状态，输出该事件阶段的稳定剧情大纲。"
+    lore_tags: Optional[List[str]] = None
+
+
+class EventPlanDeleteRequest(BaseModel):
+    event_id: str
+
+
 class NovelUpdateRequest(BaseModel):
     novel_title: str
 
@@ -189,6 +199,12 @@ class GraphEdgePatchRequest(BaseModel):
     new_target: Optional[str] = None
     label: Optional[str] = None
     op: str = "set"  # set | delete
+
+
+class GraphBatchDeleteEdgesRequest(BaseModel):
+    edge_types: List[str] = Field(default_factory=list)
+    source_node_type: Optional[str] = None  # character | timeline_event | chapter_event | faction
+    target_node_type: Optional[str] = None  # character | timeline_event | chapter_event | faction
 
 
 class ApiKeyUpdateRequest(BaseModel):

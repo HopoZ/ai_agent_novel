@@ -31,9 +31,35 @@ const stages = computed(() => {
   });
 });
 
+const eventPlanBinding = computed(() => {
+  const d = props.inputPreviewData as
+    | {
+        event_plan_binding?: {
+          event_id?: unknown;
+          event_plan_id?: unknown;
+          time_slot?: unknown;
+          objective?: unknown;
+          conflict?: unknown;
+          progression_count?: unknown;
+        };
+      }
+    | null;
+  const raw = d?.event_plan_binding;
+  if (!raw || typeof raw !== "object") return null;
+  return {
+    eventId: String(raw.event_id ?? "").trim(),
+    planId: String(raw.event_plan_id ?? "").trim(),
+    timeSlot: String(raw.time_slot ?? "").trim(),
+    objective: String(raw.objective ?? "").trim(),
+    conflict: String(raw.conflict ?? "").trim(),
+    progressionCount: Number(raw.progression_count ?? 0) || 0,
+  };
+});
+
 function stageDisplayTitle(name: string): string {
   const m: Record<string, string> = {
     init_state: "初始化 · 世界状态",
+    plan_event: "规划 · 事件纲要",
     plan_chapter: "规划 · 章节结构",
     write_chapter_text: "写作 · 正文生成",
     optimize_suggestions: "优化 · 建议（非整章）",
@@ -63,6 +89,18 @@ function stageDisplayTitle(name: string): string {
         </el-descriptions-item>
         <el-descriptions-item label="手动时间段">
           {{ (inputPreviewData as any).manual_time_slot ? "是" : "否" }}
+        </el-descriptions-item>
+        <el-descriptions-item v-if="eventPlanBinding?.eventId" label="绑定事件" :span="2">
+          <code class="input-code-inline">{{ eventPlanBinding?.eventId }}</code>
+        </el-descriptions-item>
+        <el-descriptions-item v-if="eventPlanBinding?.planId" label="事件计划ID" :span="2">
+          <code class="input-code-inline">{{ eventPlanBinding?.planId }}</code>
+        </el-descriptions-item>
+        <el-descriptions-item v-if="eventPlanBinding?.timeSlot" label="计划 time_slot">
+          {{ eventPlanBinding?.timeSlot }}
+        </el-descriptions-item>
+        <el-descriptions-item v-if="eventPlanBinding" label="计划推进条目数">
+          {{ eventPlanBinding?.progressionCount }}
         </el-descriptions-item>
       </el-descriptions>
 
@@ -138,7 +176,7 @@ function stageDisplayTitle(name: string): string {
 
 <style scoped>
 .muted {
-  color: #909399;
+  color: var(--lit-muted, #909399);
   font-size: 12px;
 }
 .input-preview-dialog :deep(.el-dialog) {
@@ -173,7 +211,7 @@ function stageDisplayTitle(name: string): string {
 .structure-card-title {
   font-size: 13px;
   font-weight: 600;
-  color: var(--el-text-color-primary);
+  color: var(--lit-text-1, var(--el-text-color-primary));
 }
 .structure-card-desc {
   margin-top: 4px;
@@ -195,10 +233,10 @@ function stageDisplayTitle(name: string): string {
   padding: 4px 0 8px;
 }
 .prompt-block {
-  border: 1px solid var(--el-border-color-lighter);
+  border: 1px solid var(--app-preview-block-border, rgba(118, 150, 209, 0.4));
   border-radius: 10px;
   overflow: hidden;
-  background: var(--el-bg-color);
+  background: var(--app-preview-block-bg, linear-gradient(180deg, rgba(18, 31, 58, 0.75), rgba(12, 21, 39, 0.82)));
 }
 .prompt-block-label {
   display: block;
@@ -206,9 +244,9 @@ function stageDisplayTitle(name: string): string {
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
-  color: var(--el-text-color-secondary);
-  background: var(--el-fill-color-light);
-  border-bottom: 1px solid var(--el-border-color-lighter);
+  color: var(--lit-text-2, var(--el-text-color-secondary));
+  background: var(--app-preview-label-bg, rgba(39, 60, 102, 0.7));
+  border-bottom: 1px solid var(--app-preview-label-border, rgba(118, 150, 209, 0.34));
 }
 .prompt-block-body {
   margin: 0;

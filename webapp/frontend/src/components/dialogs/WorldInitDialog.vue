@@ -125,14 +125,14 @@ function closeFooter() {
 
 <style scoped>
 .muted {
-  color: #606266;
+  color: var(--lit-text-2, #606266);
   font-size: 13px;
   line-height: 1.55;
   margin: 0 0 12px;
 }
 .muted code {
   font-size: 12px;
-  background: #f4f4f5;
+  background: rgba(118, 188, 255, 0.2);
   padding: 1px 6px;
   border-radius: 4px;
 }
@@ -146,15 +146,15 @@ function closeFooter() {
 .phase-pill {
   font-size: 12px;
   font-weight: 600;
-  color: #1d4f91;
-  background: #ecf5ff;
-  border: 1px solid #b3d8ff;
+  color: #dff2ff;
+  background: linear-gradient(180deg, rgba(53, 115, 203, 0.4), rgba(31, 83, 156, 0.45));
+  border: 1px solid rgba(124, 187, 255, 0.7);
   padding: 4px 10px;
   border-radius: 999px;
 }
 .hint {
   font-size: 13px;
-  color: #606266;
+  color: var(--lit-text-2, #606266);
 }
 .err-alert {
   margin-bottom: 10px;
@@ -162,8 +162,8 @@ function closeFooter() {
 .stream-pre {
   margin: 0;
   padding: 12px;
-  background: #fafafa;
-  border: 1px solid #ebeef5;
+  background: linear-gradient(180deg, rgba(12, 21, 38, 0.95), rgba(9, 16, 30, 0.95));
+  border: 1px solid rgba(111, 146, 214, 0.42);
   border-radius: 8px;
   font-size: 12px;
   line-height: 1.45;
@@ -174,7 +174,7 @@ function closeFooter() {
 .usage {
   margin-top: 10px;
   font-size: 12px;
-  color: #909399;
+  color: var(--lit-muted, #909399);
 }
 .dialog-footer {
   display: flex;

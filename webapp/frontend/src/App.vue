@@ -1,23 +1,23 @@
 <template>
-  <div class="app-literary">
+  <div class="app-literary app-theme-root">
     <div class="wrap">
-      <header class="app-header">
+      <header class="app-header app-shell-zone">
         <div class="app-header-text">
           <div class="app-header-top">
-            <el-button text type="primary" size="small" @click="openLoresDir">打开输入</el-button>
+            <el-button plain type="primary" size="small" class="btn-link-main" @click="openLoresDir">打开输入</el-button>
             <div class="app-header-titles">
               <p class="app-tagline">规划 · 写作 · 图谱</p>
               <h1 class="app-title">AI 小说创作代理</h1>
             </div>
             <div class="app-header-actions">
-              <el-button size="small" @click="openAutoLoreManager">
-                自动设定
+              <el-button size="small" class="btn-console-secondary" @click="toggleThemeMode">
+                {{ themeMode === "console" ? "阅读配色" : "科技主题" }}
               </el-button>
-              <el-button size="small" @click="openInsightsDrawer">
+              <el-button size="small" class="btn-console-secondary" @click="openInsightsDrawer">
                 运行面板
               </el-button>
-              <el-button text type="primary" size="small" @click="openOutputsDir">打开输出</el-button>
-              <el-button type="primary" plain size="small" @click="apiSettingsVisible = true">
+              <el-button plain type="primary" size="small" class="btn-link-main" @click="openOutputsDir">打开输出</el-button>
+              <el-button type="primary" plain size="small" class="btn-console-primary" @click="apiSettingsVisible = true">
                 API 密钥
               </el-button>
             </div>
@@ -38,13 +38,19 @@
         <ol class="first-run-list">
           <li>点击右上角「API 密钥」，按提供商填写并保存（DeepSeek 或 OpenAI 兼容）。</li>
           <li>点击左侧「打开输入」，在 <strong>lores</strong> 文件夹内按子目录放入 <strong>.md</strong> 设定（路径即标签）；保存后左侧勾选标签。</li>
+          <li>新建剧情事件请进入「图谱工作室」创建 <code>timeline_event</code>，写作页只绑定已有事件。</li>
           <li>写作生成的正文在「打开输出」对应目录。</li>
         </ol>
         <p class="first-run-muted">桌面安装版可一键打开输入与输出文件夹。</p>
       </el-alert>
 
       <div class="main-layout" :class="{ 'main-layout--stack': layoutStacked }">
-      <div class="left-pane" :style="{ width: `${leftPanelWidth}px` }">
+      <div class="left-pane app-shell-zone" :style="{ width: `${leftPanelWidth}px` }">
+        <div class="left-pane-toolbar">
+          <el-button size="small" class="btn-console-secondary" :disabled="!(form.novelId || '').trim()" @click="openAutoLoreManager">
+            自动设定
+          </el-button>
+        </div>
         <TagPanel
           :tags-loading="tagsLoading"
           :building-lore-summary="buildingLoreSummary"
@@ -66,7 +72,7 @@
 
       <div class="resize-handle" @mousedown="startResizeLeft" title="拖动调整左侧宽度"></div>
 
-      <div class="mid-pane" :style="{ width: `${midPanelWidth}px` }">
+      <div class="mid-pane app-shell-zone" :style="{ width: `${midPanelWidth}px` }">
         <MidFormPanel
           :form="form"
           :default-llm-temperature="DEFAULT_LLM_TEMPERATURE"
@@ -80,6 +86,9 @@
           :anchors-loading="anchorsLoading"
           :anchors="anchors"
           :inferred-time-slot-hint="inferredTimeSlotHint"
+          :event-plan-status-text="eventPlanStatusText"
+          :event-plan-ready="eventPlanReady"
+          :event-plan-quality-text="eventPlanQualityText"
           :suggested-timeline-event-label="suggestedTimelineEventLabel"
           :all-character-options="allCharacterSelectOptions"
           :previewing-input="previewingInput"
@@ -93,6 +102,8 @@
           :undo-shadow-director-apply="undoShadowDirectorApply"
           :open-role-manager="openRoleManager"
           :open-insights-drawer="openInsightsDrawer"
+          :open-event-plan-manager="openEventPlanManager"
+          :generate-bound-event-plan="generateBoundEventPlan"
           :graph-loading="graph.graphLoading"
           :graph-node-total="graphSliceNodeTotal"
           :graph-edge-total="graphSliceEdgeTotal"
@@ -118,13 +129,14 @@
     v-model="tagManagerVisible"
     title="Tag 管理"
     width="760px"
+    class="console-dialog"
     destroy-on-close
   >
     <el-alert
       type="info"
       :closable="false"
       show-icon
-      style="margin-bottom:10px;"
+      class="dialog-top-alert"
       title="Tag 对应 lores 下的 .md 文件路径。可在这里新建、改名、删和编辑内容。"
     />
     <el-form label-position="top">
@@ -134,7 +146,7 @@
           filterable
           clearable
           placeholder="先选一个已有Tag，或输入新Tag后点击“新建”"
-          style="width:100%;"
+          class="w-full"
           @change="onTagManagerTagChange"
         >
           <el-option v-for="t in tags" :key="`tm-${t}`" :label="t" :value="t" />
@@ -149,26 +161,26 @@
           collapse-tags-tooltip
           clearable
           placeholder="可多选后做批量删除/批量迁移前缀"
-          style="width:100%;"
+          class="w-full"
         >
           <el-option v-for="t in tags" :key="`tm-batch-${t}`" :label="t" :value="t" />
         </el-select>
-        <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
+        <div class="inline-actions-wrap">
           <el-button size="small" @click="selectAllTagsForBatch">批量全选</el-button>
           <el-button size="small" @click="clearBatchSelection">清空批量</el-button>
         </div>
       </el-form-item>
       <el-form-item label="批量前缀迁移（可选）">
-        <div style="display:flex; gap:8px; width:100%; flex-wrap:wrap;">
+        <div class="inline-actions-grid">
           <el-input
             v-model="tagManagerOldPrefix"
             placeholder="旧前缀（可空；空则给选中Tag统一加新前缀）"
-            style="flex:1 1 48%;"
+            class="split-input"
           />
           <el-input
             v-model="tagManagerNewPrefix"
             placeholder="新前缀（可空；表示去掉旧前缀）"
-            style="flex:1 1 48%;"
+            class="split-input"
           />
         </div>
       </el-form-item>
@@ -181,7 +193,7 @@
         />
       </el-form-item>
     </el-form>
-    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+    <div class="inline-actions-wrap">
       <el-button type="primary" :loading="tagManagerBusy" @click="createTagFromManager">新建Tag</el-button>
       <el-button :loading="tagManagerBusy" :disabled="!tagManagerTag" @click="renameTagFromManager">重命名Tag</el-button>
       <el-button type="success" :loading="tagManagerBusy" :disabled="!tagManagerTag" @click="saveTagContentFromManager">保存内容</el-button>
@@ -235,6 +247,10 @@
       :run-phase-label="runPhaseLabel"
       :run-hint="runHint"
       :token-usage-text="tokenUsageText"
+      :current-novel-output-dir="currentNovelOutputDir"
+      :run-request-id="runRequestId"
+      :last-error-code="lastErrorCode"
+      :auto-rejudge-text="autoRejudgeText"
       :shadow-digest-text="shadowDigestText"
       :consistency-audit-text="consistencyAuditText"
       :consistency-audit-severity="consistencyAuditSeverity"
@@ -276,13 +292,14 @@
     v-model="autoLoreManagerVisible"
     title="自动设定管理"
     width="680px"
+    class="console-dialog"
     destroy-on-close
   >
     <el-alert
       type="info"
       :closable="false"
       show-icon
-      style="margin-bottom:10px;"
+      class="dialog-top-alert"
       title="自动设定文件位于 lores/自动生成/<novel_id>/，可在此重生成，也可直接打开输入目录手动编辑。"
     />
     <el-form label-position="top">
@@ -295,7 +312,7 @@
         />
       </el-form-item>
     </el-form>
-    <div style="display:flex; gap:8px; margin-bottom:8px;">
+    <div class="inline-actions-wrap margin-b-8">
       <el-button
         type="primary"
         :loading="autoLoreRegenerating"
@@ -316,11 +333,93 @@
       v-loading="autoLoreLoading"
       empty-text="当前小说还没有自动设定文件。"
     >
-      <el-table-column prop="tag" label="Tag" min-width="260" />
+      <el-table-column prop="filename" label="文件名" min-width="220" />
+      <el-table-column prop="tag" label="Tag（无后缀）" min-width="260" />
       <el-table-column prop="relative_path" label="文件" min-width="220" />
       <el-table-column label="操作" width="120">
         <template #default="{ row }">
-          <el-button link type="primary" @click="openTagDialog(String(row.tag || ''))">查看</el-button>
+          <el-button plain type="primary" size="small" @click="openTagDialog(String(row.tag || ''))">查看</el-button>
+        </template>
+      </el-table-column>
+    </el-table>
+  </el-dialog>
+
+  <el-dialog
+    v-model="eventPlanManagerVisible"
+    title="事件计划管理"
+    width="760px"
+    class="console-dialog"
+    destroy-on-close
+  >
+    <el-alert
+      type="info"
+      :closable="false"
+      show-icon
+      class="dialog-top-alert"
+      title="按事件生成一次大纲，后续章节写作将复用该事件计划。"
+    />
+    <el-form label-position="top">
+      <el-form-item label="目标事件（timeline_event）">
+        <el-select
+          v-model="eventPlanTargetEventId"
+          filterable
+          clearable
+          class="w-full"
+          placeholder="请选择一个已有事件"
+        >
+          <el-option
+            v-for="a in anchors.filter((x:any) => String(x?.id || '').startsWith('ev:timeline:'))"
+            :key="`ep-${a.id}`"
+            :label="a.label"
+            :value="a.id"
+          />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="计划意图（可选）">
+        <el-input
+          v-model="eventPlanUserTask"
+          type="textarea"
+          :rows="3"
+          placeholder="例如：该事件侧重权谋博弈，强调信息差与反转，不要超前回收终局伏笔"
+        />
+      </el-form-item>
+    </el-form>
+    <div class="inline-actions-wrap margin-b-8">
+      <el-button
+        type="primary"
+        :loading="eventPlanGenerating"
+        :disabled="!form.novelId || !eventPlanTargetEventId"
+        @click="generateEventPlan"
+      >
+        生成/重生成
+      </el-button>
+      <el-button :loading="eventPlanLoading" :disabled="!form.novelId" @click="loadEventPlans">
+        刷新列表
+      </el-button>
+    </div>
+    <el-alert
+      v-if="eventPlanErrorText"
+      type="error"
+      :closable="true"
+      class="margin-b-8"
+      :title="eventPlanErrorText"
+      @close="eventPlanErrorText = ''"
+    />
+    <el-table
+      :data="eventPlanRows"
+      size="small"
+      border
+      v-loading="eventPlanLoading"
+      empty-text="当前小说还没有事件计划。"
+    >
+      <el-table-column prop="event_id" label="事件ID" min-width="220" />
+      <el-table-column prop="time_slot" label="time_slot" min-width="150" />
+      <el-table-column prop="quality" label="完整度" min-width="180" />
+      <el-table-column prop="updated_at" label="更新时间" min-width="180" />
+      <el-table-column label="操作" width="180">
+        <template #default="{ row }">
+          <el-button plain type="primary" size="small" @click="openDialog('事件计划预览', String(row.preview || ''))">查看</el-button>
+          <el-button plain type="danger" size="small" @click="deleteEventPlanById(String(row.event_id || ''))">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -345,6 +444,17 @@ import { apiJson, apiSse, logDebug } from "./api/client";
 import { getNovelAgentDesktop } from "./desktop";
 import { usePanelResize } from "./composables/usePanelResize";
 import { GRAPH_INJECTION_KEY, useGraph } from "./composables/useGraph";
+import {
+  applyTagScopeForCurrentNovel as applyTagScopeForCurrentNovelScoped,
+  clearAllTags,
+  invertTags,
+  onTagTreeCheck,
+  selectAllTags,
+  syncTagTreeChecked as syncTagTreeCheckedRef,
+} from "./composables/useLoreTags";
+import { createAppForm, DEFAULT_LLM_MAX_TOKENS, DEFAULT_LLM_TEMPERATURE } from "./composables/useNovelsAndForm";
+import { buildShadowDigest, formatAutoRejudge, formatConsistencyAudit } from "./composables/useNovelRun";
+import { normalizeTag } from "./domain/tags";
 import TagPanel from "./components/TagPanel.vue";
 import MidFormPanel from "./components/MidFormPanel.vue";
 import RightPanel from "./components/RightPanel.vue";
@@ -373,9 +483,26 @@ const { leftPanelWidth, midPanelWidth, layoutStacked, startResizeLeft } =
   usePanelResize();
 
 const tagsLoading = ref(true);
+const allTags = ref<string[]>([]);
 const tags = ref<string[]>([]);
 const tagGroups = ref<Record<string, string[]>>({});
 const selectedTags = ref<string[]>([]);
+function applyTagScopeForCurrentNovel() {
+  applyTagScopeForCurrentNovelScoped({
+    novelId: String(form.novelId || "").trim(),
+    allTags: allTags.value || [],
+    selectedTags: selectedTags.value || [],
+    setTags: (rows) => {
+      tags.value = rows;
+    },
+    setSelectedTags: (rows) => {
+      selectedTags.value = rows;
+    },
+    clearTagGroups: () => {
+      tagGroups.value = {};
+    },
+  });
+}
 const tagTreeRef = ref<{ setCheckedKeys: (k: unknown[], leafOnly?: boolean) => void; getCheckedKeys: (leafOnly?: boolean) => unknown[]; getHalfCheckedKeys: () => unknown[] } | null>(null);
 function onTagTreeRef(el: unknown) {
   tagTreeRef.value = el as typeof tagTreeRef.value;
@@ -412,7 +539,11 @@ const runPhase = ref<
 >("idle");
 const runHint = ref("");
 const lastOutputPath = ref("");
+const currentNovelOutputDir = ref("");
+const runRequestId = ref("");
+const lastErrorCode = ref("");
 const tokenUsageText = ref("");
+const autoRejudgeText = ref("");
 const shadowDigestText = ref("");
 const consistencyAuditText = ref("");
 const consistencyAuditSeverity = ref<"ok" | "warn" | "high">("ok");
@@ -434,6 +565,11 @@ function openInsightsDrawer() {
 const dialogVisible = ref(false);
 const dialogTitle = ref("");
 const dialogText = ref("");
+function openDialog(title: string, text: string) {
+  dialogTitle.value = String(title || "").trim() || "预览";
+  dialogText.value = String(text || "");
+  dialogVisible.value = true;
+}
 const tagManagerVisible = ref(false);
 const tagManagerTag = ref("");
 const tagManagerContent = ref("");
@@ -485,11 +621,39 @@ const optimizeIntentVisible = ref(false);
 const optimizeIntentDraft = ref("");
 const apiSettingsVisible = ref(false);
 const insightsDrawerVisible = ref(false);
+const THEME_MODE_KEY = "novelh_theme_mode";
+const themeMode = ref<"console" | "literary">("console");
+function applyThemeMode(mode: "console" | "literary") {
+  try {
+    document.documentElement.setAttribute("data-theme-mode", mode);
+  } catch {
+    // ignore DOM errors in non-browser contexts
+  }
+}
+function toggleThemeMode() {
+  themeMode.value = themeMode.value === "console" ? "literary" : "console";
+  applyThemeMode(themeMode.value);
+  try {
+    localStorage.setItem(THEME_MODE_KEY, themeMode.value);
+  } catch {
+    // ignore localStorage errors
+  }
+}
 const autoLoreManagerVisible = ref(false);
 const autoLoreLoading = ref(false);
 const autoLoreRegenerating = ref(false);
 const autoLoreRegenerateBrief = ref("");
-const autoLoreRows = ref<Array<{ tag: string; relative_path: string }>>([]);
+const autoLoreRows = ref<Array<{ tag: string; relative_path: string; filename: string }>>([]);
+const eventPlanManagerVisible = ref(false);
+const eventPlanLoading = ref(false);
+const eventPlanGenerating = ref(false);
+const eventPlanTargetEventId = ref("");
+const eventPlanUserTask = ref("");
+const eventPlanRows = ref<
+  Array<{ event_id: string; time_slot: string; updated_at: string; preview: string; quality: string }>
+>([]);
+const eventPlanMap = ref<Record<string, { updated_at: string; quality: string; ready: boolean }>>({});
+const eventPlanErrorText = ref("");
 
 const FIRST_RUN_KEY = "novel-agent-onboarding-dismissed-v1";
 const firstRunHintVisible = ref(false);
@@ -609,10 +773,12 @@ async function loadAutoLoreManifest() {
       ...(Array.isArray(res.generated) ? res.generated : []),
       ...(Array.isArray(res.skipped) ? res.skipped : []),
     ]
-      .map((x) => ({
-        tag: String(x?.tag || "").trim(),
-        relative_path: String(x?.relative_path || "").trim(),
-      }))
+      .map((x) => {
+        const tag = String(x?.tag || "").trim();
+        const relativePath = String(x?.relative_path || "").trim();
+        const filename = relativePath ? relativePath.split("/").pop() || "" : "";
+        return { tag, relative_path: relativePath, filename };
+      })
       .filter((x) => x.tag || x.relative_path);
     autoLoreRows.value = rows;
   } catch {
@@ -629,6 +795,135 @@ async function openAutoLoreManager() {
   }
   autoLoreManagerVisible.value = true;
   await loadAutoLoreManifest();
+}
+
+async function loadEventPlans() {
+  const novelId = (form.novelId || "").trim();
+  if (!novelId) {
+    eventPlanRows.value = [];
+    eventPlanMap.value = {};
+    return;
+  }
+  eventPlanLoading.value = true;
+  eventPlanErrorText.value = "";
+  try {
+    const res = (await apiJson(
+      `/api/novels/${encodeURIComponent(novelId)}/event_plans`,
+      "GET",
+      null
+    )) as {
+      rows?: Array<{
+        event_id?: string;
+        updated_at?: string;
+        plan?: { time_slot?: string; objective?: string; conflict?: string };
+      }>;
+    };
+    const rows = (Array.isArray(res?.rows) ? res.rows : [])
+      .map((x) => {
+        const objective = String(x?.plan?.objective || "").trim();
+        const conflict = String(x?.plan?.conflict || "").trim();
+        const progressionCount = Array.isArray(x?.plan?.progression) ? x.plan.progression.length : 0;
+        const resolution = String((x?.plan as Record<string, unknown> | undefined)?.resolution_target || "").trim();
+        const qualityFilled =
+          (objective ? 1 : 0) +
+          (conflict ? 1 : 0) +
+          (progressionCount > 0 ? 1 : 0) +
+          (resolution ? 1 : 0);
+        const quality = `${qualityFilled}/4（目标/冲突/推进/收束）`;
+        return {
+          event_id: String(x?.event_id || "").trim(),
+          time_slot: String(x?.plan?.time_slot || "").trim(),
+          updated_at: String(x?.updated_at || "").trim(),
+          preview: `目标：${objective || "（空）"}\n冲突：${conflict || "（空）"}\n推进条目：${progressionCount}\n收束目标：${resolution || "（空）"}`,
+          quality,
+          ready: qualityFilled >= 3,
+        };
+      })
+      .filter((x) => x.event_id);
+    eventPlanRows.value = rows;
+    const m: Record<string, { updated_at: string; quality: string; ready: boolean }> = {};
+    for (const r of rows) {
+      m[r.event_id] = { updated_at: r.updated_at, quality: r.quality, ready: r.ready };
+    }
+    eventPlanMap.value = m;
+  } catch {
+    eventPlanRows.value = [];
+    eventPlanMap.value = {};
+    eventPlanErrorText.value = "加载事件计划列表失败，请重试。";
+  } finally {
+    eventPlanLoading.value = false;
+  }
+}
+
+async function openEventPlanManager() {
+  if (!(form.novelId || "").trim()) {
+    ElMessage.warning("请先选择或创建一本小说。");
+    return;
+  }
+  eventPlanTargetEventId.value = boundTimelineEventId.value || "";
+  eventPlanErrorText.value = "";
+  eventPlanManagerVisible.value = true;
+  await loadEventPlans();
+}
+
+async function generateEventPlan() {
+  const novelId = (form.novelId || "").trim();
+  const eventId = (eventPlanTargetEventId.value || "").trim();
+  if (!novelId || !eventId) {
+    ElMessage.error("请选择小说和目标事件。");
+    return;
+  }
+  eventPlanGenerating.value = true;
+  eventPlanErrorText.value = "";
+  try {
+    await apiJson(
+      `/api/novels/${encodeURIComponent(novelId)}/event_plan`,
+      "POST",
+      {
+        event_id: eventId,
+        user_task:
+          (eventPlanUserTask.value || "").trim() || "基于当前图谱与状态，输出该事件阶段的稳定剧情大纲。",
+        lore_tags: selectedTags.value || [],
+      }
+    );
+    await loadEventPlans();
+    ElMessage.success("事件计划已生成。");
+  } catch (e: unknown) {
+    const err = e as { message?: string };
+    const msg = String(err?.message || e || "事件计划生成失败");
+    eventPlanErrorText.value = msg;
+    ElMessage.error(msg);
+  } finally {
+    eventPlanGenerating.value = false;
+  }
+}
+
+async function generateBoundEventPlan() {
+  const eid = boundTimelineEventId.value;
+  if (!eid) {
+    ElMessage.error("请先在时序步骤绑定一个已有事件。");
+    return;
+  }
+  eventPlanTargetEventId.value = eid;
+  await generateEventPlan();
+}
+
+async function deleteEventPlanById(eventId: string) {
+  const novelId = (form.novelId || "").trim();
+  const eid = String(eventId || "").trim();
+  if (!novelId || !eid) return;
+  try {
+    await apiJson(
+      `/api/novels/${encodeURIComponent(novelId)}/event_plan/${encodeURIComponent(eid)}`,
+      "DELETE",
+      null
+    );
+    await loadEventPlans();
+    ElMessage.success("事件计划已删除。");
+  } catch (e: unknown) {
+    const err = e as { message?: string };
+    ElMessage.error(err?.message || String(e));
+  }
 }
 
 async function regenerateAutoLore() {
@@ -652,56 +947,19 @@ async function regenerateAutoLore() {
     ElMessage.success(`已重生成自动设定（${Number(res?.count || 0)} 个文件）。`);
   } catch (e: unknown) {
     const err = e as { message?: string };
-    ElMessage.error(err?.message || String(e));
+    const msg = String(err?.message || e || "");
+    if (msg.includes("未覆盖任何文件")) {
+      ElMessage.error(msg);
+    } else {
+      ElMessage.error(`重生成失败，未覆盖任何文件。${msg ? ` ${msg}` : ""}`);
+    }
   } finally {
     autoLoreRegenerating.value = false;
   }
 }
 
 /** 与 agents/novel/llm_client.init_deepseek_chat 默认参数保持一致（勿与后端漂移） */
-const DEFAULT_LLM_TEMPERATURE = 0.7;
-const DEFAULT_LLM_MAX_TOKENS = 20000;
-
-const form = reactive<{
-  novelId: string;
-  eventMode: "existing" | "new";
-  existingEventId: string;
-  newEventTimeSlot: string;
-  newEventSummary: string;
-  newEventPrevId: string;
-  newEventNextId: string;
-  povCharacterOverride: string[];
-  focusCharacterIds: string[];
-  conflictChoice: string;
-  foreshadowChoice: string;
-  supportingPreset: string;
-  chapterPresetName: string;
-  /** 当前地图/场景，可选；随请求写入 current_map 并注入模型约束 */
-  currentMap: string;
-  userTask: string;
-  llmTemperature: number | null;
-  llmTopP: number | null;
-  llmMaxTokens: number | null;
-}>({
-  novelId: "",
-  eventMode: "existing",
-  existingEventId: "",
-  newEventTimeSlot: "",
-  newEventSummary: "",
-  newEventPrevId: "",
-  newEventNextId: "",
-  povCharacterOverride: [],
-  focusCharacterIds: [],
-  conflictChoice: "自动",
-  foreshadowChoice: "自动",
-  supportingPreset: "自动",
-  chapterPresetName: "",
-  currentMap: "",
-  userTask: "",
-  llmTemperature: DEFAULT_LLM_TEMPERATURE,
-  llmTopP: null,
-  llmMaxTokens: DEFAULT_LLM_MAX_TOKENS,
-});
+const form = createAppForm();
 
 const graph = useGraph(toRef(form, "novelId"));
 provide(GRAPH_INJECTION_KEY, graph);
@@ -727,6 +985,34 @@ const graphSliceCharacterTotal = computed(() => Number(graph.graphStats?.nodeByT
 const currentEventLabel = computed(() => {
   const byId = new Map((anchors.value || []).map((a) => [a.id, a.label]));
   return String(byId.get(form.existingEventId) || "").trim();
+});
+const boundTimelineEventId = computed(() => {
+  if (String(form.eventMode || "").trim() !== "existing") return "";
+  const eid = String(form.existingEventId || "").trim();
+  return eid.startsWith("ev:timeline:") ? eid : "";
+});
+const eventPlanStatusText = computed(() => {
+  const eid = boundTimelineEventId.value;
+  if (!eid) {
+    return "未绑定已有事件（event-only 模式下必须先绑定已有 timeline_event）";
+  }
+  const hit = eventPlanMap.value[eid];
+  if (!hit) {
+    return "缺失（请先生成事件计划）";
+  }
+  return `已绑定且存在计划（更新时间：${String(hit.updated_at || "").trim() || "未知"}）`;
+});
+const eventPlanReady = computed(() => {
+  const eid = boundTimelineEventId.value;
+  if (!eid) return false;
+  return Boolean(eventPlanMap.value[eid]);
+});
+const eventPlanQualityText = computed(() => {
+  const eid = boundTimelineEventId.value;
+  if (!eid) return "未绑定事件";
+  const hit = eventPlanMap.value[eid];
+  if (!hit) return "缺失（未生成）";
+  return hit.quality || "已生成";
 });
 
 function reloadGraphSlice() {
@@ -807,30 +1093,20 @@ function abortRun() {
 }
 
 function selectAll() {
-  selectedTags.value = [...tags.value];
-  syncTagTreeChecked();
+  selectAllTags(tags, selectedTags, tagTreeRef);
 }
 function clearSelect() {
-  selectedTags.value = [];
-  syncTagTreeChecked();
+  clearAllTags(selectedTags, tagTreeRef);
 }
 function invertSelect() {
-  const set = new Set(selectedTags.value);
-  selectedTags.value = tags.value.filter((t) => !set.has(t));
-  syncTagTreeChecked();
+  invertTags(tags, selectedTags, tagTreeRef);
 }
 function onTreeCheck() {
-  if (!tagTreeRef.value) return;
-  const checkedKeys: string[] = tagTreeRef.value.getCheckedKeys(false) || [];
-  const halfKeys: string[] = tagTreeRef.value.getHalfCheckedKeys() || [];
-  const all = [...checkedKeys, ...halfKeys];
-  selectedTags.value = all.filter((k) => tags.value.includes(k));
+  onTagTreeCheck(tags, selectedTags, tagTreeRef);
 }
 
 function syncTagTreeChecked() {
-  nextTick(() => {
-    if (tagTreeRef.value) tagTreeRef.value.setCheckedKeys([...selectedTags.value], false);
-  });
+  syncTagTreeCheckedRef(tagTreeRef, selectedTags);
 }
 
 async function loadNovelLoreTags() {
@@ -845,12 +1121,28 @@ async function loadNovelLoreTags() {
       meta?: { lore_tags?: string[] };
     };
     const rows = Array.isArray(st?.meta?.lore_tags) ? st.meta?.lore_tags || [] : [];
-    const cleaned = rows.map((x) => String(x || "").trim()).filter((x) => x && tags.value.includes(x));
+    const cleaned = rows
+      .map((x) => normalizeTag(String(x || "")))
+      .filter((x) => x && tags.value.includes(x));
     selectedTags.value = cleaned;
     syncTagTreeChecked();
   } catch (e: unknown) {
     const err = e as { message?: string };
     ElMessage.error(`加载本书标签失败：${err?.message || String(e)}`);
+  }
+}
+
+async function loadNovelOutputLocation() {
+  const novelId = (form.novelId || "").trim();
+  currentNovelOutputDir.value = "";
+  if (!novelId) return;
+  try {
+    const st = (await apiJson(`/api/novels/${encodeURIComponent(novelId)}/state`, "GET", null)) as {
+      outputs?: { novel_output_dir?: string };
+    };
+    currentNovelOutputDir.value = String(st?.outputs?.novel_output_dir || "").trim();
+  } catch {
+    currentNovelOutputDir.value = "";
   }
 }
 
@@ -877,8 +1169,8 @@ async function saveNovelLoreTags() {
 async function loadTags() {
   tagsLoading.value = true;
   const res = (await apiJson("/api/lore/tags", "GET", null)) as { tags?: string[]; groups?: Record<string, string[]> };
-  tags.value = res.tags || [];
-  tagGroups.value = res.groups || {};
+  allTags.value = (res.tags || []).map((x) => normalizeTag(String(x || ""))).filter(Boolean);
+  applyTagScopeForCurrentNovel();
   const existed = new Set(selectedTags.value || []);
   const kept = tags.value.filter((t) => existed.has(t));
   selectedTags.value = kept.length > 0 ? kept : [...tags.value];
@@ -952,6 +1244,7 @@ async function renameCurrentNovel() {
   }
   await apiJson(`/api/novels/${encodeURIComponent(novelId)}`, "PATCH", { novel_title: title });
   await loadNovels();
+  await loadNovelOutputLocation();
   ElMessage.success("已更新小说名。");
 }
 
@@ -1481,6 +1774,11 @@ function buildRunPayload(runMode: AppRunMode) {
     if (!validateTimePlan()) {
       return null;
     }
+    const boundEventId = (form.existingEventId || "").trim();
+    if (!eventPlanMap.value[boundEventId]) {
+      ElMessage.error("当前绑定事件缺少事件计划。请先点击「事件计划」生成后再写作。");
+      return null;
+    }
   }
 
   let mergedTask = (() => {
@@ -1560,7 +1858,10 @@ async function executeRun(novelId: string, payload: Record<string, unknown>) {
     runHint.value = "已提交任务，正在排队/规划...";
   }
   lastOutputPath.value = "";
+  runRequestId.value = "";
+  lastErrorCode.value = "";
   tokenUsageText.value = "";
+  autoRejudgeText.value = "";
   shadowDigestText.value = "";
   consistencyAuditText.value = "";
   consistencyAuditSeverity.value = "ok";
@@ -1582,7 +1883,10 @@ async function executeRun(novelId: string, payload: Record<string, unknown>) {
 
     await apiSse(`/api/novels/${novelId}/run_stream`, "POST", payload, (evt) => {
       const d = evt.data as Record<string, unknown> | null | undefined;
-      if (evt.event === "phase") {
+      if (evt.event === "start") {
+        runRequestId.value = String(d?.request_id || "").trim();
+      } else if (evt.event === "phase") {
+        if (d?.request_id) runRequestId.value = String(d.request_id || "").trim();
         const name = String(d?.name || "running");
         if (name === "world_init" || name === "running") {
           runPhase.value = "world_init";
@@ -1626,8 +1930,12 @@ async function executeRun(novelId: string, payload: Record<string, unknown>) {
         refreshStreamText();
       } else if (evt.event === "error") {
         const msg = d?.message || JSON.stringify(d);
+        if (d?.request_id) runRequestId.value = String(d.request_id || "").trim();
+        lastErrorCode.value = String(d?.error_code || "").trim();
         runPhase.value = "error";
-        runHint.value = "执行失败，请查看下方错误日志";
+        runHint.value = lastErrorCode.value
+          ? `执行失败（${lastErrorCode.value}）`
+          : "执行失败，请查看下方错误日志";
         if (isInitRun) {
           worldInitError.value = String(msg);
         }
@@ -1635,6 +1943,7 @@ async function executeRun(novelId: string, payload: Record<string, unknown>) {
         refreshStreamText();
       } else if (evt.event === "done") {
         donePayload = (d || null) as Record<string, unknown> | null;
+        if (d?.request_id) runRequestId.value = String(d.request_id || "").trim();
         runPhase.value = "done";
         runHint.value = "本次任务已完成";
       }
@@ -1707,6 +2016,7 @@ async function executeRun(novelId: string, payload: Record<string, unknown>) {
         lastChapterTimelineEventId.value = chTl;
       }
       shadowDigestText.value = buildShadowDigest(donePayload, modeStr, chTl);
+      autoRejudgeText.value = formatAutoRejudge(donePayload.auto_rejudge);
       const audit = formatConsistencyAudit(donePayload.consistency_audit);
       consistencyAuditText.value = audit.text;
       consistencyAuditSeverity.value = audit.severity;
@@ -1736,88 +2046,6 @@ async function executeRun(novelId: string, payload: Record<string, unknown>) {
     runAbortController = null;
     currentStreamMode.value = "";
   }
-}
-
-function formatConsistencyAudit(raw: unknown): { text: string; severity: "ok" | "warn" | "high" } {
-  if (!raw || typeof raw !== "object") return { text: "", severity: "ok" };
-  const x = raw as {
-    score?: unknown;
-    severity?: unknown;
-    issue_count?: unknown;
-    block_reasons?: Array<{ message?: unknown }>;
-    recommended_actions?: Array<unknown>;
-    issues?: Array<{ level?: unknown; message?: unknown; suggestion?: unknown }>;
-  };
-  const sev = String(x.severity || "ok");
-  const severity: "ok" | "warn" | "high" = sev === "high" ? "high" : sev === "warn" ? "warn" : "ok";
-  const score = Number(x.score ?? NaN);
-  const issueCount = Number(x.issue_count ?? 0);
-  const issues = Array.isArray(x.issues) ? x.issues : [];
-  const lines: string[] = [];
-  lines.push(`评分：${Number.isFinite(score) ? score : "-"} / 100`);
-  lines.push(`问题数：${Number.isFinite(issueCount) ? issueCount : issues.length}`);
-  if (!issues.length) {
-    lines.push("未发现明显一致性问题。");
-  } else {
-    const top = issues.slice(0, 4);
-    for (const it of top) {
-      const lvl = String(it?.level || "warn").toUpperCase();
-      const msg = String(it?.message || "").trim();
-      const sug = String(it?.suggestion || "").trim();
-      if (msg) lines.push(`[${lvl}] ${msg}`);
-      if (sug) lines.push(`  建议：${sug}`);
-    }
-    if (issues.length > top.length) {
-      lines.push(`... 另有 ${issues.length - top.length} 条，可在后端返回中查看详情。`);
-    }
-  }
-  const br = Array.isArray(x.block_reasons) ? x.block_reasons : [];
-  if (br.length > 0) {
-    lines.push("阻断原因：");
-    for (const it of br.slice(0, 3)) {
-      const msg = String(it?.message || "").trim();
-      if (msg) lines.push(`- ${msg}`);
-    }
-  }
-  const acts = Array.isArray(x.recommended_actions) ? x.recommended_actions : [];
-  if (acts.length > 0) {
-    lines.push("修复动作：");
-    for (const a of acts.slice(0, 3)) {
-      const txt = String(a || "").trim();
-      if (txt) lines.push(`- ${txt}`);
-    }
-  }
-  return { text: lines.join("\n"), severity };
-}
-
-function buildShadowDigest(
-  donePayload: Record<string, unknown>,
-  modeStr: string,
-  chapterTimelineEventId: string
-): string {
-  const blocks: string[] = [];
-  if (modeStr) blocks.push(`模式：${modeStr}`);
-  const chapterIndex = donePayload.chapter_index;
-  if (chapterIndex != null && chapterIndex !== "") blocks.push(`章节：${String(chapterIndex)}`);
-  if (chapterTimelineEventId) blocks.push(`事件归属：${chapterTimelineEventId}`);
-  const plan = donePayload.plan as Record<string, unknown> | null | undefined;
-  if (plan && typeof plan === "object") {
-    const beats = Array.isArray(plan.beats) ? plan.beats.length : 0;
-    if (beats > 0) blocks.push(`规划节拍：${beats} 条`);
-    const timeSlot = String(plan.time_slot || "").trim();
-    if (timeSlot) blocks.push(`时间段：${timeSlot}`);
-  }
-  const nextStatus = String(donePayload.next_status || "").trim();
-  if (nextStatus) {
-    const short = nextStatus.length > 160 ? `${nextStatus.slice(0, 160)}...` : nextStatus;
-    blocks.push(`下章建议摘要：${short}`);
-  }
-  const sd = donePayload.shadow_director as Record<string, unknown> | null | undefined;
-  if (sd && typeof sd === "object") {
-    const digest = String(sd.digest || "").trim();
-    if (digest) blocks.push(`导演策略：${digest}`);
-  }
-  return blocks.join("\n");
 }
 
 async function startPreviewRun(runMode: AppRunMode): Promise<boolean> {
@@ -2118,23 +2346,12 @@ async function confirmNextChapterFromHint() {
 }
 
 function validateTimePlan(): boolean {
-  if (form.eventMode === "existing") {
-    if (!(form.existingEventId || "").trim()) {
-      ElMessage.error("请先选择“归属到已有事件”。");
-      return false;
-    }
-    return true;
-  }
-  if (!(form.newEventTimeSlot || "").trim() || !(form.newEventSummary || "").trim()) {
-    ElMessage.error("新建事件时请填写 time_slot 和 summary。");
+  if (form.eventMode !== "existing") {
+    ElMessage.error("当前为事件级计划模式：请改为“归属到已有事件”。");
     return false;
   }
-  if (
-    (form.newEventPrevId || "").trim() &&
-    (form.newEventNextId || "").trim() &&
-    form.newEventPrevId === form.newEventNextId
-  ) {
-    ElMessage.error("新建事件的前后事件不能相同。");
+  if (!(form.existingEventId || "").trim()) {
+    ElMessage.error("请先选择“归属到已有事件”。");
     return false;
   }
   return true;
@@ -2142,6 +2359,15 @@ function validateTimePlan(): boolean {
 
 onMounted(async () => {
   try {
+    try {
+      const saved = String(localStorage.getItem(THEME_MODE_KEY) || "").trim();
+      if (saved === "console" || saved === "literary") {
+        themeMode.value = saved;
+      }
+    } catch {
+      // ignore localStorage errors
+    }
+    applyThemeMode(themeMode.value);
     try {
       if (!localStorage.getItem(FIRST_RUN_KEY)) {
         firstRunHintVisible.value = true;
@@ -2153,7 +2379,9 @@ onMounted(async () => {
     await loadTags();
     await loadNovels();
     await loadNovelLoreTags();
+    await loadNovelOutputLocation();
     await loadAnchors();
+    await loadEventPlans();
     await loadCharacterOptions();
     await graph.loadGraph();
     await preloadAllPreviews();
@@ -2167,6 +2395,8 @@ onMounted(async () => {
 watch(
   () => form.novelId,
   async () => {
+    applyTagScopeForCurrentNovel();
+    syncTagTreeChecked();
     midActiveSection.value = "timeline";
     lastChapterTimelineEventId.value = "";
     suggestedTimelineEventId.value = "";
@@ -2180,7 +2410,9 @@ watch(
     await loadCharacterOptions();
     await graph.loadGraph();
     await loadAutoLoreManifest();
+    await loadEventPlans();
     await loadNovelLoreTags();
+    await loadNovelOutputLocation();
   }
 );
 
@@ -2201,6 +2433,9 @@ watch(runPhase, (p) => {
 </script>
 
 <style scoped>
+.app-shell-zone {
+  border-radius: 12px;
+}
 .app-header-top {
   display: flex;
   align-items: center;
@@ -2219,6 +2454,15 @@ watch(runPhase, (p) => {
   gap: 8px;
   flex-shrink: 0;
 }
+.btn-link-main {
+  font-weight: 600;
+}
+.btn-console-secondary {
+  min-width: 82px;
+}
+.btn-console-primary {
+  min-width: 88px;
+}
 .first-run-alert {
   margin-bottom: 16px;
 }
@@ -2233,7 +2477,7 @@ watch(runPhase, (p) => {
 .first-run-muted {
   margin: 10px 0 0;
   font-size: 12px;
-  color: var(--lit-ink-muted, #606266);
+  color: var(--lit-muted, #606266);
 }
 .wrap {
   width: 100%;
@@ -2268,6 +2512,16 @@ watch(runPhase, (p) => {
   min-width: 0;
   box-sizing: border-box;
 }
+.left-pane-toolbar {
+  display: flex;
+  justify-content: flex-start;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 8px;
+  border-radius: 10px;
+  border: 1px solid var(--app-toolbar-border, rgba(127, 161, 221, 0.36));
+  background: var(--app-toolbar-bg, linear-gradient(180deg, rgba(21, 34, 63, 0.74), rgba(15, 24, 44, 0.8)));
+}
 .mid-pane {
   flex: 1 1 auto;
   min-width: 0;
@@ -2277,15 +2531,18 @@ watch(runPhase, (p) => {
   width: 10px;
   cursor: col-resize;
   border-radius: 6px;
-  background: linear-gradient(
-    to right,
-    transparent 0%,
-    transparent 38%,
-    #cbd5e1 38%,
-    #94a3b8 50%,
-    #cbd5e1 62%,
-    transparent 62%,
-    transparent 100%
+  background: var(
+    --app-resize-handle-bg,
+    linear-gradient(
+      to right,
+      transparent 0%,
+      transparent 38%,
+      #cbd5e1 38%,
+      #94a3b8 50%,
+      #cbd5e1 62%,
+      transparent 62%,
+      transparent 100%
+    )
   );
   transition:
     filter 0.2s,
@@ -2295,13 +2552,43 @@ watch(runPhase, (p) => {
   flex: 0 0 10px;
 }
 .resize-handle:hover {
-  filter: brightness(0.9);
+  filter: var(--app-resize-handle-hover-filter, brightness(0.9));
 }
 .insights-drawer :deep(.el-drawer__body) {
   padding-top: 8px;
 }
+.insights-drawer :deep(.el-drawer__header) {
+  border-bottom: 1px solid var(--app-drawer-header-border, rgba(127, 161, 221, 0.34));
+}
+.console-dialog :deep(.el-dialog__body) {
+  padding-top: 12px;
+}
+.dialog-top-alert {
+  margin-bottom: 10px;
+}
+.w-full {
+  width: 100%;
+}
+.inline-actions-wrap {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.inline-actions-grid {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  flex-wrap: wrap;
+}
+.split-input {
+  flex: 1 1 48%;
+}
+.margin-b-8 {
+  margin-bottom: 8px;
+}
 .muted {
-  color: #909399;
+  color: var(--lit-muted, #909399);
   font-size: 12px;
 }
 .tag-list {
@@ -2335,7 +2622,7 @@ watch(runPhase, (p) => {
 .tag-hint {
   margin-top: 6px;
   font-size: 12px;
-  color: #909399;
+  color: var(--lit-muted, #909399);
 }
 .preview-scroll {
   max-height: 420px;

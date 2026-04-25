@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -8,7 +9,13 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from agents.lore.lore_runtime import regenerate_auto_lore_with_graph
 from agents.novel import NovelAgent
+from agents.persistence.event_plan_store import (
+    delete_event_plan,
+    list_event_plans,
+    load_event_plan,
+)
 from agents.persistence.graph_tables import (
     ensure_graph_tables,
     load_character_entities,
@@ -18,12 +25,15 @@ from agents.persistence.graph_tables import (
     resolve_chapter_timeline_event_id,
     validate_timeline_event_id,
 )
+from agents.persistence.env_paths import get_outputs_root
 from agents.persistence.storage import load_chapter, load_state, save_state, list_chapters
 from agents.state.chapter_structure import build_locked_structure_card, evaluate_structure_gate
 from agents.state.consistency_audit import build_consistency_audit
 from agents.state.shadow_director import build_shadow_director_package
-from agents.state.state_models import ChapterPlan, ChapterRecord
+from agents.state.state_models import Beat, ChapterPlan, ChapterRecord, CharacterPresence
+from agents.text_utils import resolve_novel_outputs_dir
 from webapp.backend.deps import agent, logger
+from webapp.backend.domain.novel_lore_tags import normalize_novel_lore_tags
 from webapp.backend.paths import STORAGE_NOVELS_DIR
 from webapp.backend.run_helpers import (
     apply_chapter_event_selection,
@@ -34,9 +44,26 @@ from webapp.backend.run_helpers import (
     req_timeline_focus_id,
     uses_new_timeline_event_for_chapter,
 )
+from webapp.backend.services.auto_lore import (
+    build_auto_lore_docs_via_graph_rewrite,
+    generate_auto_lore_for_novel,
+    read_auto_lore_manifest,
+    validate_regen_docs_constraints,
+    write_auto_lore_docs_atomic,
+)
+from webapp.backend.services.novel_run import (
+    build_chapter_plan_from_event,
+    classify_event_plan_guard_error,
+    infer_stream_error_code,
+    require_bound_timeline_event_exists,
+    require_event_plan_for_event,
+    require_existing_event_binding,
+    unwrap_chapter_plan_payload,
+)
 from webapp.backend.schemas import (
     AutoLoreRegenerateRequest,
     CreateNovelRequest,
+    EventPlanGenerateRequest,
     NovelTagsUpdateRequest,
     NovelUpdateRequest,
     RunModeRequest,
@@ -46,26 +73,83 @@ from webapp.backend.sse import sse_pack
 router = APIRouter(tags=["novels"])
 
 
+AUTO_LORE_PREFIX = "自动生成/"
+AUTO_LORE_FILE_SPECS = [
+    "00_项目说明.md",
+    "01_世界观骨架.md",
+    "02_角色与关系草案.md",
+    "03_连载主线与伏笔.md",
+]
+
+
+def _norm_tag(tag: str) -> str:
+    return str(tag or "").replace("\\", "/").strip().strip("/")
+
+
+def _is_auto_lore_tag(tag: str) -> bool:
+    return _norm_tag(tag).startswith(AUTO_LORE_PREFIX)
+
+
+def _is_auto_lore_tag_for_novel(tag: str, novel_id: str) -> bool:
+    prefix = f"{AUTO_LORE_PREFIX}{novel_id}/"
+    return _norm_tag(tag).startswith(prefix)
+
+
+def _normalize_novel_lore_tags(
+    *,
+    novel_id: str,
+    tags: List[str],
+    ensure_auto_tags: Optional[List[str]] = None,
+) -> List[str]:
+    return normalize_novel_lore_tags(
+        novel_id=novel_id,
+        tags=tags,
+        ensure_auto_tags=ensure_auto_tags,
+    )
+
+
+def _infer_stream_error_code(exc: Exception) -> str:
+    return infer_stream_error_code(exc)
+
+
+def _require_existing_event_binding(req: RunModeRequest) -> str:
+    return require_existing_event_binding(req)
+
+
+def _require_event_plan_for_event(novel_id: str, event_id: str):
+    return require_event_plan_for_event(novel_id, event_id)
+
+
+def _require_bound_timeline_event_exists(novel_id: str, event_id: str) -> str:
+    return require_bound_timeline_event_exists(novel_id, event_id)
+
+
+def _event_plan_guard_http_detail(exc: Exception) -> str:
+    code, msg = classify_event_plan_guard_error(exc)
+    return f"[{code}] {msg}"
+
+
+def _build_chapter_plan_from_event(
+    *,
+    chapter_index: int,
+    req: RunModeRequest,
+    inferred_time_slot: Optional[str],
+    st,
+    event_plan_rec,
+    pov_ids: List[str],
+) -> ChapterPlan:
+    return build_chapter_plan_from_event(
+        chapter_index=chapter_index,
+        req=req,
+        inferred_time_slot=inferred_time_slot,
+        st=st,
+        event_plan_rec=event_plan_rec,
+        pov_ids=pov_ids,
+    )
+
+
 def _unwrap_chapter_plan_payload(payload: Any) -> Dict[str, Any]:
-    """
-    兼容模型偶发返回包装层：
-    - {"ChapterPlan": {...}}
-    - {"result": {...}} / {"output": {...}}
-    """
-    if not isinstance(payload, dict):
-        return {}
-    if "ChapterPlan" in payload and isinstance(payload.get("ChapterPlan"), dict):
-        return payload["ChapterPlan"]
-    if "result" in payload and isinstance(payload.get("result"), dict):
-        return payload["result"]
-    if "output" in payload and isinstance(payload.get("output"), dict):
-        return payload["output"]
-    if len(payload) == 1:
-        only = next(iter(payload.keys()))
-        inner = payload.get(only)
-        if isinstance(inner, dict) and str(only).strip().lower() in {"chapterplan", "result", "output"}:
-            return inner
-    return payload
+    return unwrap_chapter_plan_payload(payload)
 
 
 def _auto_lore_manifest_path(novel_id: str):
@@ -73,8 +157,22 @@ def _auto_lore_manifest_path(novel_id: str):
 
 
 def _safe_stem_text(v: str) -> str:
-    s = "".join(ch for ch in str(v or "").strip() if ch.isalnum() or ch in ("_", "-", " ", "·"))
+    s = "".join(ch for ch in str(v or "").strip() if ch.isalnum() or ch in ("_", "-", " ", "·", "."))
     return s.strip()[:48] or "untitled"
+
+
+def _normalize_auto_lore_filename(name: str) -> str:
+    fn = _safe_stem_text(name).replace(" ", "_").strip()
+    if not fn:
+        fn = "untitled"
+    # 去掉末尾多余点，避免 ".md." 一类路径
+    fn = fn.rstrip(".")
+    if not fn.lower().endswith(".md"):
+        fn = f"{fn}.md"
+    # 兼容历史异常：xxx.md.md -> xxx.md
+    while fn.lower().endswith(".md.md"):
+        fn = fn[:-3]
+    return fn
 
 
 def _build_auto_lore_docs(
@@ -161,10 +259,9 @@ def _build_auto_lore_docs(
         },
     ]
     docs: List[Dict[str, str]] = []
-    for it in files:
-        fn = _safe_stem_text(it["filename"]).replace(" ", "_")
-        if not fn.lower().endswith(".md"):
-            fn = f"{fn}.md"
+    for i, it in enumerate(files):
+        expected = AUTO_LORE_FILE_SPECS[i] if i < len(AUTO_LORE_FILE_SPECS) else str(it["filename"])
+        fn = _normalize_auto_lore_filename(expected)
         rel = f"{root}/{fn}"
         docs.append({"relative_path": rel, "tag": rel[:-3], "content": it["body"]})
     return docs
@@ -205,17 +302,57 @@ def _write_auto_lore_docs(
     return payload
 
 
+def _collect_existing_auto_lore_docs(novel_id: str) -> List[Dict[str, str]]:
+    base = agent.lore_loader.data_path / "自动生成" / novel_id
+    rows: List[Dict[str, str]] = []
+    if not base.exists():
+        return rows
+    for fp in base.rglob("*.md"):
+        if not fp.is_file():
+            continue
+        rel = fp.relative_to(agent.lore_loader.data_path).as_posix()
+        rows.append(
+            {
+                "relative_path": rel,
+                "filename": fp.name,
+                "content": fp.read_text(encoding="utf-8"),
+            }
+        )
+    rows.sort(key=lambda x: str(x.get("relative_path", "")))
+    return rows
+
+
+def _build_auto_lore_docs_via_graph_rewrite(
+    *,
+    novel_id: str,
+    novel_title: str,
+    brief: str,
+) -> List[Dict[str, str]]:
+    return build_auto_lore_docs_via_graph_rewrite(
+        novel_id=novel_id,
+        novel_title=novel_title,
+        brief=brief,
+        rewrite_fn=regenerate_auto_lore_with_graph,
+    )
+
+
+def _write_auto_lore_docs_atomic(
+    *,
+    novel_id: str,
+    docs: List[Dict[str, str]],
+) -> Dict[str, Any]:
+    return write_auto_lore_docs_atomic(
+        novel_id=novel_id,
+        docs=docs,
+    )
+
+
+def _validate_regen_docs_constraints(novel_id: str, docs: List[Dict[str, str]]) -> None:
+    validate_regen_docs_constraints(novel_id, docs)
+
+
 def _read_auto_lore_manifest(novel_id: str) -> Dict[str, Any]:
-    mf = _auto_lore_manifest_path(novel_id)
-    if not mf.exists():
-        return {"novel_id": novel_id, "generated": [], "skipped": [], "count": 0}
-    try:
-        data = json.loads(mf.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            return data
-    except Exception:
-        pass
-    return {"novel_id": novel_id, "generated": [], "skipped": [], "count": 0}
+    return read_auto_lore_manifest(novel_id)
 
 
 def _generate_auto_lore_for_novel(
@@ -228,17 +365,13 @@ def _generate_auto_lore_for_novel(
     brief: str,
     overwrite: bool,
 ) -> Dict[str, Any]:
-    docs = _build_auto_lore_docs(
+    return generate_auto_lore_for_novel(
         novel_id=novel_id,
         novel_title=novel_title,
         start_time_slot=start_time_slot,
         pov_character_id=pov_character_id,
-        selected_tags=lore_tags,
+        lore_tags=lore_tags,
         brief=brief,
-    )
-    return _write_auto_lore_docs(
-        novel_id=novel_id,
-        docs=docs,
         overwrite=overwrite,
     )
 
@@ -319,6 +452,125 @@ def _build_shadow_director(
     )
 
 
+def _merge_shadow_guidance(
+    raw: Optional[Dict[str, Any]],
+    shadow_director: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    out = dict(raw or {})
+    if not shadow_director or not isinstance(shadow_director, dict):
+        return out or None
+    sug = shadow_director.get("suggestions")
+    if not isinstance(sug, dict):
+        return out or None
+    if not str(out.get("conflict_type") or "").strip():
+        out["conflict_type"] = str(sug.get("conflict_type") or "").strip()
+    if not str(out.get("foreshadow_target") or "").strip():
+        out["foreshadow_target"] = str(sug.get("foreshadow_target") or "").strip()
+    rows = out.get("supporting_characters")
+    if not isinstance(rows, list) or (not rows):
+        out["supporting_characters"] = list(sug.get("supporting_characters") or [])
+    return out or None
+
+
+def _auto_rejudge_controls(
+    *,
+    novel_id: str,
+    req: RunModeRequest,
+    base_pov_ids: List[str],
+    shadow_director: Optional[Dict[str, Any]],
+    event_plan_rec: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """
+    自动重判（手动优先）：
+    - POV: 用户未填时，按 event plan + user_task + continuity 评分选 1 个
+    - 配角: 用户未填时，复用 shadow director 推荐
+    - guidance: 用户未填字段时，补影子编导冲突/伏笔建议
+    """
+    effective_pov_ids = [str(x).strip() for x in (base_pov_ids or []) if str(x).strip()]
+    raw_supporting = [str(x).strip() for x in (req.supporting_character_ids or []) if str(x).strip()]
+    effective_supporting = list(raw_supporting)
+
+    st = load_state(novel_id)
+    if (not effective_pov_ids) and st:
+        event_text = ""
+        if event_plan_rec is not None and getattr(event_plan_rec, "plan", None) is not None:
+            p = event_plan_rec.plan
+            event_text = " ".join(
+                [
+                    str(getattr(p, "objective", "") or ""),
+                    str(getattr(p, "conflict", "") or ""),
+                    " ".join([str(x or "") for x in (getattr(p, "progression", []) or [])]),
+                    " ".join([str(x or "") for x in (getattr(p, "turning_points", []) or [])]),
+                    str(getattr(p, "resolution_target", "") or ""),
+                ]
+            ).lower()
+        task_text = str(req.user_task or "").lower()
+        best_id = ""
+        best_score = -1
+        for c in st.characters or []:
+            cid = str(getattr(c, "character_id", "") or "").strip()
+            cname = str(getattr(c, "name", "") or "").strip()
+            if not cid:
+                continue
+            score = 0
+            if cid and cid.lower() in event_text:
+                score += 3
+            if cname and cname.lower() in event_text:
+                score += 3
+            if cid and cid.lower() in task_text:
+                score += 2
+            if cname and cname.lower() in task_text:
+                score += 2
+            if cid == str(st.continuity.pov_character_id or "").strip():
+                score += 1
+            if score > best_score:
+                best_score = score
+                best_id = cid
+        if not best_id:
+            best_id = str(st.continuity.pov_character_id or "").strip()
+        if not best_id and (st.characters or []):
+            best_id = str(getattr(st.characters[0], "character_id", "") or "").strip()
+        if best_id:
+            effective_pov_ids = [best_id]
+
+    if (not effective_supporting) and isinstance(shadow_director, dict):
+        sug = shadow_director.get("suggestions")
+        rows = sug.get("supporting_characters") if isinstance(sug, dict) else None
+        if isinstance(rows, list):
+            picked: List[str] = []
+            for it in rows:
+                if not isinstance(it, dict):
+                    continue
+                sid = str(it.get("id") or "").strip()
+                if sid and (sid not in picked) and (sid not in effective_pov_ids):
+                    picked.append(sid)
+            effective_supporting = picked
+
+    raw_guidance = req.shadow_director_guidance if isinstance(req.shadow_director_guidance, dict) else None
+    effective_guidance = _merge_shadow_guidance(raw_guidance, shadow_director)
+    return {
+        "effective_pov_ids": effective_pov_ids,
+        "effective_supporting_character_ids": effective_supporting,
+        "effective_shadow_director_guidance": effective_guidance,
+        "manual_pov": bool(base_pov_ids),
+        "manual_supporting": bool(raw_supporting),
+    }
+
+
+def _event_plan_binding_payload(event_plan_rec: Optional[Any]) -> Dict[str, Any]:
+    if not event_plan_rec:
+        return {}
+    plan = getattr(event_plan_rec, "plan", None)
+    return {
+        "event_id": str(getattr(event_plan_rec, "event_id", "") or "").strip(),
+        "event_plan_id": str(getattr(event_plan_rec, "event_plan_id", "") or "").strip(),
+        "time_slot": str(getattr(plan, "time_slot", "") or "").strip() if plan else "",
+        "objective": str(getattr(plan, "objective", "") or "").strip() if plan else "",
+        "conflict": str(getattr(plan, "conflict", "") or "").strip() if plan else "",
+        "progression_count": len(getattr(plan, "progression", []) or []) if plan else 0,
+    }
+
+
 @router.get("")
 def list_novels():
     base = STORAGE_NOVELS_DIR
@@ -368,14 +620,7 @@ def update_novel_lore_tags(novel_id: str, req: NovelTagsUpdateRequest):
     state = load_state(novel_id)
     if not state:
         raise HTTPException(status_code=404, detail="novel not found")
-    cleaned: List[str] = []
-    seen = set()
-    for t in (req.lore_tags or []):
-        s = str(t or "").strip()
-        if (not s) or (s in seen):
-            continue
-        seen.add(s)
-        cleaned.append(s)
+    cleaned = _normalize_novel_lore_tags(novel_id=novel_id, tags=[str(t or "") for t in (req.lore_tags or [])])
     state.meta.lore_tags = cleaned
     save_state(novel_id, state)
     return {"ok": True, "novel_id": novel_id, "lore_tags": cleaned, "count": len(cleaned)}
@@ -391,6 +636,10 @@ def delete_novel(novel_id: str):
     if not target.exists():
         raise HTTPException(status_code=404, detail="novel not found")
     shutil.rmtree(target, ignore_errors=False)
+    # 同步清理该小说的自动设定目录，避免 lores 下历史目录持续累积
+    auto_root = agent.lore_loader.data_path / "自动生成" / novel_id
+    if auto_root.exists():
+        shutil.rmtree(auto_root, ignore_errors=True)
     return {"ok": True, "novel_id": novel_id}
 
 
@@ -400,7 +649,10 @@ def create_novel(req: CreateNovelRequest):
     title = str(req.novel_title or "").strip() or "未命名小说"
     start_slot = str(req.start_time_slot or "").strip()
     pov_id = str(req.pov_character_id or "").strip()
-    picked_tags = [str(t).strip() for t in (req.lore_tags or []) if str(t).strip()]
+    picked_tags = _normalize_novel_lore_tags(
+        novel_id=novel_id,
+        tags=[str(t or "") for t in (req.lore_tags or [])],
+    )
     agent.create_novel_stub(
         novel_id=novel_id,
         novel_title=title,
@@ -423,6 +675,23 @@ def create_novel(req: CreateNovelRequest):
             )
         except Exception as e:
             logger.warning("auto lore generation failed for novel_id=%s: %s", novel_id, e)
+
+    try:
+        st_now = load_state(novel_id)
+        if st_now:
+            generated_tags = [
+                str(x.get("tag") or "").strip()
+                for x in (auto_manifest.get("generated") or [])
+                if isinstance(x, dict)
+            ]
+            st_now.meta.lore_tags = _normalize_novel_lore_tags(
+                novel_id=novel_id,
+                tags=[str(t or "") for t in (st_now.meta.lore_tags or [])],
+                ensure_auto_tags=generated_tags,
+            )
+            save_state(novel_id, st_now)
+    except Exception as e:
+        logger.warning("normalize lore tags failed for novel_id=%s: %s", novel_id, e)
 
     if req.initial_user_task and req.initial_user_task.strip():
         try:
@@ -453,15 +722,34 @@ def regenerate_auto_lore(novel_id: str, req: AutoLoreRegenerateRequest):
     st = load_state(novel_id)
     if not st:
         raise HTTPException(status_code=404, detail="novel not found")
-    payload = _generate_auto_lore_for_novel(
-        novel_id=novel_id,
-        novel_title=str(st.meta.novel_title or "").strip() or "未命名小说",
-        start_time_slot=str(st.continuity.time_slot or "").strip(),
-        pov_character_id=str(st.continuity.pov_character_id or "").strip(),
-        lore_tags=[str(t).strip() for t in (st.meta.lore_tags or []) if str(t).strip()],
-        brief=str(req.brief or "").strip(),
-        overwrite=bool(req.overwrite),
-    )
+    try:
+        docs = _build_auto_lore_docs_via_graph_rewrite(
+            novel_id=novel_id,
+            novel_title=str(st.meta.novel_title or "").strip() or "未命名小说",
+            brief=str(req.brief or "").strip(),
+        )
+        _validate_regen_docs_constraints(novel_id, docs)
+        payload = _write_auto_lore_docs_atomic(
+            novel_id=novel_id,
+            docs=docs,
+        )
+    except Exception as e:
+        logger.exception("regenerate auto lore failed novel_id=%s", novel_id)
+        raise HTTPException(status_code=400, detail=f"重生成失败，未覆盖任何文件：{e}") from None
+    try:
+        generated_tags = [
+            str(x.get("tag") or "").strip()
+            for x in (payload.get("generated") or [])
+            if isinstance(x, dict)
+        ]
+        st.meta.lore_tags = _normalize_novel_lore_tags(
+            novel_id=novel_id,
+            tags=[str(t or "") for t in (st.meta.lore_tags or [])],
+            ensure_auto_tags=generated_tags,
+        )
+        save_state(novel_id, st)
+    except Exception as e:
+        logger.warning("regenerate auto lore tags sync failed for novel_id=%s: %s", novel_id, e)
     return payload
 
 
@@ -470,7 +758,15 @@ def get_state(novel_id: str):
     state = load_state(novel_id)
     if not state:
         raise HTTPException(status_code=404, detail="novel not found")
-    return state.model_dump(mode="json")
+    payload = state.model_dump(mode="json")
+    title = str(state.meta.novel_title or "未命名小说")
+    out_dir = resolve_novel_outputs_dir(title, novel_id)
+    payload["outputs"] = {
+        "root_dir": str(get_outputs_root().resolve()),
+        "novel_subdir": str(out_dir).replace("\\", "/").rstrip("/").split("/")[-1],
+        "novel_output_dir": out_dir,
+    }
+    return payload
 
 
 @router.get("/{novel_id}/character_entities")
@@ -548,6 +844,73 @@ def list_event_anchors(novel_id: str):
     return {"novel_id": novel_id, "anchors": anchors, "count": len(anchors)}
 
 
+@router.post("/{novel_id}/event_plan")
+def generate_event_plan(novel_id: str, req: EventPlanGenerateRequest):
+    st = load_state(novel_id)
+    if not st:
+        raise HTTPException(status_code=404, detail="novel not found")
+    event_id = str(req.event_id or "").strip()
+    if not event_id.startswith("ev:timeline:"):
+        raise HTTPException(status_code=400, detail="event_id must be ev:timeline:*")
+    try:
+        _require_bound_timeline_event_exists(novel_id, event_id)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=_event_plan_guard_http_detail(e)) from None
+    try:
+        rec = agent.plan_event(
+            novel_id=novel_id,
+            event_id=event_id,
+            user_task=str(req.user_task or "").strip() or "生成该事件计划",
+            lore_tags=req.lore_tags,
+        )
+    except Exception as e:
+        msg = str(e or "")
+        low = msg.lower()
+        if ("validation error" in low or "field required" in low) and (
+            "event_id" in low or "time_slot" in low
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "事件计划生成失败：模型返回结构不完整（缺少 event_id/time_slot）。"
+                    "已中止保存，请重试。"
+                ),
+            ) from None
+        raise HTTPException(status_code=400, detail=f"事件计划生成失败：{msg}") from None
+    return rec.model_dump(mode="json")
+
+
+@router.get("/{novel_id}/event_plans")
+def get_event_plans(novel_id: str):
+    st = load_state(novel_id)
+    if not st:
+        raise HTTPException(status_code=404, detail="novel not found")
+    rows = list_event_plans(novel_id)
+    return {"novel_id": novel_id, "rows": [x.model_dump(mode="json") for x in rows], "count": len(rows)}
+
+
+@router.get("/{novel_id}/event_plan/{event_id}")
+def get_event_plan(novel_id: str, event_id: str):
+    st = load_state(novel_id)
+    if not st:
+        raise HTTPException(status_code=404, detail="novel not found")
+    rec = load_event_plan(novel_id, event_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="event plan not found")
+    return rec.model_dump(mode="json")
+
+
+@router.delete("/{novel_id}/event_plan/{event_id}")
+def remove_event_plan(novel_id: str, event_id: str):
+    st = load_state(novel_id)
+    if not st:
+        raise HTTPException(status_code=404, detail="novel not found")
+    ok = delete_event_plan(novel_id, event_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="event plan not found")
+    return {"novel_id": novel_id, "event_id": event_id, "deleted": True}
+
+
 @router.post("/{novel_id}/run")
 def run_mode(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
     inferred = infer_time_slot(novel_id, req)
@@ -573,7 +936,42 @@ def run_mode(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
         structure_gate=structure_gate,
         pov_ids=pov_ids,
     )
-    llm_user_task = build_llm_user_task(novel_id, req.user_task, req, inferred, pov_ids)
+    event_plan_rec = None
+    effective = {
+        "effective_pov_ids": list(pov_ids),
+        "effective_supporting_character_ids": [str(x).strip() for x in (req.supporting_character_ids or []) if str(x).strip()],
+        "effective_shadow_director_guidance": (
+            req.shadow_director_guidance if isinstance(req.shadow_director_guidance, dict) else None
+        ),
+        "manual_pov": bool(pov_ids),
+        "manual_supporting": bool(req.supporting_character_ids),
+    }
+    try:
+        if req.mode == "plan_only":
+            raise ValueError("event-only mode: chapter plan_only is disabled")
+        if req.mode in {"write_chapter", "revise_chapter", "expand_chapter"}:
+            event_id = _require_existing_event_binding(req)
+            _require_bound_timeline_event_exists(novel_id, event_id)
+            event_plan_rec = _require_event_plan_for_event(novel_id, event_id)
+            effective = _auto_rejudge_controls(
+                novel_id=novel_id,
+                req=req,
+                base_pov_ids=pov_ids,
+                shadow_director=shadow_director,
+                event_plan_rec=event_plan_rec,
+            )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=_event_plan_guard_http_detail(e))
+    req_effective = req.model_copy(deep=True)
+    req_effective.supporting_character_ids = list(effective["effective_supporting_character_ids"])
+    req_effective.shadow_director_guidance = effective["effective_shadow_director_guidance"]
+    llm_user_task = build_llm_user_task(
+        novel_id,
+        req.user_task,
+        req_effective,
+        inferred,
+        list(effective["effective_pov_ids"]),
+    )
     if structure_gate and structure_gate.get("needs_ack") and (not req.structure_risk_ack):
         return {
             "novel_id": novel_id,
@@ -589,10 +987,10 @@ def run_mode(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
         try:
             prebuild_chapter_graph_records(
                 novel_id=novel_id,
-                req=req,
+                req=req_effective,
                 chapter_index=int(pre_chapter_index),
                 inferred_time_slot=inferred,
-                pov_ids=pov_ids,
+                pov_ids=list(effective["effective_pov_ids"]),
             )
         except Exception as e:
             logger.warning("prebuild chapter graph records failed: %s", e)
@@ -606,8 +1004,8 @@ def run_mode(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
             chapter_preset_name=req.chapter_preset_name,
             time_slot_override=inferred,
             manual_time_slot=manual_time_slot,
-            pov_character_ids_override=pov_ids,
-            supporting_character_ids=(req.supporting_character_ids or []),
+            pov_character_ids_override=list(effective["effective_pov_ids"]),
+            supporting_character_ids=list(effective["effective_supporting_character_ids"]),
             lore_tags=req.lore_tags,
             llm_options=llm_call_options(req),
             timeline_event_focus_id=timeline_focus_id,
@@ -638,6 +1036,16 @@ def run_mode(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
         resp["structure_gate"] = structure_gate
     if shadow_director:
         resp["shadow_director"] = shadow_director
+    if req.mode in {"write_chapter", "revise_chapter", "expand_chapter"}:
+        resp["event_plan_binding"] = _event_plan_binding_payload(event_plan_rec)
+        resp["auto_rejudge"] = {
+            "effective_pov_ids": list(effective["effective_pov_ids"]),
+            "effective_supporting_character_ids": list(effective["effective_supporting_character_ids"]),
+            "effective_shadow_director_guidance": effective["effective_shadow_director_guidance"],
+            "manual_pov": bool(effective["manual_pov"]),
+            "manual_supporting": bool(effective["manual_supporting"]),
+            "event_plan_id": (event_plan_rec.event_plan_id if event_plan_rec else None),
+        }
     state_obj = load_state(novel_id)
     resp["state"] = state_obj.model_dump(mode="json") if state_obj else None
     if req.mode in {"write_chapter", "revise_chapter", "expand_chapter"} and result.chapter_index and state_obj:
@@ -678,7 +1086,42 @@ def preview_mode_input(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
         structure_gate=structure_gate,
         pov_ids=pov_ids,
     )
-    llm_user_task = build_llm_user_task(novel_id, req.user_task, req, inferred, pov_ids)
+    event_plan_rec = None
+    effective = {
+        "effective_pov_ids": list(pov_ids),
+        "effective_supporting_character_ids": [str(x).strip() for x in (req.supporting_character_ids or []) if str(x).strip()],
+        "effective_shadow_director_guidance": (
+            req.shadow_director_guidance if isinstance(req.shadow_director_guidance, dict) else None
+        ),
+        "manual_pov": bool(pov_ids),
+        "manual_supporting": bool(req.supporting_character_ids),
+    }
+    if req.mode == "plan_only":
+        raise HTTPException(status_code=400, detail="event-only mode: chapter plan_only is disabled")
+    try:
+        if req.mode in {"write_chapter", "revise_chapter", "expand_chapter"}:
+            event_id = _require_existing_event_binding(req)
+            _require_bound_timeline_event_exists(novel_id, event_id)
+            event_plan_rec = _require_event_plan_for_event(novel_id, event_id)
+            effective = _auto_rejudge_controls(
+                novel_id=novel_id,
+                req=req,
+                base_pov_ids=pov_ids,
+                shadow_director=shadow_director,
+                event_plan_rec=event_plan_rec,
+            )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=_event_plan_guard_http_detail(e))
+    req_effective = req.model_copy(deep=True)
+    req_effective.supporting_character_ids = list(effective["effective_supporting_character_ids"])
+    req_effective.shadow_director_guidance = effective["effective_shadow_director_guidance"]
+    llm_user_task = build_llm_user_task(
+        novel_id,
+        req.user_task,
+        req_effective,
+        inferred,
+        list(effective["effective_pov_ids"]),
+    )
     try:
         out = agent.preview_input(
             novel_id=novel_id,
@@ -687,8 +1130,8 @@ def preview_mode_input(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
             chapter_index=req.chapter_index,
             time_slot_override=inferred,
             manual_time_slot=manual_time_slot,
-            pov_character_ids_override=pov_ids,
-            supporting_character_ids=(req.supporting_character_ids or []),
+            pov_character_ids_override=list(effective["effective_pov_ids"]),
+            supporting_character_ids=list(effective["effective_supporting_character_ids"]),
             lore_tags=req.lore_tags,
             timeline_event_focus_id=timeline_focus_id,
             omit_world_timeline=uses_new_timeline_event_for_chapter(req),
@@ -697,6 +1140,16 @@ def preview_mode_input(novel_id: str, req: RunModeRequest) -> Dict[str, Any]:
             out["structure_gate"] = structure_gate
         if shadow_director:
             out["shadow_director"] = shadow_director
+        if req.mode in {"write_chapter", "revise_chapter", "expand_chapter"}:
+            out["event_plan_binding"] = _event_plan_binding_payload(event_plan_rec)
+            out["auto_rejudge"] = {
+                "effective_pov_ids": list(effective["effective_pov_ids"]),
+                "effective_supporting_character_ids": list(effective["effective_supporting_character_ids"]),
+                "effective_shadow_director_guidance": effective["effective_shadow_director_guidance"],
+                "manual_pov": bool(effective["manual_pov"]),
+                "manual_supporting": bool(effective["manual_supporting"]),
+                "event_plan_id": (event_plan_rec.event_plan_id if event_plan_rec else None),
+            }
         return out
     except Exception as e:
         logger.exception("preview_input failed novel_id=%s mode=%s", novel_id, req.mode)
@@ -712,7 +1165,17 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
             except Exception:
                 return False
 
-        yield sse_pack("start", {"novel_id": novel_id, "mode": req.mode})
+        request_id = uuid4().hex
+        current_phase = "start"
+
+        def _pack_phase(name: str, **payload: Any) -> bytes:
+            nonlocal current_phase
+            current_phase = name
+            body = {"name": name, "request_id": request_id}
+            body.update(payload)
+            return sse_pack("phase", body)
+
+        yield sse_pack("start", {"novel_id": novel_id, "mode": req.mode, "request_id": request_id, "phase": "start"})
 
         inferred = infer_time_slot(novel_id, req)
         timeline_focus_id = req_timeline_focus_id(req)
@@ -720,7 +1183,22 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
         pov_ids = list(req.pov_character_ids_override or [])
         if (not pov_ids) and req.pov_character_id_override:
             pov_ids = [req.pov_character_id_override]
-        llm_user_task = build_llm_user_task(novel_id, req.user_task, req, inferred, pov_ids)
+        effective = {
+            "effective_pov_ids": list(pov_ids),
+            "effective_supporting_character_ids": [str(x).strip() for x in (req.supporting_character_ids or []) if str(x).strip()],
+            "effective_shadow_director_guidance": (
+                req.shadow_director_guidance if isinstance(req.shadow_director_guidance, dict) else None
+            ),
+            "manual_pov": bool(pov_ids),
+            "manual_supporting": bool(req.supporting_character_ids),
+        }
+        llm_user_task = build_llm_user_task(
+            novel_id,
+            req.user_task,
+            req,
+            inferred,
+            list(effective["effective_pov_ids"]),
+        )
         llm_opts = llm_call_options(req)
         omit_world_timeline = uses_new_timeline_event_for_chapter(req)
         st0 = load_state(novel_id)
@@ -745,6 +1223,8 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                 "done",
                 {
                     "novel_id": novel_id,
+                    "request_id": request_id,
+                    "phase": "done",
                     "mode": req.mode,
                     "chapter_index": int(pre_chapter_index),
                     "state_updated": False,
@@ -757,16 +1237,29 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     "plan": None,
                     "state": (st0.model_dump(mode="json") if st0 else None),
                     "next_status": None,
+                    "auto_rejudge": (
+                        {
+                            "effective_pov_ids": list(effective["effective_pov_ids"]),
+                            "effective_supporting_character_ids": list(effective["effective_supporting_character_ids"]),
+                            "effective_shadow_director_guidance": effective["effective_shadow_director_guidance"],
+                            "manual_pov": bool(effective["manual_pov"]),
+                            "manual_supporting": bool(effective["manual_supporting"]),
+                        }
+                        if req.mode in {"write_chapter", "revise_chapter", "expand_chapter"}
+                        else None
+                    ),
                 },
             )
             return
+        if req.mode == "plan_only":
+            raise ValueError("event-only mode: chapter plan_only is disabled")
 
         try:
             if req.mode in {"write_chapter", "revise_chapter", "expand_chapter"}:
                 if await _disconnected():
                     logger.info("run_stream client disconnected early. novel_id=%s mode=%s", novel_id, req.mode)
                     return
-                yield sse_pack("phase", {"name": "planning"})
+                yield _pack_phase("planning")
 
                 st = load_state(novel_id)
                 if not st:
@@ -775,54 +1268,61 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     raise ValueError("state not initialized. please run init_state first")
 
                 chapter_index = req.chapter_index or (st.meta.current_chapter_index + 1)
+                bound_event_id = _require_existing_event_binding(req)
+                _require_bound_timeline_event_exists(novel_id, bound_event_id)
+                event_plan_rec = _require_event_plan_for_event(novel_id, bound_event_id)
+                effective = _auto_rejudge_controls(
+                    novel_id=novel_id,
+                    req=req,
+                    base_pov_ids=pov_ids,
+                    shadow_director=shadow_director,
+                    event_plan_rec=event_plan_rec,
+                )
+                req_effective = req.model_copy(deep=True)
+                req_effective.supporting_character_ids = list(effective["effective_supporting_character_ids"])
+                req_effective.shadow_director_guidance = effective["effective_shadow_director_guidance"]
+                llm_user_task = build_llm_user_task(
+                    novel_id,
+                    req.user_task,
+                    req_effective,
+                    inferred,
+                    list(effective["effective_pov_ids"]),
+                )
                 try:
                     prebuild_chapter_graph_records(
                         novel_id=novel_id,
-                        req=req,
+                        req=req_effective,
                         chapter_index=int(chapter_index),
                         inferred_time_slot=inferred,
-                        pov_ids=pov_ids,
+                        pov_ids=list(effective["effective_pov_ids"]),
                     )
                 except Exception as e:
                     logger.warning("prebuild chapter graph records failed(stream): %s", e)
-                plan_json: Optional[Dict[str, Any]] = None
-                for item in agent.plan_chapter_stream(
-                    novel_id=novel_id,
-                    user_task=llm_user_task,
-                    chapter_index=chapter_index,
-                    time_slot_override=inferred,
-                    pov_character_ids_override=pov_ids,
-                    supporting_character_ids=(req.supporting_character_ids or []),
-                    minimal_state_for_prompt=manual_time_slot,
-                    lore_tags=req.lore_tags,
-                    llm_options=llm_opts,
-                    timeline_event_focus_id=timeline_focus_id,
-                    omit_world_timeline=omit_world_timeline,
-                ):
-                    if await _disconnected():
-                        logger.info(
-                            "run_stream disconnected during plan stream. novel_id=%s chapter=%s",
-                            novel_id,
-                            chapter_index,
+                plan = _build_chapter_plan_from_event(
+                    chapter_index=int(chapter_index),
+                    req=req_effective,
+                    inferred_time_slot=inferred,
+                    st=st,
+                    event_plan_rec=event_plan_rec,
+                    pov_ids=list(effective["effective_pov_ids"]),
+                )
+                inserted_timeline_eid = None
+                yield sse_pack(
+                    "plan_content",
+                    {
+                        "delta": json.dumps(
+                            {
+                                "event_plan_id": event_plan_rec.event_plan_id,
+                                "event_id": event_plan_rec.event_id,
+                                "objective": event_plan_rec.plan.objective,
+                                "conflict": event_plan_rec.plan.conflict,
+                            },
+                            ensure_ascii=False,
                         )
-                        return
-                    txt = str(item.get("delta", "") or "")
-                    if txt:
-                        yield sse_pack("plan_content", {"delta": txt})
-                    if item.get("done"):
-                        plan_json = item.get("plan") or {}
-                if not plan_json:
-                    raise ValueError("plan stream failed: empty plan")
-                plan = ChapterPlan.model_validate(_unwrap_chapter_plan_payload(plan_json))
-                try:
-                    plan.next_state = NovelAgent.merge_state(st, plan.next_state)  # type: ignore
-                except Exception as e:
-                    logger.warning("merge_state failed in stream save: %s", e)
-                plan.next_state, inserted_timeline_eid = apply_chapter_event_selection(
-                    plan.next_state, chapter_index, req
+                    },
                 )
 
-                yield sse_pack("phase", {"name": "writing", "chapter_index": chapter_index})
+                yield _pack_phase("writing", chapter_index=chapter_index)
                 parts: List[str] = []
                 usage_meta: Dict[str, Any] = {}
                 write_mode = "expand" if req.mode == "expand_chapter" else "generate"
@@ -833,11 +1333,12 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     minimal_state_for_prompt=manual_time_slot,
                     lore_tags=req.lore_tags,
                     time_slot_hint=inferred,
-                    pov_character_ids_override=pov_ids,
-                    supporting_character_ids=(req.supporting_character_ids or []),
+                    pov_character_ids_override=list(effective["effective_pov_ids"]),
+                    supporting_character_ids=list(effective["effective_supporting_character_ids"]),
                     llm_options=llm_opts,
                     timeline_event_focus_id=timeline_focus_id,
                     write_mode=write_mode,
+                    event_plan=event_plan_rec.plan,
                     omit_world_timeline=omit_world_timeline,
                 ):
                     if await _disconnected():
@@ -864,12 +1365,13 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                         chapter_index,
                     )
                     return
-                yield sse_pack("phase", {"name": "saving"})
+                yield _pack_phase("saving")
                 next_state = plan.next_state
                 record = ChapterRecord(
                     chapter_index=chapter_index,
                     chapter_preset_name=req.chapter_preset_name,
                     timeline_event_id=validate_timeline_event_id(next_state, timeline_focus_id),
+                    source_event_plan_id=event_plan_rec.event_plan_id,
                     time_slot=plan.time_slot,
                     pov_character_id=plan.pov_character_id,
                     who_is_present=plan.who_is_present,
@@ -894,10 +1396,10 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
 
                     title = (st.meta.novel_title or "未命名小说") if st else "未命名小说"
                     out_path = write_outputs_txt(title, chapter_index, content_text, novel_id=novel_id)
-                    yield sse_pack("phase", {"name": "outputs_written", "path": out_path})
+                    yield _pack_phase("outputs_written", path=out_path)
                 except Exception as e:
                     logger.warning("Failed to write outputs txt (stream): %s", e)
-                    yield sse_pack("phase", {"name": "outputs_write_failed", "error": str(e)})
+                    yield _pack_phase("outputs_write_failed", error=str(e))
 
                 next_status = ""
                 try:
@@ -908,7 +1410,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                             chapter_index,
                         )
                         return
-                    yield sse_pack("phase", {"name": "next_status"})
+                    yield _pack_phase("next_status")
                     next_status = agent.suggest_next_status(
                         novel_id=novel_id,
                         user_task=llm_user_task,
@@ -917,10 +1419,10 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                         llm_options=llm_opts,
                         timeline_event_focus_id=timeline_focus_id,
                     )
-                    yield sse_pack("phase", {"name": "next_status_done", "has_text": bool((next_status or "").strip())})
+                    yield _pack_phase("next_status_done", has_text=bool((next_status or "").strip()))
                 except Exception as e:
                     logger.warning("Failed to generate next_status (stream): %s", e)
-                    yield sse_pack("phase", {"name": "next_status_failed", "error": str(e)})
+                    yield _pack_phase("next_status_failed", error=str(e))
 
                 st_done = load_state(novel_id)
                 chapter_timeline_event_id = (
@@ -941,6 +1443,8 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     "done",
                     {
                         "novel_id": novel_id,
+                        "request_id": request_id,
+                        "phase": "done",
                         "mode": req.mode,
                         "chapter_index": chapter_index,
                         "state_updated": True,
@@ -952,6 +1456,15 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                         "consistency_audit": consistency_audit,
                         "structure_gate": structure_gate,
                         "shadow_director": shadow_director,
+                        "event_plan_binding": _event_plan_binding_payload(event_plan_rec),
+                        "auto_rejudge": {
+                            "effective_pov_ids": list(effective["effective_pov_ids"]),
+                            "effective_supporting_character_ids": list(effective["effective_supporting_character_ids"]),
+                            "effective_shadow_director_guidance": effective["effective_shadow_director_guidance"],
+                            "manual_pov": bool(effective["manual_pov"]),
+                            "manual_supporting": bool(effective["manual_supporting"]),
+                            "event_plan_id": event_plan_rec.event_plan_id,
+                        },
                     },
                 )
             elif req.mode == "optimize_suggestions":
@@ -960,7 +1473,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                 st_opt = load_state(novel_id)
                 if not st_opt or not st_opt.meta.initialized:
                     raise ValueError("state not initialized. please run init_state first")
-                yield sse_pack("phase", {"name": "optimizing"})
+                yield _pack_phase("optimizing")
                 opt_parts: List[str] = []
                 opt_usage: Dict[str, Any] = {}
                 for item in agent.optimize_suggestions_stream(
@@ -983,6 +1496,8 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     "done",
                     {
                         "novel_id": novel_id,
+                        "request_id": request_id,
+                        "phase": "done",
                         "mode": req.mode,
                         "chapter_index": None,
                         "state_updated": False,
@@ -996,7 +1511,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
             elif req.mode == "init_state":
                 if await _disconnected():
                     return
-                yield sse_pack("phase", {"name": "world_init"})
+                yield _pack_phase("world_init")
                 state_dump: Optional[Dict[str, Any]] = None
                 init_usage: Dict[str, Any] = {}
                 for item in agent.init_state_stream(
@@ -1022,6 +1537,8 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     "done",
                     {
                         "novel_id": novel_id,
+                        "request_id": request_id,
+                        "phase": "done",
                         "mode": req.mode,
                         "chapter_index": None,
                         "state_updated": True,
@@ -1040,7 +1557,7 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                         req.mode,
                     )
                     return
-                yield sse_pack("phase", {"name": "running"})
+                yield _pack_phase("running")
                 stx = load_state(novel_id)
                 chapter_index = req.chapter_index or ((stx.meta.current_chapter_index + 1) if stx else 1)
                 if req.mode != "init_state":
@@ -1088,6 +1605,8 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     "done",
                     {
                         "novel_id": novel_id,
+                        "request_id": request_id,
+                        "phase": "done",
                         "mode": req.mode,
                         "chapter_index": result.chapter_index,
                         "state_updated": result.state_updated,
@@ -1103,7 +1622,15 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
         except Exception as e:
             logger.exception("run_stream failed novel_id=%s mode=%s", novel_id, req.mode)
             if not await _disconnected():
-                yield sse_pack("error", {"message": str(e)})
+                yield sse_pack(
+                    "error",
+                    {
+                        "message": str(e),
+                        "request_id": request_id,
+                        "phase": current_phase,
+                        "error_code": _infer_stream_error_code(e),
+                    },
+                )
 
     return StreamingResponse(
         gen(),

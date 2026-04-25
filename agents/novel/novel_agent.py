@@ -9,9 +9,11 @@ from langchain.messages import HumanMessage, SystemMessage
 from agents._internal_marks import z7_module_mark
 from agents.persistence.graph_tables import (
     hydrate_state_character_relationships,
+    timeline_index_for_node_id,
     persist_chapter_artifacts,
     validate_timeline_event_id,
 )
+from agents.persistence.event_plan_store import save_event_plan
 from agents.lore.loader import LoreLoader
 from agents.lore.lore_runtime import build_lore_summary_llm as build_lore_summary_llm_runtime
 from agents.lore.lore_runtime import build_lorebook
@@ -19,6 +21,7 @@ from agents.prompt.prompt_builders import (
     build_init_state_prompt,
     build_next_status_prompt,
     build_optimize_suggestions_prompt,
+    build_plan_event_prompt,
     build_plan_chapter_prompt,
     build_write_chapter_prompt,
 )
@@ -28,7 +31,15 @@ from agents.state.state_compactor import (
     select_related_character_ids as select_related_character_ids_runtime,
 )
 from agents.state.state_merge import merge_state as merge_state_runtime
-from agents.state.state_models import ChapterPlan, ChapterRecord, ContinuityState, NovelMeta, NovelState
+from agents.state.state_models import (
+    ChapterPlan,
+    ChapterRecord,
+    ContinuityState,
+    EventPlan,
+    EventPlanRecord,
+    NovelMeta,
+    NovelState,
+)
 from agents.persistence.storage import (
     ensure_novel_dirs,
     load_state,
@@ -147,6 +158,48 @@ class NovelAgent:
 
     def _format_state_for_prompt(self, state: NovelState, max_chars: int = 12000) -> str:
         return format_state_for_prompt_runtime(state=state, max_chars=max_chars)
+
+    def plan_event(
+        self,
+        *,
+        novel_id: str,
+        event_id: str,
+        user_task: str,
+        lore_tags: Optional[list[str]] = None,
+        llm_options: Optional[Dict[str, Any]] = None,
+    ) -> EventPlanRecord:
+        state = self._load_state_hydrated(novel_id)
+        if not state:
+            raise ValueError(f"novel_id not found: {novel_id}")
+        idx = timeline_index_for_node_id(state, event_id)
+        if idx is None or not (0 <= idx < len(state.world.timeline or [])):
+            raise ValueError("timeline event not found")
+        ev = state.world.timeline[idx]
+        lorebook = self._lorebook(lore_tags or state.meta.lore_tags)
+        state_context = self._compact_state_for_prompt(
+            state=state,
+            user_task=user_task,
+            novel_id=novel_id,
+            focus_timeline_event_id=event_id,
+        )
+        system, human = build_plan_event_prompt(
+            user_task=user_task,
+            event_id=event_id,
+            event_time_slot=str(ev.time_slot or ""),
+            event_summary=str(ev.summary or ""),
+            state_context=state_context,
+            lorebook=lorebook,
+        )
+        plan = self._invoke_json(
+            system,
+            human,
+            root_model=EventPlan,
+            llm_options=llm_options,
+        )
+        plan.event_id = event_id
+        plan.time_slot = str(ev.time_slot or "")
+        plan.event_summary = str(ev.summary or "")
+        return save_event_plan(novel_id, event_id, plan)
 
     def create_novel_stub(
         self,
@@ -487,6 +540,7 @@ class NovelAgent:
         llm_options: Optional[Dict[str, Any]] = None,
         timeline_event_focus_id: Optional[str] = None,
         write_mode: str = "generate",
+        event_plan: Optional[EventPlan] = None,
         omit_world_timeline: bool = False,
     ) -> Tuple[str, Dict[str, Any]]:
         state = self._load_state_hydrated(novel_id)
@@ -519,6 +573,7 @@ class NovelAgent:
             state_context=state_context,
             lorebook=lorebook,
             plan=plan,
+            event_plan=event_plan,
             strict_no_supporting=strict_no_supporting,
             write_mode=write_mode,
         )
@@ -545,6 +600,7 @@ class NovelAgent:
         llm_options: Optional[Dict[str, Any]] = None,
         timeline_event_focus_id: Optional[str] = None,
         write_mode: str = "generate",
+        event_plan: Optional[EventPlan] = None,
         omit_world_timeline: bool = False,
     ) -> Iterator[Dict[str, Any]]:
         """
@@ -583,6 +639,7 @@ class NovelAgent:
             state_context=state_context,
             lorebook=lorebook,
             plan=plan,
+            event_plan=event_plan,
             strict_no_supporting=strict_no_supporting,
             write_mode=write_mode,
         )

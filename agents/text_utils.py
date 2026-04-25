@@ -31,6 +31,11 @@ def _novel_outputs_dirname(novel_title: str, novel_id: str | None) -> str:
     return title
 
 
+def resolve_novel_outputs_dir(novel_title: str, novel_id: str | None = None) -> str:
+    out_root = get_outputs_root()
+    return os.path.join(str(out_root), _novel_outputs_dirname(novel_title, novel_id))
+
+
 def write_outputs_txt(
     novel_title: str,
     chapter_index: int,
@@ -38,8 +43,7 @@ def write_outputs_txt(
     *,
     novel_id: str | None = None,
 ) -> str:
-    out_root = get_outputs_root()
-    novel_dir = os.path.join(str(out_root), _novel_outputs_dirname(novel_title, novel_id))
+    novel_dir = resolve_novel_outputs_dir(novel_title, novel_id)
     os.makedirs(novel_dir, exist_ok=True)
     ts = datetime.now().strftime("%m%d_%H%M%S")
     title = safe_filename(novel_title, fallback="novel")

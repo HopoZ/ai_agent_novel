@@ -12,7 +12,7 @@
     </p>
     <el-form label-position="top" @submit.prevent>
       <el-form-item label="提供商">
-        <el-select v-model="provider" style="width:100%;">
+        <el-select v-model="provider" class="w-full">
           <el-option label="DeepSeek（官方）" value="deepseek" />
           <el-option label="OpenAI 兼容（第三方）" value="openai_compatible" />
         </el-select>
@@ -36,14 +36,14 @@
           />
         </el-form-item>
         <el-form-item label="Model">
-          <div style="display:flex; gap:8px; width:100%;">
+          <div class="row-actions-full">
             <el-select
               v-model="model"
               filterable
               allow-create
               default-first-option
               clearable
-              style="flex:1;"
+              class="grow-1"
               placeholder="可手填，或点击右侧获取模型列表"
             >
               <el-option
@@ -60,18 +60,18 @@
               获取模型
             </el-button>
           </div>
-          <div class="api-hint" style="margin-top:6px;">
+          <div class="api-hint top-6">
             <el-checkbox v-model="forceRefreshModels">强制刷新（跳过缓存）</el-checkbox>
-            <span style="margin-left:8px;">{{ modelCacheHint }}</span>
+            <span class="left-8">{{ modelCacheHint }}</span>
           </div>
-          <div v-if="selectedModelCapabilities.length" class="api-hint" style="margin-top:4px;">
+          <div v-if="selectedModelCapabilities.length" class="api-hint top-4">
             能力标签：
             <el-tag
               v-for="cap in selectedModelCapabilities"
               :key="`cap-${cap}`"
               size="small"
               effect="plain"
-              style="margin-left:6px;"
+              class="left-6"
             >
               {{ cap }}
             </el-tag>
@@ -318,11 +318,34 @@ async function fetchModels() {
 </script>
 
 <style scoped>
+.w-full {
+  width: 100%;
+}
+.row-actions-full {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+}
+.grow-1 {
+  flex: 1;
+}
+.left-8 {
+  margin-left: 8px;
+}
+.left-6 {
+  margin-left: 6px;
+}
+.top-6 {
+  margin-top: 6px;
+}
+.top-4 {
+  margin-top: 4px;
+}
 .api-help {
   margin: 0 0 12px;
   font-size: 12px;
   line-height: 1.55;
-  color: var(--lit-ink-muted, #606266);
+  color: var(--lit-muted, #606266);
 }
 .api-help code {
   font-size: 11px;
@@ -331,6 +354,6 @@ async function fetchModels() {
 .api-hint {
   margin-top: 4px;
   font-size: 12px;
-  color: var(--lit-ink-muted, #606266);
+  color: var(--lit-muted, #606266);
 }
 </style>
