@@ -19,6 +19,14 @@
 /novel-backend-test.spec
 /mobile/src/_imported_lores
 
+# Python runtime caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
 # Directory-level docs generated for internal notes
 /agents/README.md
 /tests/README.md
