@@ -68,6 +68,7 @@ from webapp.backend.schemas import (
     NovelUpdateRequest,
     RunModeRequest,
 )
+from webapp.backend.ipc_chapter_writer import stream_write_chapter_text_ipc
 from webapp.backend.sse import sse_pack
 
 router = APIRouter(tags=["novels"])
@@ -110,6 +111,11 @@ def _normalize_novel_lore_tags(
 
 def _infer_stream_error_code(exc: Exception) -> str:
     return infer_stream_error_code(exc)
+
+
+def _use_ipc_for_write_stream() -> bool:
+    flag = str(os.getenv("WEBAPP_ENABLE_IPC_WRITE_STREAM", "")).strip().lower()
+    return flag in {"1", "true", "yes", "on"}
 
 
 def _require_existing_event_binding(req: RunModeRequest) -> str:
@@ -1322,25 +1328,45 @@ def run_mode_stream(novel_id: str, req: RunModeRequest, request: Request):
                     },
                 )
 
-                yield _pack_phase("writing", chapter_index=chapter_index)
+                use_ipc_stream = _use_ipc_for_write_stream()
+                yield _pack_phase("writing", chapter_index=chapter_index, via=("ipc" if use_ipc_stream else "inproc"))
                 parts: List[str] = []
                 usage_meta: Dict[str, Any] = {}
                 write_mode = "expand" if req.mode == "expand_chapter" else "generate"
-                for item in agent.write_chapter_text_stream(
-                    novel_id=novel_id,
-                    plan=plan,
-                    user_task=llm_user_task,
-                    minimal_state_for_prompt=manual_time_slot,
-                    lore_tags=req.lore_tags,
-                    time_slot_hint=inferred,
-                    pov_character_ids_override=list(effective["effective_pov_ids"]),
-                    supporting_character_ids=list(effective["effective_supporting_character_ids"]),
-                    llm_options=llm_opts,
-                    timeline_event_focus_id=timeline_focus_id,
-                    write_mode=write_mode,
-                    event_plan=event_plan_rec.plan,
-                    omit_world_timeline=omit_world_timeline,
-                ):
+                stream_iter = (
+                    stream_write_chapter_text_ipc(
+                        novel_id=novel_id,
+                        plan=plan,
+                        user_task=llm_user_task,
+                        minimal_state_for_prompt=manual_time_slot,
+                        lore_tags=req.lore_tags,
+                        time_slot_hint=inferred,
+                        pov_character_ids_override=list(effective["effective_pov_ids"]),
+                        supporting_character_ids=list(effective["effective_supporting_character_ids"]),
+                        llm_options=llm_opts,
+                        timeline_event_focus_id=timeline_focus_id,
+                        write_mode=write_mode,
+                        event_plan=event_plan_rec.plan,
+                        omit_world_timeline=omit_world_timeline,
+                    )
+                    if use_ipc_stream
+                    else agent.write_chapter_text_stream(
+                        novel_id=novel_id,
+                        plan=plan,
+                        user_task=llm_user_task,
+                        minimal_state_for_prompt=manual_time_slot,
+                        lore_tags=req.lore_tags,
+                        time_slot_hint=inferred,
+                        pov_character_ids_override=list(effective["effective_pov_ids"]),
+                        supporting_character_ids=list(effective["effective_supporting_character_ids"]),
+                        llm_options=llm_opts,
+                        timeline_event_focus_id=timeline_focus_id,
+                        write_mode=write_mode,
+                        event_plan=event_plan_rec.plan,
+                        omit_world_timeline=omit_world_timeline,
+                    )
+                )
+                for item in stream_iter:
                     if await _disconnected():
                         logger.info(
                             "run_stream disconnected during write stream. novel_id=%s chapter=%s",
