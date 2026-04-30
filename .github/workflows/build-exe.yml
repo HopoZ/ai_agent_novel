@@ -1,9 +1,10 @@
-name: Build Windows EXE
+name: Build Windows Electron Release
 
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches:
+      - "**"
     tags:
       - "v*"
     paths:
@@ -11,10 +12,11 @@ on:
       - "packaging/pyinstaller/**"
       - "webapp/backend/**"
       - "webapp/frontend/**"
+      - "electron/**"
       - ".github/workflows/build-exe.yml"
 
 jobs:
-  build-windows-exe:
+  build-windows-electron-release:
     runs-on: windows-latest
     permissions:
       contents: write
@@ -27,13 +29,9 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          cache-dependency-path: webapp/frontend/package-lock.json
-
-      - name: Build frontend assets
-        working-directory: webapp/frontend
-        run: |
-          npm ci
-          npm run build
+          cache-dependency-path: |
+            webapp/frontend/package-lock.json
+            electron/package-lock.json
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -47,13 +45,19 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Build frontend assets
+        working-directory: webapp/frontend
+        run: |
+          npm ci
+          npm run build
+
       - name: Ensure packaged static directories exist
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "webapp/static" | Out-Null
           New-Item -ItemType Directory -Force -Path "webapp/templates" | Out-Null
 
-      - name: Build novel-backend.exe
+      - name: Build backend exe with PyInstaller
         shell: pwsh
         run: |
           python -m PyInstaller `
@@ -73,16 +77,35 @@ jobs:
             --collect-submodules agents `
             --collect-submodules webapp
 
-      - name: Upload exe artifact
+      - name: Copy backend exe into Electron resources
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "electron/resources/backend" | Out-Null
+          Copy-Item -Force "dist/novel-backend.exe" "electron/resources/backend/novel-backend.exe"
+
+      - name: Build Electron installer
+        working-directory: electron
+        run: |
+          npm ci
+          npm run dist
+
+      - name: Upload electron release artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: novel-backend-windows-exe
-          path: dist/novel-backend.exe
+          name: electron-release-windows
+          path: |
+            electron/release/*.exe
+            electron/release/*.blockmap
+            electron/release/latest*.yml
           if-no-files-found: error
 
-      - name: Create release and upload exe
+      - name: Create release and upload electron assets
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: dist/novel-backend.exe
+          fail_on_unmatched_files: true
+          files: |
+            electron/release/*.exe
+            electron/release/*.blockmap
+            electron/release/latest*.yml
