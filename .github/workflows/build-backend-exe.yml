@@ -8,6 +8,7 @@ on:
       - "v*"
     paths:
       - "requirements.txt"
+      - "novel-backend.spec"
       - "packaging/pyinstaller/**"
       - "webapp/backend/**"
       - "webapp/frontend/**"
@@ -54,24 +55,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "webapp/templates" | Out-Null
 
       - name: Build novel-backend.exe
-        shell: pwsh
-        run: |
-          python -m PyInstaller `
-            --noconfirm `
-            --clean `
-            --onefile `
-            --name novel-backend `
-            packaging/pyinstaller/run_uvicorn.py `
-            --paths . `
-            --add-data "webapp/frontend/dist;webapp/frontend/dist" `
-            --add-data "webapp/static;webapp/static" `
-            --add-data "webapp/templates;webapp/templates" `
-            --collect-all uvicorn `
-            --collect-all fastapi `
-            --collect-all starlette `
-            --collect-all pydantic `
-            --collect-submodules agents `
-            --collect-submodules webapp
+        run: python -m PyInstaller --noconfirm --clean novel-backend.spec
 
       - name: Upload exe artifact
         uses: actions/upload-artifact@v4
