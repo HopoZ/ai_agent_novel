@@ -27,11 +27,6 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
-# Directory-level docs generated for internal notes
-/agents/README.md
-/tests/README.md
-/SECURITY_FINGERPRINT.md
-ARCHITECTURE.md
 
 electron/
 
