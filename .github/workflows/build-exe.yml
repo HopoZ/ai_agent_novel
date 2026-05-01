@@ -24,22 +24,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Debug workflow fingerprint
-        shell: pwsh
-        run: |
-          #region agent log
-          Write-Host "[agent-log][runId=pre-fix][hypothesisId=H8] github_sha=$env:GITHUB_SHA"
-          $wf = ".github/workflows/build-exe.yml"
-          $legacyMatch = Select-String -Path $wf -Pattern "latest\*\.yml" -SimpleMatch -ErrorAction SilentlyContinue
-          $legacyCount = if ($legacyMatch) { @($legacyMatch).Count } else { 0 }
-          Write-Host "[agent-log][runId=pre-fix][hypothesisId=H8] workflow_has_latest_glob_count=$legacyCount"
-          if ($legacyCount -gt 0) {
-            Write-Host "[agent-log][runId=pre-fix][hypothesisId=H8] workflow_still_contains_legacy_latest_pattern=true"
-          } else {
-            Write-Host "[agent-log][runId=pre-fix][hypothesisId=H8] workflow_still_contains_legacy_latest_pattern=false"
-          }
-          #endregion
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -121,24 +105,20 @@ jobs:
             exit 1
           }
 
+      - name: Sync Electron version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: electron
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          if (-not $version) { throw "Invalid tag version." }
+          npm version $version --no-git-tag-version --allow-same-version
+
       - name: Build Electron installer
         working-directory: electron
         run: |
           npm ci --prefer-offline --no-audit --fund=false
           npm run dist
-
-      - name: Debug release output files
-        shell: pwsh
-        run: |
-          #region agent log
-          $files = Get-ChildItem -Path "electron/release" -File -ErrorAction SilentlyContinue
-          Write-Host "[agent-log][runId=pre-fix][hypothesisId=H1] release file count: $($files.Count)"
-          foreach ($f in $files) {
-            Write-Host "[agent-log][runId=pre-fix][hypothesisId=H2] release file: $($f.Name)"
-          }
-          $exeCount = @($files | Where-Object { $_.Name -like "*.exe" }).Count
-          Write-Host "[agent-log][runId=pre-fix][hypothesisId=H3] exe match count: $exeCount"
-          #endregion
 
       - name: Upload electron release artifacts
         uses: actions/upload-artifact@v4
