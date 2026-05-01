@@ -685,7 +685,11 @@ function dismissFirstRun() {
 }
 
 async function openDirByPath(absPath: string | undefined, label: string) {
-  const p = (absPath || "").trim();
+  let p = (absPath || "").trim();
+  if (!p) {
+    await fetchSettingsPaths();
+    p = (label.includes("输出") ? settingsPaths.value?.outputs_dir : settingsPaths.value?.lores_dir || "").trim();
+  }
   if (!p) {
     ElMessage.warning(`${label}路径未就绪，请稍后重试。`);
     return;

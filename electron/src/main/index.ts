@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
 
 let backendProc: ChildProcessWithoutNullStreams | null = null;
 let mainWindow: BrowserWindow | null = null;
@@ -16,14 +16,18 @@ function isDebugMode(): boolean {
   return DEBUG_ENV_KEYS.some((key) => process.env[key] === "1");
 }
 
+function appWorkDir(): string {
+  return join(app.getPath("exe"), "..", "data");
+}
+
 function logFilePath(): string {
-  return join(app.getPath("userData"), "logs", "electron-main.log");
+  return join(appWorkDir(), "logs", "electron-main.log");
 }
 
 function writeMainLog(level: "INFO" | "WARN" | "ERROR", message: string): void {
   try {
     const path = logFilePath();
-    mkdirSync(join(app.getPath("userData"), "logs"), { recursive: true });
+    mkdirSync(join(appWorkDir(), "logs"), { recursive: true });
     appendFileSync(path, `${new Date().toISOString()} [${level}] ${message}\n`, "utf8");
   } catch {
     // Keep startup resilient even if logging fails.
@@ -39,7 +43,7 @@ function startBackend(debugMode: boolean): void {
   if (!existsSync(exe)) {
     throw new Error(`Backend executable not found: ${exe}`);
   }
-  const storageDir = join(app.getPath("exe"), "..", "data");
+  const storageDir = appWorkDir();
   backendProc = spawn(exe, [], {
     cwd: join(process.resourcesPath, "backend"),
     windowsHide: true,
@@ -95,19 +99,49 @@ function createMainWindow(debugMode: boolean): void {
   void mainWindow.loadURL(BACKEND_URL);
 }
 
+function installAppMenu(debugMode: boolean): void {
+  const template = [
+    {
+      label: "File",
+      submenu: [
+        {
+          label: debugMode ? "Debug Start (Active)" : "Debug Start",
+          enabled: !debugMode,
+          click: () => {
+            writeMainLog("INFO", "debug start requested from menu");
+            const args = process.argv.filter((arg) => arg !== "--debug-electron");
+            app.relaunch({ args: [...args, "--debug-electron"] });
+            app.exit(0);
+          },
+        },
+        { type: "separator" as const },
+        { role: "quit" as const },
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
 app.whenReady().then(() => {
   const debugMode = isDebugMode();
   writeMainLog("INFO", `app ready debugMode=${debugMode}`);
   ipcMain.handle("desktop:open-path", async (_, targetPath: string) => {
     try {
-      await shell.openPath(targetPath);
+      const err = await shell.openPath(targetPath);
+      if (err) {
+        writeMainLog("ERROR", `openPath failed target=${targetPath} err=${err}`);
+        return { ok: false, error: err };
+      }
+      writeMainLog("INFO", `openPath success target=${targetPath}`);
       return { ok: true };
     } catch (error) {
       const message = error instanceof Error ? error.message : "unknown error";
+      writeMainLog("ERROR", `openPath exception target=${targetPath} err=${message}`);
       return { ok: false, error: message };
     }
   });
   try {
+    installAppMenu(debugMode);
     startBackend(debugMode);
     createMainWindow(debugMode);
   } catch (error) {
