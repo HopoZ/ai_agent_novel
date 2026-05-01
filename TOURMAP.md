@@ -1,164 +1,101 @@
 # TOURMAP (Project Progress Map)
 
-For module relationships and source-of-truth data flow, see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
-For per-directory details, see each directory's `README.md`.
+For architecture and source-of-truth boundaries, see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+For directory-level details, see each module `README.md`.
 
-## DONE
+## Project Snapshot
 
-- [x] **Knowledge graph integrated into input compaction**
-  - Added graph-aware context compaction before chapter generation.
-  - Avoided injecting full cross-chapter history in manual timeline/event ownership scenarios.
+- **Current state**: core loop is stable (`preview -> run -> persist -> continue`), but still short of a full "professional showrunner" experience.
+- **Strengths**: generation quality, observability, graph editing, and end-to-end workflow are in place.
+- **Main gaps**: stronger graph governance, better run observability, and long-range plot payoff tooling.
 
-- [x] **Frontend/backend flow switched to "preview first, run second"**
-  - Main button now generates input preview first.
-  - Streaming run starts only after explicit confirmation.
-  - Added clearer phase labels (plan -> write -> save -> next-chapter hint).
+---
 
-- [x] **Graph visualization and editing upgraded**
-  - Added full-screen graph view entry.
-  - Added node/edge edits, relation removal, and timeline predecessor/successor updates.
-  - Improved timeline markers for missing previous/next links.
+## Completed Milestones
 
-- [x] **Storage evolved from single snapshot to table-oriented model**
-  - Chapter/event/character data gradually split into structured storage.
-  - Persistence now uses `storage/novels/<id>/novel.db` (`novel_state`, chapter rows, and four graph tables).
-  - Pre-built chapter relation records before run, so event/chapter ownership lands before writing.
+### Core Flow
 
-- [x] **Per-novel SQLite rollout**
-  - Graph and chapter editing still uses existing `graph_tables` / `storage` APIs.
-  - Underlying writes are handled by `novel_sqlite` into `novel.db`.
+- [x] Graph-aware input compaction before chapter generation.
+- [x] "Preview first, run second" interaction model.
+- [x] Streaming phase clarity (`plan -> write -> save -> next hint`).
+- [x] Per-novel SQLite rollout using `storage/novels/<id>/novel.db`.
 
-- [x] **Electron Windows installer (NSIS + PyInstaller backend)**
-  - One-click script `build-windows-release.bat`.
-  - Installer data lives in `data/` next to main exe.
-  - Includes first-run in-app guidance for input/output folders.
-  - See [electron/ELECTRON_RELEASE.md](../electron/ELECTRON_RELEASE.md).
+### UX and Product
 
-- [x] **Streaming output and right-panel UX improvements**
-  - Right-panel status text aligned with actual runtime flow.
-  - Empty-state messages now reflect live run phases.
-  - Added auto-scroll-to-bottom for right-panel output.
+- [x] Full-screen graph + richer node/edge editing.
+- [x] Right-panel streaming UX improvements and auto-scroll.
+- [x] Warm literary theme and continuation flow refinements.
+- [x] Mid-panel step workspace moved to manual progression.
+- [x] Tag management supports CRUD + bulk operations.
+- [x] Planning stream handles `ChapterPlan` wrappers robustly.
 
-- [x] **Literary warm theme + continuation flow**
-  - Added `theme-literary.css` paper-like palette and dialog/topbar styling.
-  - Uses `Noto Serif SC` in `index.html`.
-  - Next-chapter hint follows same input-preview chain as normal write flow.
-  - Added optional "current map" injection path:
-    `RunModeRequest.current_map` -> `build_llm_user_task`.
+### Release and Packaging
 
-- [x] **Round close: flow/docs aligned (2026-04-25)**
-  - [x] Next-chapter hint moved from modal to right-panel inline edit + one-click continue.
-  - [x] Step1~4 changed from auto-jump to manual progression with next-step highlight.
-  - [x] Step3 auto-drafts tasks when empty.
-  - [x] Graph slice compressed into compact metric row + lightweight metadata.
-  - [x] Outputs now stored by novel subdirectories.
-  - [x] Tag management upgraded with built-in CRUD + bulk delete/prefix migration and sync.
-  - [x] Planning flow now supports `ChapterPlan` wrapper unwrapping to reduce stream parse failures.
+- [x] Electron Windows installer flow (`build-windows-release.bat`).
+- [x] PyInstaller backend packaging integrated into desktop build.
 
-## TODO
+---
 
-### Current Assessment of "Novel Writing Mode" (2026-04)
+## Active Backlog
 
-- Conclusion: still missing the final "professional showrunner" feel.
-  Current status is "generatable + editable + observable", but still too tool-like in
-  structural constraints, auto-correction, and long-range payoff recovery.
-- Main gaps:
-  - Weak pre-write structure skeleton (authors still organize chapter goals/foreshadowing manually).
-  - Post-write audit exists, but rule depth and closed-loop enforcement are still limited.
-  - Graph visualization is strong, but bulk governance and quality auditing are not yet production-grade.
+## P1 (Current Focus, 1-2 months)
 
-### P0 (Highest Priority, within 2 weeks)
-
-- [x] **Consistency audit v2 (prompting -> constraints)**
-  - [x] Added `block_reasons` and `recommended_actions` in `run_stream done`.
-  - [x] Blocks auto "next chapter continue" on high-risk conflicts.
-  - [x] Frontend now shows audit level, block reasons, and repair actions.
-  - [x] Added high-risk rules: timeline reversal, character teleportation, unsupported relation jumps.
-
-- [x] **Structure card (strong pre-write guidance)**
-  - [x] Auto-fill and lock structure card in preview:
-    goal / conflict / turning point / foreshadow recovery / event ownership.
-  - [x] If minimum fields are missing, force either:
-    "continue anyway (risky)" or "go back and complete".
-  - [x] Backend strictly validates `structure_risk_ack`.
-
-- [x] **Shadow director v2 (more invisible support)**
-  - [x] Added recommendations for side characters, conflict type, and foreshadow recovery.
-  - [x] Auto-applies detail strategy by default with one-click undo for last auto-direct.
-
-### P1 (Secondary, 1-2 months)
-
-- [x] **Frontend layout fast revamp (middle panel + graph)**
-  - [x] Middle panel became a 4-step directing workspace.
-  - [x] Graph now has dual mode: compact middle slice + full-screen studio.
-  - [x] Run results moved into drawer-style panel.
-  - [x] Kept low-operation, high-impact decisions:
-    conflict type / foreshadow strategy / side-character intensity.
-  - [x] Interaction refinements:
-    hide non-current steps, top step status bar, next/prev buttons;
-    then switched to manual progression + condition highlighting.
-
-- [ ] **Graph governance (maintainability at large scale)**
+- [ ] **Graph governance**
   - Bulk edge editing by role/chapter/event type.
-  - Quality audits: isolated nodes, dangling edges, self-loops,
-    duplicate relations, broken timeline chains.
-  - Import/export validation: schema checks, dry-run, row-level error locations.
+  - Quality checks: isolated nodes, dangling edges, self loops, duplicates, broken timelines.
+  - Import/export validation with schema + dry-run + row-level error location.
 
-- [ ] **Run observability upgrade**
-  - Add `request_id`, phase timing, and error category code to each run.
-  - Track failure distribution (network/model/parsing/persistence) for iteration.
+- [ ] **Run observability**
+  - Add `request_id`, phase duration, and error category to each run.
+  - Track failure distribution (network/model/parsing/persistence).
 
-- [x] **Model provider UX aligned with Chatbox**
-  - Base support done: OpenAI-compatible provider, model list, pre-save connectivity test.
-  - [x] Model list cache: backend TTL (`force_refresh`) + frontend session hit hints.
-  - [x] Model capability labels shown in settings:
-    `chat / vision / tool / reasoning`.
-
-### P2 (Long-term productization)
+## P2 (Long-term Productization)
 
 - [ ] **Serialization skeleton and payoff system**
-  - Mainline/branchline/foreshadow lifecycle management
-    (plant -> advance -> recover -> validate).
-  - Coverage/payoff dashboards to reduce unresolved plot threads.
+  - Mainline/branchline/foreshadow lifecycle (`plant -> advance -> recover -> validate`).
+  - Coverage and payoff dashboards.
 
 - [ ] **Collaboration and safety**
-  - Change audit logs for config/graph updates, snapshot rollback,
-    and multi-user conflict handling.
+  - Audit logs for settings/graph changes, snapshot rollback, and multi-user conflict handling.
 
-### Next-session Preparation
+---
+
+## Next Session Plan (Practical Checklist)
 
 - [ ] **Stability regression**
   - Run full chain on 3 novels:
-    preview -> generate -> next chapter -> expand -> optimize.
-  - Cover one `init_state` and one interrupted/resumed `write_chapter` stream.
+    `preview -> generate -> next chapter -> expand -> optimize`.
+  - Include one interrupted/resumed `write_chapter` stream.
 
 - [ ] **Output and observability**
-  - Explicitly show active output subdirectory (per novel) in right panel.
-  - Add `request_id/phase/error_code` to key failures
-    (start with `run_stream` done/error frames).
+  - Show active output subdirectory (per novel) in right panel.
+  - Add `request_id/phase/error_code` to key failure surfaces.
 
 - [ ] **Graph governance step 1**
   - Add one-click checks/jump for isolated nodes and broken timelines.
-  - Start with minimum viable bulk edge edits (delete by node type).
+  - Deliver minimum viable bulk edge editing (delete by node type).
 
-- [ ] **Docs and release**
-  - Sync behavior changes to `ARCHITECTURE.md` and `RELEASE.md`
-    with updated screenshots and example paths.
-  - Output reusable "tomorrow validation checklist" to `outputs/`.
+- [ ] **Docs and release sync**
+  - Align behavior changes in `ARCHITECTURE.md` and `RELEASE.md`.
+  - Generate a reusable "tomorrow validation checklist" under `outputs/`.
 
-### Change List (Grouped by Feature)
+---
 
-#### 1) Consistency Audit v2
+## File Touch Map (By Feature)
+
+### Consistency Audit v2
+
 - Backend:
   - `agents/state/consistency_audit.py`
   - `webapp/backend/routes/novels.py`
-  - `agents/novel/novel_agent.py` (if audit output participates in prompting)
+  - `agents/novel/novel_agent.py`
 - Frontend:
   - `webapp/frontend/src/App.vue`
   - `webapp/frontend/src/components/RightPanel.vue`
   - `webapp/frontend/src/components/MidFormPanel.vue`
 
-#### 2) Structure Card (Pre-write Constraint)
+### Structure Card (Pre-write Constraint)
+
 - Backend:
   - `webapp/backend/schemas.py`
   - `webapp/backend/run_helpers.py`
@@ -168,7 +105,8 @@ For per-directory details, see each directory's `README.md`.
   - `webapp/frontend/src/components/dialogs/InputPreviewDialog.vue`
   - `webapp/frontend/src/App.vue`
 
-#### 3) Graph Governance
+### Graph Governance
+
 - Backend:
   - `webapp/backend/routes/graph.py`
   - `agents/persistence/graph_tables.py`
@@ -177,7 +115,8 @@ For per-directory details, see each directory's `README.md`.
   - `webapp/frontend/src/composables/useGraph.ts`
   - `webapp/frontend/src/components/graph/GraphDialogs.vue`
 
-#### 4) Observability and Error Taxonomy
+### Observability and Error Taxonomy
+
 - Backend:
   - `webapp/backend/routes/novels.py`
   - `webapp/backend/sse.py`
@@ -186,70 +125,44 @@ For per-directory details, see each directory's `README.md`.
   - `webapp/frontend/src/App.vue`
   - `webapp/frontend/src/components/RightPanel.vue`
 
-#### 5) Ongoing Electron Installer Maintenance
-- Docs and scripts:
+### Electron Packaging Maintenance
+
+- Docs/scripts:
   - `electron/ELECTRON_RELEASE.md`
   - `electron/README.md`
   - `packaging/pyinstaller/README.md`
   - `build-windows-release.bat`
 
-## Engineering Risk Review Notes
+---
 
-1) **Critical data-consistency risk: no global transaction**
+## Engineering Risk Backlog
 
-Current largest implementation weakness.
+### R1. Missing end-to-end transaction in chapter persistence (High)
 
-- Symptom: in `agents/persistence/graph_tables.py`, `persist_chapter_artifacts`
-  calls `save_chapter`, `save_state`, `save_character_entities`, `save_event_rows`, etc.
-  In `novel_sqlite.py`, each `save_*` method opens its own
-  `with sqlite_connection(novel_id) as conn:`.
-- Impact: no atomic transaction across the full write unit.
-  If a crash happens after partial writes, SQLite may end in torn state (dirty data),
-  and four graph tables can diverge from `NovelState`.
-- Recommendation: adopt Unit of Work, or acquire one shared `conn` in
-  `persist_chapter_artifacts`, pass it through all DB functions, and commit once at the outer layer.
+- **Symptom**: `persist_chapter_artifacts` writes chapter/state/entities in separate DB connections.
+- **Impact**: partial crash can leave torn data between graph tables and `NovelState`.
+- **Action**: move to Unit of Work or shared connection + single outer commit.
 
-2) **Hazardous context truncation: hard-cut JSON strings**
+### R2. Invalid JSON risk from hard truncation (High)
 
-- Symptom (`agents/state/state_compactor.py`):
+- **Symptom**: state context can be cut after `json.dumps`, producing malformed JSON.
+- **Impact**: degraded LLM reasoning/output reliability.
+- **Action**: prune structured payload before serialization; never truncate serialized JSON.
 
-```python
-s = json.dumps(payload, ensure_ascii=False, indent=2)
-if len(s) > max_chars:
-    return s[:max_chars] + "\n...[truncated]"
-```
+### R3. In-memory graph relation rewrites at scale (Medium)
 
-- Impact: this cuts valid JSON into invalid JSON, producing malformed `state_context`.
-  LLMs are highly sensitive to structural syntax; malformed JSON can degrade attention
-  and even contaminate output format behavior.
-- Recommendation: never truncate after `json.dumps()`.
-  Prune at dict level first (e.g., reduce `recent_summaries`, lower timeline item count),
-  so serialized output remains valid JSON.
+- **Symptom**: load/filter/rewrite full relation lists in Python.
+- **Impact**: O(N) to O(N^2) behavior as novels grow.
+- **Action**: push filtering/deletion/update logic into SQL with targeted `WHERE` operations.
 
-3) **Performance bottleneck: doing DB work in memory (O(N) scan)**
+### R4. Fragile LLM parsing with regex/retry loops (Medium)
 
-- Symptom: in `agents/persistence/graph_tables.py`, flows like
-  `replace_chapter_belongs_for_chapter` load all relations into Python, filter with loops,
-  then delete/reinsert whole lists.
-- Impact: O(N) to O(N^2) behavior on larger novels; full-table read/write each chapter
-  causes growing SQLite I/O and Python object overhead.
-- Recommendation: push filtering and updates down to SQL.
-  Example: expose methods like
-  `DELETE FROM event_relations WHERE kind='chapter_belongs' AND source=?`.
+- **Symptom**: repeated hard failures after schema mismatch retries.
+- **Impact**: token waste and unstable UX.
+- **Action**: enforce structured outputs (JSON mode + schema constraints) end-to-end.
 
-4) **Fragile LLM output parsing: over-reliance on regex + retries**
+### R5. No stream resume on interruption (Medium)
 
-- Symptom: logs show repeated hard failures after Pydantic "Field required" and retry attempts.
-- Impact: custom extraction (`_extract_balanced_json_object`) and self-repair retries
-  are brittle for deeply nested JSON (e.g., full `NovelState`), wasting tokens and hurting UX.
-- Recommendation: adopt strict Structured Outputs (JSON Mode + JSON Schema) end-to-end
-  with schema constraints at invocation time.
-
-5) **SSE streaming lacks resume-from-breakpoint**
-
-- Symptom: `write_chapter_text_stream` in `novel_agent.py` yields via `model.stream`.
-- Impact: long chapter generation can fail mid-stream on network/rate limits;
-  no checkpoint means users must restart and lose partial output/token spend.
-- Recommendation: add continuation mechanism in frontend/backend.
-  On stream interruption, assemble received chunks as prior assistant content,
-  feed it back into context, and continue writing from the breakpoint.
+- **Symptom**: interrupted SSE run loses partial generation.
+- **Impact**: users must restart long writes and lose tokens/time.
+- **Action**: add chunk checkpoint and continue-from-prefix flow.
