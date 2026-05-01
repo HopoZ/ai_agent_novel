@@ -24,6 +24,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Debug workflow fingerprint
+        shell: pwsh
+        run: |
+          #region agent log
+          Write-Host "[agent-log][runId=pre-fix][hypothesisId=H8] github_sha=$env:GITHUB_SHA"
+          $wf = ".github/workflows/build-exe.yml"
+          $legacyMatch = Select-String -Path $wf -Pattern "latest\*\.yml" -SimpleMatch -ErrorAction SilentlyContinue
+          $legacyCount = if ($legacyMatch) { @($legacyMatch).Count } else { 0 }
+          Write-Host "[agent-log][runId=pre-fix][hypothesisId=H8] workflow_has_latest_glob_count=$legacyCount"
+          if ($legacyCount -gt 0) {
+            Write-Host "[agent-log][runId=pre-fix][hypothesisId=H8] workflow_still_contains_legacy_latest_pattern=true"
+          } else {
+            Write-Host "[agent-log][runId=pre-fix][hypothesisId=H8] workflow_still_contains_legacy_latest_pattern=false"
+          }
+          #endregion
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -111,14 +127,25 @@ jobs:
           npm ci --prefer-offline --no-audit --fund=false
           npm run dist
 
+      - name: Debug release output files
+        shell: pwsh
+        run: |
+          #region agent log
+          $files = Get-ChildItem -Path "electron/release" -File -ErrorAction SilentlyContinue
+          Write-Host "[agent-log][runId=pre-fix][hypothesisId=H1] release file count: $($files.Count)"
+          foreach ($f in $files) {
+            Write-Host "[agent-log][runId=pre-fix][hypothesisId=H2] release file: $($f.Name)"
+          }
+          $exeCount = @($files | Where-Object { $_.Name -like "*.exe" }).Count
+          Write-Host "[agent-log][runId=pre-fix][hypothesisId=H3] exe match count: $exeCount"
+          #endregion
+
       - name: Upload electron release artifacts
         uses: actions/upload-artifact@v4
         with:
           name: electron-release-windows
           path: |
             electron/release/*.exe
-            electron/release/*.blockmap
-            electron/release/latest*.yml
           if-no-files-found: error
 
       - name: Create release and upload electron assets
@@ -129,5 +156,3 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             electron/release/*.exe
-            electron/release/*.blockmap
-            electron/release/latest*.yml
