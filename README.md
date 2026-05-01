@@ -7,7 +7,7 @@ creation loop with **plan -> write -> state update -> persistence**.
 It provides a **FastAPI + Vue 3** web workspace (input preview, SSE streaming output,
 knowledge-graph editing), plus optional CLI and Flet mobile examples.
 
-Chinese version: [`README_ch.md`](./README_ch.md)
+中文版: [`README_ch.md`](./README_ch.md)
 
 **Preview**
 
