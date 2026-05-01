@@ -44,6 +44,18 @@ python -m uvicorn webapp.backend.server:app --reload --port 8000
 
 下载发布包：<https://github.com/HopoZ/ai_agent_novel/releases>
 
+## Electron 调试模式
+
+如果安装后应用无法打开或闪退，请使用调试模式。
+
+- 环境变量开启：`NOVEL_AGENT_ELECTRON_DEBUG=1`
+- 或启动参数开启：`--debug-electron`
+- 调试模式下会：
+  - 自动打开 DevTools
+  - 弹出启动健康检查信息
+  - 主进程和后端日志写入：
+    - `%APPDATA%/AI Novel Agent/logs/electron-main.log`（Windows）
+
 
 ## 许可证
 

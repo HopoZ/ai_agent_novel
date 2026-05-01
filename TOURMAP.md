@@ -166,3 +166,6 @@ For directory-level details, see each module `README.md`.
 - **Symptom**: interrupted SSE run loses partial generation.
 - **Impact**: users must restart long writes and lose tokens/time.
 - **Action**: add chunk checkpoint and continue-from-prefix flow.
+
+
+### R6. port if in use,try use other port

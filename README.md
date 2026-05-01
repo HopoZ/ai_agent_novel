@@ -44,6 +44,18 @@ Open: `http://127.0.0.1:8000/`
 
 Download installer from Releases: [GitHub Releases](https://github.com/HopoZ/ai_agent_novel/releases)
 
+## Electron Debug Mode
+
+Use debug mode when the installed app does not open or closes immediately.
+
+- Enable by environment variable: `NOVEL_AGENT_ELECTRON_DEBUG=1`
+- Or enable by argument: `--debug-electron`
+- In debug mode:
+  - DevTools opens automatically
+  - A startup health dialog is shown
+  - Main process + backend logs are written to:
+    - `%APPDATA%/AI Novel Agent/logs/electron-main.log` (Windows)
+
 ## License
 
 AGPL-3.0-or-later. See [`LICENSE`](./LICENSE).
