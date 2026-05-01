@@ -1,32 +1,40 @@
-# AI Novel Agent（本次更新）
+# AI Novel Agent (This Release)
 
-面向作者的长篇小说辅助写作桌面应用（Windows）。  
-用 Lore 设定、任务与章节规划、流式生成与图谱，把设定与连载状态串在一起。
+A Windows desktop writing assistant for long-form fiction authors.
+It combines Lore context, task/chapter planning, streaming generation,
+and graph workflows to keep world settings and serialization state aligned.
 
-## 和上次（1.0.0）对比
+## Changes Since 1.0.0
 
-### 新增
-- 图谱支持**右键拖线连边**（人物关系、时间推进、出场、章节归属）。
-- 剧情事件网支持按 `timeline_next` **自动横向排序**（由左到右）。
-- 事件图章节支持**按选中事件展开**，并提供**展开/收起全部章节**切换。
+### Added
+- Graph now supports **right-drag edge creation** (character relation,
+  timeline progression, appearance, chapter ownership).
+- Story event graph supports **automatic horizontal ordering** by `timeline_next`
+  (left to right).
+- Event chapters can be **expanded by selected event**, with
+  **expand/collapse all chapters** controls.
 
-### 调整
-- 批量删边从主面板移到二级入口 **高级操作** 抽屉，不再占主区空间。
-- 左栏移除 **事件计划** 按钮，减少重复入口。
+### Updated
+- Batch edge deletion moved from the main panel to the secondary
+  **Advanced Actions** drawer to free primary UI space.
+- Removed the **Event Plan** button from the left panel to reduce duplicate entry points.
 
-### 修复
-- 修复 `scripts/build-windows-release.ps1` 在 Windows PowerShell 5.1 下可能出现的编码解析报错（字符串/引号断裂）问题。
+### Fixed
+- Fixed encoding/parsing issues in `scripts/build-windows-release.ps1`
+  under Windows PowerShell 5.1 (string/quote breakage).
 
-## 升级说明
+## Upgrade Notes
 
-- 本次无强制数据迁移；现有小说与图谱数据可直接使用。
-- 图谱拖线仍走后端校验，非法连线不会写入数据。
+- No forced data migration in this release; existing novel and graph data remains compatible.
+- Drag-created graph edges are still validated by backend rules; invalid connections are rejected.
 
-## 验证
+## Verification
 
-- 前端构建通过：`webapp/frontend` → `npm run build`。
-- 关键路径已回归：拖线连边、事件图排序、章节展开切换、入口与面板布局调整。
+- Frontend build passed: `webapp/frontend` -> `npm run build`.
+- Regressed key paths: drag edge creation, event graph ordering,
+  chapter expand toggles, and entry/panel layout changes.
 
-## 已知事项
+## Known Notes
 
-- 构建仍可能出现 Vite 大 chunk 警告（`>500kB`），为既有告警，不影响功能发布。
+- Vite large chunk warnings (`>500kB`) may still appear during build.
+  This is an existing warning and does not block release functionality.

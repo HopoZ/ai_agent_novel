@@ -1,37 +1,43 @@
-# `webapp/frontend/src` 目录说明
+# `webapp/frontend/src` Directory Guide
 
-本目录在本次重构后按“壳层组件 + 组合式逻辑 + 领域纯函数”分层，避免 `App.vue` 继续膨胀。
+After this refactor, this directory is layered as:
+"shell components + composable orchestration + domain pure functions",
+to prevent `App.vue` from growing further.
 
-## 分层约定
+## Layering Conventions
 
 - `App.vue`
-  - 负责页面装配、组件编排、主题切换、少量胶水逻辑。
-  - 避免继续新增“纯计算/纯规则/可复用状态机”逻辑。
+  - Handles page assembly, component orchestration, theme switching,
+    and minimal glue logic.
+  - Avoid adding new pure computation/rule/reusable state machine logic here.
 - `composables/`
-  - 放可复用的状态与行为逻辑（运行态格式化、表单模型、标签树操作等）。
+  - Reusable state and behavior orchestration
+    (run formatting, form models, tag-tree operations, etc.).
 - `domain/`
-  - 放纯函数与领域规则（无 UI、无网络副作用）。
+  - Pure functions and domain rules (no UI, no network side effects).
 - `components/`
-  - 以展示和交互为主，尽量通过 props/emits 调用外层逻辑。
+  - Presentation and interaction, delegating outer logic via props/emits.
 - `api/`
-  - 网络通信适配层（`apiJson` / `apiSse`）。
+  - Network adapter layer (`apiJson` / `apiSse`).
 
-## 本次重构落点
+## Refactor Outputs in This Round
 
-- 从 `App.vue` 抽出：
+- Extracted from `App.vue`:
   - `composables/useNovelRun.ts`
   - `composables/useNovelsAndForm.ts`
   - `composables/useLoreTags.ts`
   - `domain/tags.ts`
 
-## 维护建议
+## Maintenance Suggestions
 
-- 新增逻辑优先判断是否可放入 `composables` / `domain`，避免回流到 `App.vue`。
-- 组件内重复样式优先走 `theme-literary.css` token，不新增硬编码颜色。
+- For new logic, prefer `composables` / `domain` first to avoid flow-back into `App.vue`.
+- Reuse `theme-literary.css` tokens for repeated component styles; avoid hard-coded colors.
 
-## 事件计划专门流程（前端约定）
+## Event-Plan Flow (Frontend Convention)
 
-- 工作台按固定顺序引导：`选已有事件` -> `生成/重生成事件计划` -> `预览` -> `运行`。
-- `App.vue` 负责在提交 `preview_input` / `run` 前做轻门禁（无绑定、无事件计划时前端直接拦截）。
-- 最终门禁以后端为准；前端只做可用性提示，不替代服务端约束。
+- Workspace guides users in fixed order:
+  `select existing event` -> `generate/regenerate event plan` -> `preview` -> `run`.
+- `App.vue` performs lightweight pre-checks before `preview_input` / `run`
+  (block directly in UI when no binding or no event plan).
+- Final enforcement is backend-owned; frontend checks are usability hints, not authority.
 

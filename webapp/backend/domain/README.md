@@ -1,16 +1,16 @@
-# `webapp/backend/domain` 目录说明
+# `webapp/backend/domain` Directory Guide
 
-本目录用于放后端领域规则（纯规则优先，弱依赖框架）。
+This directory holds backend domain rules (rule-first, framework-light).
 
-## 文件职责
+## File Responsibilities
 
-- `novel_lore_tags.py`（本次新增）
-  - lore tag 标准化
-  - 自动设定 tag 的小说作用域过滤
-  - 合并/去重规则（保留当前小说 auto tags，剔除其他小说 auto tags）
+- `novel_lore_tags.py` (new in this round)
+  - Lore tag normalization
+  - Novel-scoped filtering for auto-generated tags
+  - Merge and dedupe rules (keep current novel auto tags, drop auto tags from other novels)
 
-## 约定
+## Conventions
 
-- 领域层应尽量保持“可独立测试”的纯函数形态。
-- 不处理 HTTP 协议细节，不直接依赖 FastAPI。
+- Keep domain logic as independently testable pure functions whenever possible.
+- Do not handle HTTP protocol details and do not depend directly on FastAPI.
 

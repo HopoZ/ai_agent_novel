@@ -1,51 +1,52 @@
-# `webapp/backend` — 各文件职责
+# `webapp/backend` — File Responsibilities
 
-FastAPI 后端：HTTP 路由、请求体验证、SSE、与 `agents` 之间的胶水层。
+FastAPI backend layer: HTTP routes, request validation, SSE, and glue logic to `agents`.
 
-**整体架构、主链路、图谱/Lore 行为、联调清单**见 [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md)。  
-前端工程见 [`../frontend/README.md`](../frontend/README.md)。  
-静态与模板：`webapp/static/`、`webapp/templates/`；前端构建产物：`webapp/frontend/dist/`。
+For **overall architecture, primary flow, graph/lore behavior, and integration checklist**,
+see [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md).  
+Frontend project guide: [`../frontend/README.md`](../frontend/README.md).  
+Static/templates: `webapp/static/`, `webapp/templates/`; frontend build output: `webapp/frontend/dist/`.
 
 ---
 
-## 运行
+## Run
 
-在**仓库根目录**：
+From the **repository root**:
 
 ```bash
 python -m uvicorn webapp.backend.server:app --reload --port 8000
 ```
 
-| 环境变量 | 作用 |
-|----------|------|
-| `SKIP_FRONTEND_BUILD=1` | 跳过后端启动时的 `npm run build`，仅用已有 `dist/` |
+| Environment Variable | Purpose |
+|----------------------|---------|
+| `SKIP_FRONTEND_BUILD=1` | Skip backend-start `npm run build` and use existing `dist/` only |
 
 ---
 
-## 文件与 `routes/`
+## Files and `routes/`
 
-| 路径 | 作用 |
-|------|------|
-| `README.md` | 本文件 |
-| `__init__.py` | 包标识 |
-| `server.py` | ASGI 导入目标：导出 `app`、`create_app`；测试用 `_infer_time_slot` 别名 |
-| `app.py` | `create_app()`：CORS、请求日志中间件、`/static`、挂载子路由、启动时可选前端构建 |
-| `deps.py` | 单例 `NovelAgent`、命名 logger |
-| `paths.py` | 相对仓库根的路径常量（Vite、`storage/novels` 等） |
-| `schemas.py` | Pydantic 请求/响应模型（含 `RunModeRequest`：`structure_card` / `structure_risk_ack` / `shadow_director_guidance`，`ApiModelListRequest.force_refresh`，`CreateNovelRequest.auto_generate_lore/auto_lore_brief`，以及图谱 `Graph*`） |
-| `frontend_assets.py` | `dist` 新鲜度、`npm build`、挂载 `/assets` |
-| `sse.py` | `run_stream` 的 SSE 帧封装 |
-| `run_helpers.py` | 时间段推导、`user_task` 拼接、章节-事件辅助、写前图骨架；含影子编导 guidance 注入；**无** FastAPI 依赖 |
-| `domain/README.md` | 领域规则目录说明（本次新增） |
-| `domain/novel_lore_tags.py` | 小说 lore tag 作用域与规范化规则（从 routes/novels.py 下沉） |
-| `services/README.md` | 服务编排目录说明（本次新增） |
-| `services/auto_lore.py` | 自动设定构建/重写/原子写入/manifest 逻辑（从 routes/novels.py 下沉） |
-| `services/novel_run.py` | 运行流程共用逻辑（事件绑定校验、错误码推断、plan payload 解包） |
-| `graph_payload.py` | 由 `state` + 四表拼装 `GET /graph` 的 nodes/edges JSON（只读） |
-| `routes/__init__.py` | 路由包 |
-| `routes/README.md` | 路由层职责边界说明（薄路由约定） |
-| `routes/pages.py` | `GET /`：Vite `index.html` 或旧模板回退 |
-| `routes/settings.py` | `/api/settings`、`/api/settings/api_key`、`/api/settings/models`、`/api/settings/test_connection`（LLM 提供商配置、模型列表、连通性测试；模型列表支持后端 TTL 缓存 + `force_refresh` 强刷，并返回 `model_items.capabilities`） |
-| `routes/lore.py` | `/api/lore/*`：`POST summary/build`、`GET summary/{id}`、`GET tags`、`GET preview`，以及 Tag 文件管理：`POST/PATCH/DELETE /tags`、`PUT /tags/content`、`POST /tags/batch_delete`、`POST /tags/batch_replace_prefix`（批量操作会同步小说已绑定 lore_tags） |
-| `routes/novels.py` | `/api/novels/*`：列表、创建、`state`、`character_entities`、按章 `chapters/{i}`、`anchors`、`run`、`preview_input`、`run_stream`；支持创建时自动生成 lores 草案、`/auto_lore` 查询与 `/auto_lore/regenerate` 重生成；写作模式含结构卡门禁 `structure_gate`、影子编导策略 `shadow_director`（自动细节接管 + 可撤销）与写后 `consistency_audit`（含时间线反转/角色瞬移/关系突变无依据等高危阻断规则）；流式 planning 支持 `ChapterPlan/result/output` 包装解包；正文 outputs 按小说分目录落盘 |
-| `routes/graph.py` | `/api/novels/{id}/graph`（GET）；`PATCH graph/node`、`POST graph/nodes`、`DELETE graph/nodes`、`POST graph/relationship`、`PATCH timeline-neighbors`、`PATCH graph/edge` |
+| Path | Responsibility |
+|------|----------------|
+| `README.md` | This file |
+| `__init__.py` | Package marker |
+| `server.py` | ASGI import target: exports `app`, `create_app`; test alias `_infer_time_slot` |
+| `app.py` | `create_app()`: CORS, request logging middleware, `/static`, mounts sub-routers, optional frontend build at startup |
+| `deps.py` | Singleton `NovelAgent`, named logger |
+| `paths.py` | Path constants relative to repo root (Vite, `storage/novels`, etc.) |
+| `schemas.py` | Pydantic request/response models (`RunModeRequest` fields `structure_card` / `structure_risk_ack` / `shadow_director_guidance`, `ApiModelListRequest.force_refresh`, `CreateNovelRequest.auto_generate_lore/auto_lore_brief`, and graph `Graph*`) |
+| `frontend_assets.py` | `dist` freshness checks, `npm build`, mounts `/assets` |
+| `sse.py` | SSE frame wrappers for `run_stream` |
+| `run_helpers.py` | Time-slot inference, `user_task` composition, chapter-event helpers, pre-write graph skeleton; includes shadow-director guidance injection; **no** FastAPI dependency |
+| `domain/README.md` | Domain-rules directory notes (new in this round) |
+| `domain/novel_lore_tags.py` | Novel lore-tag scoping and normalization rules (moved from `routes/novels.py`) |
+| `services/README.md` | Service-orchestration directory notes (new in this round) |
+| `services/auto_lore.py` | Auto-lore build/rewrite/atomic write/manifest logic (moved from `routes/novels.py`) |
+| `services/novel_run.py` | Shared run flow logic (event binding validation, error-code inference, plan payload unwrapping) |
+| `graph_payload.py` | Build read-only `GET /graph` nodes/edges JSON from `state` + four graph tables |
+| `routes/__init__.py` | Routes package |
+| `routes/README.md` | Routing boundary notes (thin-route convention) |
+| `routes/pages.py` | `GET /`: Vite `index.html` or legacy template fallback |
+| `routes/settings.py` | `/api/settings`, `/api/settings/api_key`, `/api/settings/models`, `/api/settings/test_connection` (LLM provider config, model list, connectivity test; backend TTL cache + `force_refresh`, returns `model_items.capabilities`) |
+| `routes/lore.py` | `/api/lore/*`: `POST summary/build`, `GET summary/{id}`, `GET tags`, `GET preview`; plus tag file management: `POST/PATCH/DELETE /tags`, `PUT /tags/content`, `POST /tags/batch_delete`, `POST /tags/batch_replace_prefix` (bulk operations also sync bound `lore_tags`) |
+| `routes/novels.py` | `/api/novels/*`: list/create/`state`/`character_entities`/chapter `chapters/{i}`/`anchors`/`run`/`preview_input`/`run_stream`; supports auto-lore generation on create, `/auto_lore` query and `/auto_lore/regenerate`; writing flow includes structure gate `structure_gate`, shadow-director policy `shadow_director` (auto detail takeover + undo), post-write `consistency_audit` (high-risk blocks like timeline reversal, character teleportation, unsupported relation jumps); streaming planning supports `ChapterPlan/result/output` wrappers; chapter outputs saved per-novel directory |
+| `routes/graph.py` | `/api/novels/{id}/graph` (GET), plus `PATCH graph/node`, `POST graph/nodes`, `DELETE graph/nodes`, `POST graph/relationship`, `PATCH timeline-neighbors`, `PATCH graph/edge` |

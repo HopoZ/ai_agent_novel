@@ -11,7 +11,7 @@ Close the loop after refactor: docs aligned, tests verified, release notes updat
 
 - New layer/module directories are added.
 - Responsibilities move across `routes/services/domain` or `App/composables/domain`.
-- User asks to "补文档", "更新架构", or "回归验证".
+- User asks to "update docs", "update architecture", or "run regression verification".
 
 ## Do Not Use
 

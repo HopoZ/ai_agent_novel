@@ -1,24 +1,25 @@
-# `webapp/backend/services` 目录说明
+# `webapp/backend/services` Directory Guide
 
-本目录承载后端“业务编排服务”，用于承接从 `routes` 下沉的可复用逻辑。
+This directory hosts backend orchestration services, extracting reusable logic from `routes`.
 
-## 文件职责
+## File Responsibilities
 
-- `auto_lore.py`（本次新增）
-  - 自动设定文件模板构建
-  - 图谱引导重写入口
-  - 文件名规范化与约束校验
-  - 原子写入与 manifest 读写
-- `novel_run.py`（本次新增）
-  - `run` 流程共用方法：事件绑定校验、错误码推断、EventPlan -> ChapterPlan 转换、payload 解包
+- `auto_lore.py` (new in this round)
+  - Auto-lore file template generation
+  - Graph-guided rewrite entry points
+  - Filename normalization and validation
+  - Atomic writes and manifest read/write
+- `novel_run.py` (new in this round)
+  - Shared `run` flow logic: event binding validation, error code inference,
+    EventPlan -> ChapterPlan conversion, and payload unwrapping
 
-## 设计意图
+## Design Intent
 
-- 减少 `routes/novels.py` 内部“控制器 + 业务 + 持久化细节”耦合。
-- 提供可单测的函数边界，降低后续功能扩展风险。
+- Reduce coupling in `routes/novels.py` between controller, business flow, and persistence details.
+- Provide clear function boundaries that are easy to unit test.
 
-## 维护约定
+## Maintenance Conventions
 
-- service 可依赖 `agents/*` 与 `persistence/*`，但尽量不依赖 FastAPI 对象。
-- 对外暴露函数优先保持明确输入输出，不读全局请求上下文。
+- Services may depend on `agents/*` and `persistence/*`, but should avoid FastAPI objects when possible.
+- Public functions should keep explicit inputs/outputs and avoid reading global request context.
 

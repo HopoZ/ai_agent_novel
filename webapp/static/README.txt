@@ -1,2 +1,3 @@
-占位文件：保证空目录可被 Git / PyInstaller --add-data 收录。
-应用启动时也会自动创建 webapp/static（见 webapp/backend/app.py）。
+Placeholder file: allows this otherwise-empty directory to be included by Git
+and by PyInstaller `--add-data`.
+The app also creates `webapp/static` automatically at startup (see `webapp/backend/app.py`).

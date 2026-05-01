@@ -1,11 +1,12 @@
-# `discard/` — 归档说明
+# `discard/` — Archive Notes
 
-存放已被主流程替代或不再引用的实验代码、旧静态页、临时脚本等。
+This folder stores experimental code, legacy static pages, and temporary scripts
+that are replaced by the main flow or no longer referenced.
 
-**当前主流程涉及的目录与分层**见仓库根目录 [`../ARCHITECTURE.md`](../ARCHITECTURE.md)。
+For current primary flow directories and layering, see [`../ARCHITECTURE.md`](../ARCHITECTURE.md).
 
-放入原则：
+Archive criteria:
 
-- 新架构已替代的实现
-- 空占位或未再被后端/前端引用的文件
-- 临时测试脚本（不作为主流程一部分）
+- Implementations replaced by the new architecture
+- Placeholder or unreferenced files no longer used by backend/frontend
+- Temporary test scripts that are not part of the production flow

@@ -1,166 +1,255 @@
-# TOURMAP（项目进度地图）
+# TOURMAP (Project Progress Map)
 
-模块关系与数据真源见 [`ARCHITECTURE.md`](./ARCHITECTURE.md)；各目录内文件说明见对应 `README.md`。
+For module relationships and source-of-truth data flow, see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+For per-directory details, see each directory's `README.md`.
 
-## DONE（已完成）
+## DONE
 
-- [x] **知识图谱参与 Input 压缩**
-  - 将图谱相关信息纳入章节生成前的上下文压缩逻辑，减少无关冗余注入。
-  - 手动时间线/事件归属场景下，避免把跨章历史状态整包塞入，降低“状态串章污染”。
+- [x] **Knowledge graph integrated into input compaction**
+  - Added graph-aware context compaction before chapter generation.
+  - Avoided injecting full cross-chapter history in manual timeline/event ownership scenarios.
 
-- [x] **前后端工作流改造为“先预览、后运行”**
-  - 主按钮先生成 Input 预览，再由弹窗“确认并运行”触发流式生成。
-  - 运行链路中增加更明确的阶段提示（规划 -> 写作 -> 保存 -> 下章建议）。
+- [x] **Frontend/backend flow switched to "preview first, run second"**
+  - Main button now generates input preview first.
+  - Streaming run starts only after explicit confirmation.
+  - Added clearer phase labels (plan -> write -> save -> next-chapter hint).
 
-- [x] **图谱展示与编辑能力增强（可视化层）**
-  - 图谱改为全屏查看入口，提升复杂关系图可读性。
-  - 支持节点/边关系编辑、关系删除、时间线前后关系调整等交互能力。
-  - 时间线“未安排上/下一跳”支持更直观标识，方便排查断点。
+- [x] **Graph visualization and editing upgraded**
+  - Added full-screen graph view entry.
+  - Added node/edge edits, relation removal, and timeline predecessor/successor updates.
+  - Improved timeline markers for missing previous/next links.
 
-- [x] **存储结构从单状态向表结构演进**
-  - 章节、事件、人物相关数据逐步拆分，减少单一叙事快照作为唯一真源的耦合；持久化现为 `storage/novels/<id>/novel.db`（`novel_state`、章节行、四表等）。
-  - 运行前预构建章节关联记录，保证“章节属于事件、关联人物”先落地再生成正文。
+- [x] **Storage evolved from single snapshot to table-oriented model**
+  - Chapter/event/character data gradually split into structured storage.
+  - Persistence now uses `storage/novels/<id>/novel.db` (`novel_state`, chapter rows, and four graph tables).
+  - Pre-built chapter relation records before run, so event/chapter ownership lands before writing.
 
-- [x] **单本小说 SQLite 落地**
-  - 图谱与章节编辑仍走 `graph_tables` / `storage` 原 API，底层由 `novel_sqlite` 写入 `novel.db`。
+- [x] **Per-novel SQLite rollout**
+  - Graph and chapter editing still uses existing `graph_tables` / `storage` APIs.
+  - Underlying writes are handled by `novel_sqlite` into `novel.db`.
 
-- [x] **Electron Windows 安装包（NSIS + PyInstaller 后端）**
-  - 一键脚本 `build-windows-release.bat`；安装版数据在 exe 同级 `data/`；Web 内首次引导、打开输入/输出目录；详见 [electron/ELECTRON_RELEASE.md](../electron/ELECTRON_RELEASE.md)。
+- [x] **Electron Windows installer (NSIS + PyInstaller backend)**
+  - One-click script `build-windows-release.bat`.
+  - Installer data lives in `data/` next to main exe.
+  - Includes first-run in-app guidance for input/output folders.
+  - See [electron/ELECTRON_RELEASE.md](../electron/ELECTRON_RELEASE.md).
 
-- [x] **流式输出与右侧面板体验优化**
-  - 右侧状态文案对齐当前真实流程（移除 auto_init 误导信息）。
-  - 规划流/正文流/下章建议的空态提示改为运行态动态提示。
-  - 右侧输出新增**自动滚动到底**，无需手动拖动滚动条。
+- [x] **Streaming output and right-panel UX improvements**
+  - Right-panel status text aligned with actual runtime flow.
+  - Empty-state messages now reflect live run phases.
+  - Added auto-scroll-to-bottom for right-panel output.
 
-- [x] **前端文学暖色主题与续章流程**
-  - `theme-literary.css`：纸感背景、Element 变量、顶栏与弹窗样式；`Noto Serif SC`（`index.html`）。
-  - 写作/优化等结束后「下章提示」弹窗 → 与「生成正文」相同的 Input 预览链。
-  - 表单可选「当前地图」→ `RunModeRequest.current_map` → `build_llm_user_task` 注入约束。
+- [x] **Literary warm theme + continuation flow**
+  - Added `theme-literary.css` paper-like palette and dialog/topbar styling.
+  - Uses `Noto Serif SC` in `index.html`.
+  - Next-chapter hint follows same input-preview chain as normal write flow.
+  - Added optional "current map" injection path:
+    `RunModeRequest.current_map` -> `build_llm_user_task`.
 
-- [x] **今日收尾：流程与文档对齐（2026-04-25）**
-  - [x] 下章建议由弹窗改为右栏内联编辑 + 一键续写（减少打断）。
-  - [x] Step1~4 取消自动跳转，改为手动流转；阶段完成后高亮“下一步”。
-  - [x] Step3 任务为空时自动推测草案，作者只需最后改写确认。
-  - [x] 图谱切片压缩为紧凑版（单行指标 + 轻量元信息）。
-  - [x] outputs 改为按小说分层目录落盘。
-  - [x] Tag 管理升级：内置增删改 + 批量删除/前缀迁移并同步小说绑定。
-  - [x] 规划阶段兼容 `ChapterPlan` 包装层解包，降低流式解析失败率。
+- [x] **Round close: flow/docs aligned (2026-04-25)**
+  - [x] Next-chapter hint moved from modal to right-panel inline edit + one-click continue.
+  - [x] Step1~4 changed from auto-jump to manual progression with next-step highlight.
+  - [x] Step3 auto-drafts tasks when empty.
+  - [x] Graph slice compressed into compact metric row + lightweight metadata.
+  - [x] Outputs now stored by novel subdirectories.
+  - [x] Tag management upgraded with built-in CRUD + bulk delete/prefix migration and sync.
+  - [x] Planning flow now supports `ChapterPlan` wrapper unwrapping to reduce stream parse failures.
 
-## TODO（待完成）
+## TODO
 
-### 写小说模式现状判断（2026-04）
+### Current Assessment of "Novel Writing Mode" (2026-04)
 
-- 结论：**仍差一点“专业编导感”**。当前已具备“可生成 + 可编辑 + 可观测”，但在“结构约束、自动纠偏、长程回收”上仍偏工具化。
-- 主要短板：
-  - 写前结构骨架弱（作者仍需手工组织章节目标与伏笔回收）。
-  - 写后审计虽已上线（一致性审计 v1），但规则深度不足、未形成强闭环。
-  - 图谱虽强可视化，但批量治理/质量审计仍不够“生产级”。
+- Conclusion: still missing the final "professional showrunner" feel.
+  Current status is "generatable + editable + observable", but still too tool-like in
+  structural constraints, auto-correction, and long-range payoff recovery.
+- Main gaps:
+  - Weak pre-write structure skeleton (authors still organize chapter goals/foreshadowing manually).
+  - Post-write audit exists, but rule depth and closed-loop enforcement are still limited.
+  - Graph visualization is strong, but bulk governance and quality auditing are not yet production-grade.
 
-### P0（优先，两周内）
+### P0 (Highest Priority, within 2 weeks)
 
-- [x] **一致性审计 v2（从提示走向约束）**
-  - [x] `run_stream done` 增加 `block_reasons` 与 `recommended_actions`，高危冲突时阻断“下章续写”自动链。
-  - [x] 前端展示审计等级 + 阻断原因 + 修复动作。
-  - [x] 增加更多高危规则：时间线反转、角色瞬移、关系突变未给事件依据。
+- [x] **Consistency audit v2 (prompting -> constraints)**
+  - [x] Added `block_reasons` and `recommended_actions` in `run_stream done`.
+  - [x] Blocks auto "next chapter continue" on high-risk conflicts.
+  - [x] Frontend now shows audit level, block reasons, and repair actions.
+  - [x] Added high-risk rules: timeline reversal, character teleportation, unsupported relation jumps.
 
-- [x] **章节结构卡（写前强引导）**
-  - [x] 预览阶段自动补齐并锁定结构卡：目标 / 冲突 / 转折 / 回收伏笔 / 事件归属（默认无感）。
-  - [x] 未满足最小结构项时，提供“继续生成（风险）/返回补齐”二选一，并在后端强校验 `structure_risk_ack`。
+- [x] **Structure card (strong pre-write guidance)**
+  - [x] Auto-fill and lock structure card in preview:
+    goal / conflict / turning point / foreshadow recovery / event ownership.
+  - [x] If minimum fields are missing, force either:
+    "continue anyway (risky)" or "go back and complete".
+  - [x] Backend strictly validates `structure_risk_ack`.
 
-- [x] **影子编导 v2（更无感）**
-  - [x] 在推荐事件外补充：推荐配角 / 推荐冲突类型 / 推荐回收伏笔（后端 `shadow_director` 策略包）。
-  - [x] 默认自动采用细节策略，提供「撤销最近自动导演」一键回滚，作者只需把握总体方向。
+- [x] **Shadow director v2 (more invisible support)**
+  - [x] Added recommendations for side characters, conflict type, and foreshadow recovery.
+  - [x] Auto-applies detail strategy by default with one-click undo for last auto-direct.
 
-### P1（次优，1-2 月）
+### P1 (Secondary, 1-2 months)
 
-- [x] **前端布局快改版（中栏与图谱）**
-  - [x] 中栏改为四步导演工作台，减少跨栏填写。
-  - [x] 图谱采用双形态：中栏切片（默认）+ 全屏工作室（深度编辑）。
-  - [x] 运行结果改为抽屉式面板，仅在需要时展开。
-  - [x] 保留“少操作，多有意义选择”：冲突类型 / 伏笔策略 / 配角强度三项决策。
-  - [x] 后续交互微调：Step 流程与非当前步骤隐藏、顶部当前步骤状态条、每步“下一步/上一步”按钮；并在后续版本切换为手动流转 + 条件高亮，降低误跳转。
+- [x] **Frontend layout fast revamp (middle panel + graph)**
+  - [x] Middle panel became a 4-step directing workspace.
+  - [x] Graph now has dual mode: compact middle slice + full-screen studio.
+  - [x] Run results moved into drawer-style panel.
+  - [x] Kept low-operation, high-impact decisions:
+    conflict type / foreshadow strategy / side-character intensity.
+  - [x] Interaction refinements:
+    hide non-current steps, top step status bar, next/prev buttons;
+    then switched to manual progression + condition highlighting.
 
-- [ ] **图谱治理能力（大图可维护）**
-  - 批量编辑：按角色/章节/事件类型批量改边。
-  - 质量审计：孤立节点、悬空边、自环、重复关系、断链时间线。
-  - 导入导出校验：schema 校验 + dry-run + 错误行定位。
+- [ ] **Graph governance (maintainability at large scale)**
+  - Bulk edge editing by role/chapter/event type.
+  - Quality audits: isolated nodes, dangling edges, self-loops,
+    duplicate relations, broken timeline chains.
+  - Import/export validation: schema checks, dry-run, row-level error locations.
 
-- [ ] **运行可观测性升级**
-  - 每次 run 增加 request_id、阶段耗时、错误分类码。
-  - 后台记录失败类型分布（网络/模型/解析/持久化）用于持续改进。
+- [ ] **Run observability upgrade**
+  - Add `request_id`, phase timing, and error category code to each run.
+  - Track failure distribution (network/model/parsing/persistence) for iteration.
 
-- [x] **模型提供商体验对齐 Chatbox**
-  - 已完成基础：OpenAI 兼容 provider、模型列表获取、保存前连通性测试。
-  - [x] 模型列表缓存：后端 TTL（支持 `force_refresh`）+ 前端会话缓存命中提示。
-  - [x] 模型能力标签：`chat / vision / tool / reasoning` 启发式推断并在设置弹窗展示。
+- [x] **Model provider UX aligned with Chatbox**
+  - Base support done: OpenAI-compatible provider, model list, pre-save connectivity test.
+  - [x] Model list cache: backend TTL (`force_refresh`) + frontend session hit hints.
+  - [x] Model capability labels shown in settings:
+    `chat / vision / tool / reasoning`.
 
-### P2（长期，产品化）
+### P2 (Long-term productization)
 
-- [ ] **连载骨架与回收系统**
-  - 主线/支线/伏笔生命周期管理（埋设 -> 推进 -> 回收 -> 验证）。
-  - 章节覆盖率与回收率看板，减少后期“坑没填”。
+- [ ] **Serialization skeleton and payoff system**
+  - Mainline/branchline/foreshadow lifecycle management
+    (plant -> advance -> recover -> validate).
+  - Coverage/payoff dashboards to reduce unresolved plot threads.
 
-- [ ] **协作与安全**
-  - 配置与图谱修改审计日志、快照回滚、多人协作冲突处理。
+- [ ] **Collaboration and safety**
+  - Change audit logs for config/graph updates, snapshot rollback,
+    and multi-user conflict handling.
 
-### 接续准备处
+### Next-session Preparation
 
-- [ ] **稳定性回归**
-  - 用 3 本小说各跑一轮「预览 -> 生成 -> 下章续写 -> 扩写 -> 优化」完整链路，记录失败点。
-  - 覆盖一次 `init_state`、一次 `write_chapter` 流式中止与恢复。
-- [ ] **输出与可观测**
-  - 在右栏明确展示当前输出子目录（小说维度），避免“看似未分层”的误判。
-  - 为关键失败增加 request_id/phase/error_code（先从 `run_stream` done/error 帧起步）。
-- [ ] **图谱治理第一步**
-  - 补“孤立节点/断链时间线”一键检查与跳转。
-  - 批量边编辑先做最小闭环（按节点类型批量删边）。
-- [ ] **文档与发布**
-  - 将本轮行为变化同步到 `ARCHITECTURE.md`、`RELEASE.md` 的截图与示例路径说明。
-  - 输出一份“明日验证清单”到 `outputs/`，供每天开工直接复用。
+- [ ] **Stability regression**
+  - Run full chain on 3 novels:
+    preview -> generate -> next chapter -> expand -> optimize.
+  - Cover one `init_state` and one interrupted/resumed `write_chapter` stream.
 
-### 修改名单（按功能分组）
+- [ ] **Output and observability**
+  - Explicitly show active output subdirectory (per novel) in right panel.
+  - Add `request_id/phase/error_code` to key failures
+    (start with `run_stream` done/error frames).
 
-#### 1) 一致性审计 v2
-- 后端：
+- [ ] **Graph governance step 1**
+  - Add one-click checks/jump for isolated nodes and broken timelines.
+  - Start with minimum viable bulk edge edits (delete by node type).
+
+- [ ] **Docs and release**
+  - Sync behavior changes to `ARCHITECTURE.md` and `RELEASE.md`
+    with updated screenshots and example paths.
+  - Output reusable "tomorrow validation checklist" to `outputs/`.
+
+### Change List (Grouped by Feature)
+
+#### 1) Consistency Audit v2
+- Backend:
   - `agents/state/consistency_audit.py`
   - `webapp/backend/routes/novels.py`
-  - `agents/novel/novel_agent.py`（如需将审计结果参与 prompt）
-- 前端：
+  - `agents/novel/novel_agent.py` (if audit output participates in prompting)
+- Frontend:
   - `webapp/frontend/src/App.vue`
   - `webapp/frontend/src/components/RightPanel.vue`
   - `webapp/frontend/src/components/MidFormPanel.vue`
 
-#### 2) 章节结构卡（写前约束）
-- 后端：
+#### 2) Structure Card (Pre-write Constraint)
+- Backend:
   - `webapp/backend/schemas.py`
   - `webapp/backend/run_helpers.py`
   - `webapp/backend/routes/novels.py`
-- 前端：
+- Frontend:
   - `webapp/frontend/src/components/MidFormPanel.vue`
   - `webapp/frontend/src/components/dialogs/InputPreviewDialog.vue`
   - `webapp/frontend/src/App.vue`
 
-#### 3) 图谱治理
-- 后端：
+#### 3) Graph Governance
+- Backend:
   - `webapp/backend/routes/graph.py`
   - `agents/persistence/graph_tables.py`
   - `webapp/backend/graph_payload.py`
-- 前端：
+- Frontend:
   - `webapp/frontend/src/composables/useGraph.ts`
   - `webapp/frontend/src/components/graph/GraphDialogs.vue`
 
-#### 4) 观测性与错误分类
-- 后端：
+#### 4) Observability and Error Taxonomy
+- Backend:
   - `webapp/backend/routes/novels.py`
   - `webapp/backend/sse.py`
   - `webapp/backend/app.py`
-- 前端：
+- Frontend:
   - `webapp/frontend/src/App.vue`
   - `webapp/frontend/src/components/RightPanel.vue`
 
-#### 5) Electron 安装包持续维护
-- 文档与脚本：
+#### 5) Ongoing Electron Installer Maintenance
+- Docs and scripts:
   - `electron/ELECTRON_RELEASE.md`
   - `electron/README.md`
   - `packaging/pyinstaller/README.md`
   - `build-windows-release.bat`
+
+## Engineering Risk Review Notes
+
+1) **Critical data-consistency risk: no global transaction**
+
+Current largest implementation weakness.
+
+- Symptom: in `agents/persistence/graph_tables.py`, `persist_chapter_artifacts`
+  calls `save_chapter`, `save_state`, `save_character_entities`, `save_event_rows`, etc.
+  In `novel_sqlite.py`, each `save_*` method opens its own
+  `with sqlite_connection(novel_id) as conn:`.
+- Impact: no atomic transaction across the full write unit.
+  If a crash happens after partial writes, SQLite may end in torn state (dirty data),
+  and four graph tables can diverge from `NovelState`.
+- Recommendation: adopt Unit of Work, or acquire one shared `conn` in
+  `persist_chapter_artifacts`, pass it through all DB functions, and commit once at the outer layer.
+
+2) **Hazardous context truncation: hard-cut JSON strings**
+
+- Symptom (`agents/state/state_compactor.py`):
+
+```python
+s = json.dumps(payload, ensure_ascii=False, indent=2)
+if len(s) > max_chars:
+    return s[:max_chars] + "\n...[truncated]"
+```
+
+- Impact: this cuts valid JSON into invalid JSON, producing malformed `state_context`.
+  LLMs are highly sensitive to structural syntax; malformed JSON can degrade attention
+  and even contaminate output format behavior.
+- Recommendation: never truncate after `json.dumps()`.
+  Prune at dict level first (e.g., reduce `recent_summaries`, lower timeline item count),
+  so serialized output remains valid JSON.
+
+3) **Performance bottleneck: doing DB work in memory (O(N) scan)**
+
+- Symptom: in `agents/persistence/graph_tables.py`, flows like
+  `replace_chapter_belongs_for_chapter` load all relations into Python, filter with loops,
+  then delete/reinsert whole lists.
+- Impact: O(N) to O(N^2) behavior on larger novels; full-table read/write each chapter
+  causes growing SQLite I/O and Python object overhead.
+- Recommendation: push filtering and updates down to SQL.
+  Example: expose methods like
+  `DELETE FROM event_relations WHERE kind='chapter_belongs' AND source=?`.
+
+4) **Fragile LLM output parsing: over-reliance on regex + retries**
+
+- Symptom: logs show repeated hard failures after Pydantic "Field required" and retry attempts.
+- Impact: custom extraction (`_extract_balanced_json_object`) and self-repair retries
+  are brittle for deeply nested JSON (e.g., full `NovelState`), wasting tokens and hurting UX.
+- Recommendation: adopt strict Structured Outputs (JSON Mode + JSON Schema) end-to-end
+  with schema constraints at invocation time.
+
+5) **SSE streaming lacks resume-from-breakpoint**
+
+- Symptom: `write_chapter_text_stream` in `novel_agent.py` yields via `model.stream`.
+- Impact: long chapter generation can fail mid-stream on network/rate limits;
+  no checkpoint means users must restart and lose partial output/token spend.
+- Recommendation: add continuation mechanism in frontend/backend.
+  On stream interruption, assemble received chunks as prior assistant content,
+  feed it back into context, and continue writing from the breakpoint.
