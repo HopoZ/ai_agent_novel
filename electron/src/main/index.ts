@@ -34,6 +34,14 @@ function writeMainLog(level: "INFO" | "WARN" | "ERROR", message: string): void {
   }
 }
 
+function stopBackend(reason: string): void {
+  if (!backendProc || backendProc.killed) {
+    return;
+  }
+  writeMainLog("INFO", `stopping backend reason=${reason} pid=${backendProc.pid ?? "unknown"}`);
+  backendProc.kill();
+}
+
 function backendExePath(): string {
   return join(process.resourcesPath, "backend", "novel-backend.exe");
 }
@@ -57,6 +65,7 @@ function startBackend(debugMode: boolean): void {
   writeMainLog("INFO", `spawned backend pid=${backendProc.pid ?? "unknown"} exe=${exe}`);
   backendProc.on("exit", (code, signal) => {
     writeMainLog("WARN", `backend exited code=${code ?? "null"} signal=${signal ?? "null"}`);
+    backendProc = null;
   });
   backendProc.stdout.on("data", (chunk) => {
     writeMainLog("INFO", `[backend stdout] ${String(chunk).trimEnd()}`);
@@ -122,6 +131,23 @@ function installAppMenu(debugMode: boolean): void {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  writeMainLog("WARN", "secondary instance detected, quitting immediately");
+  app.quit();
+}
+
+app.on("second-instance", () => {
+  writeMainLog("INFO", "second-instance event: focusing existing main window");
+  if (!mainWindow) {
+    return;
+  }
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  mainWindow.focus();
+});
+
 app.whenReady().then(() => {
   const debugMode = isDebugMode();
   writeMainLog("INFO", `app ready debugMode=${debugMode}`);
@@ -153,9 +179,11 @@ app.whenReady().then(() => {
 });
 
 app.on("window-all-closed", () => {
-  if (backendProc && !backendProc.killed) {
-    backendProc.kill();
-  }
+  stopBackend("window-all-closed");
   mainWindow = null;
   app.quit();
+});
+
+app.on("before-quit", () => {
+  stopBackend("before-quit");
 });
