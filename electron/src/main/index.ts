@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { app, BrowserWindow, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 
 let backendProc: ChildProcessWithoutNullStreams | null = null;
 
@@ -50,8 +50,14 @@ app.whenReady().then(() => {
       return { ok: false, error: message };
     }
   });
-  startBackend();
-  createMainWindow();
+  try {
+    startBackend();
+    createMainWindow();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "unknown error";
+    dialog.showErrorBox("AI Novel Agent startup failed", message);
+    app.quit();
+  }
 });
 
 app.on("window-all-closed", () => {

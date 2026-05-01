@@ -16,8 +16,16 @@
       "output": "release"
     },
     "files": [
-      "out/**",
-      "resources/backend/**"
+      "out/**"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/backend",
+        "to": "backend",
+        "filter": [
+          "**/*"
+        ]
+      }
     ],
     "win": {
       "target": [
