@@ -44,17 +44,23 @@ python -m uvicorn webapp.backend.server:app --reload --port 8000
 
 下载发布包：<https://github.com/HopoZ/ai_agent_novel/releases>
 
-## Electron 调试模式
+## Electron Debug Mode（调试）
 
-如果安装后应用无法打开或闪退，请使用调试模式。
+当安装版应用无法打开、闪退、或无法连接后端 API 时，请使用调试模式。
 
-- 环境变量开启：`NOVEL_AGENT_ELECTRON_DEBUG=1`
-- 或启动参数开启：`--debug-electron`
+- 任选一种方式启动调试：
+  - 环境变量：`NOVEL_AGENT_ELECTRON_DEBUG=1`
+  - 启动参数：`--debug-electron`
+  - 应用菜单：`File -> Debug Start`
 - 调试模式下会：
   - 自动打开 DevTools
-  - 弹出启动健康检查信息
-  - 主进程和后端日志写入：
-    - `%APPDATA%/AI Novel Agent/logs/electron-main.log`（Windows）
+  - 弹出启动健康检查信息（后端 exe 路径、pid、日志路径）
+  - 主进程与后端日志写入：
+    - `<安装目录>/data/logs/electron-main.log`
+- 快速排查：
+  - 若看到 `Errno 10048`，先关闭所有应用窗口后再重新启动一次。
+  - 若 `openPath` 失败，检查 `<安装目录>/data/lores` 与 `outputs` 是否存在（启动时会自动创建）。
+
 
 
 ## 许可证

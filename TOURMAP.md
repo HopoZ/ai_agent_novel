@@ -33,6 +33,10 @@ For directory-level details, see each module `README.md`.
 
 - [x] Electron Windows installer flow (`build-windows-release.bat`).
 - [x] PyInstaller backend packaging integrated into desktop build.
+- [x] Electron desktop runtime hardening:
+  - Single-instance lock prevents duplicate backend spawn.
+  - Backend cleanup runs before spawn and on quit/relaunch.
+  - Portable data directories (`data/logs`, `data/lores`, `data/outputs`) auto-created.
 
 ---
 
@@ -128,6 +132,9 @@ For directory-level details, see each module `README.md`.
 ### Electron Packaging Maintenance
 
 - Docs/scripts:
+  - `electron/src/main/index.ts`
+  - `README.md`
+  - `README_ch.md`
   - `electron/ELECTRON_RELEASE.md`
   - `electron/README.md`
   - `packaging/pyinstaller/README.md`
@@ -168,4 +175,8 @@ For directory-level details, see each module `README.md`.
 - **Action**: add chunk checkpoint and continue-from-prefix flow.
 
 
-### R6. port if in use,try use other port
+### R6. Desktop backend port contention on relaunch (Mitigated)
+
+- **Symptom**: repeated app launches can leave stale backend processes, causing port `8000` bind failures (`Errno 10048`).
+- **Mitigation**: single-instance lock + pre-spawn cleanup + quit-time cleanup are now implemented in Electron main process.
+- **Follow-up**: optionally add dynamic fallback port strategy if explicit `8000` reuse remains required in future.

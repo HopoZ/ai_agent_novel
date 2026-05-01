@@ -46,15 +46,21 @@ Download installer from Releases: [GitHub Releases](https://github.com/HopoZ/ai_
 
 ## Electron Debug Mode
 
-Use debug mode when the installed app does not open or closes immediately.
+Use debug mode when the installed app does not open, closes immediately, or cannot reach backend APIs.
 
-- Enable by environment variable: `NOVEL_AGENT_ELECTRON_DEBUG=1`
-- Or enable by argument: `--debug-electron`
+- Start debug mode by any one method:
+  - Launch with environment variable: `NOVEL_AGENT_ELECTRON_DEBUG=1`
+  - Launch with argument: `--debug-electron`
+  - In app menu: `File -> Debug Start`
 - In debug mode:
   - DevTools opens automatically
-  - A startup health dialog is shown
-  - Main process + backend logs are written to:
-    - `%APPDATA%/AI Novel Agent/logs/electron-main.log` (Windows)
+  - Startup health dialog is shown (backend exe path, pid, log path)
+  - Main process and backend logs are written to:
+    - `<install-dir>/data/logs/electron-main.log`
+- Quick troubleshooting:
+  - If you see `Errno 10048`, close all app windows and relaunch once.
+  - If `openPath` fails, verify `<install-dir>/data/lores` and `outputs` exist (auto-created on startup).
+
 
 ## License
 

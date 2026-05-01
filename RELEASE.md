@@ -22,6 +22,14 @@ and graph workflows to keep world settings and serialization state aligned.
 ### Fixed
 - Fixed encoding/parsing issues in `scripts/build-windows-release.ps1`
   under Windows PowerShell 5.1 (string/quote breakage).
+- Hardened Electron backend lifecycle on Windows:
+  - Enabled single-instance behavior to prevent parallel desktop backend spawns.
+  - Added pre-spawn and quit-time cleanup for lingering `novel-backend.exe` processes.
+  - Reduced relaunch `Errno 10048` failures (`127.0.0.1:8000` already in use).
+- Electron desktop now auto-creates portable runtime directories:
+  - `<install-dir>/data/logs`
+  - `<install-dir>/data/lores`
+  - `<install-dir>/data/outputs`
 
 ## Upgrade Notes
 
