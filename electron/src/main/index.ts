@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
@@ -34,6 +34,27 @@ function writeMainLog(level: "INFO" | "WARN" | "ERROR", message: string): void {
   }
 }
 
+function cleanupLingeringBackend(reason: string): void {
+  try {
+    if (process.platform === "win32") {
+      execSync("taskkill /F /IM novel-backend.exe /T", { stdio: "ignore" });
+    } else {
+      execSync("pkill -f novel-backend", { stdio: "ignore" });
+    }
+    writeMainLog("WARN", `cleanup lingering backend executed reason=${reason}`);
+  } catch {
+    // "No process found" is expected in normal clean startup/exit.
+    writeMainLog("INFO", `cleanup found no lingering backend reason=${reason}`);
+  }
+}
+
+function ensureAppDataDirectories(): void {
+  const workDir = appWorkDir();
+  mkdirSync(join(workDir, "logs"), { recursive: true });
+  mkdirSync(join(workDir, "lores"), { recursive: true });
+  mkdirSync(join(workDir, "outputs"), { recursive: true });
+}
+
 function stopBackend(reason: string): void {
   if (!backendProc || backendProc.killed) {
     return;
@@ -51,6 +72,7 @@ function startBackend(debugMode: boolean): void {
   if (!existsSync(exe)) {
     throw new Error(`Backend executable not found: ${exe}`);
   }
+  cleanupLingeringBackend("pre-spawn");
   const storageDir = appWorkDir();
   backendProc = spawn(exe, [], {
     cwd: join(process.resourcesPath, "backend"),
@@ -120,6 +142,8 @@ function installAppMenu(debugMode: boolean): void {
             writeMainLog("INFO", "debug start requested from menu");
             const args = process.argv.filter((arg) => arg !== "--debug-electron");
             app.relaunch({ args: [...args, "--debug-electron"] });
+            stopBackend("menu-debug-relaunch");
+            cleanupLingeringBackend("menu-debug-relaunch");
             app.exit(0);
           },
         },
@@ -151,6 +175,7 @@ app.on("second-instance", () => {
 app.whenReady().then(() => {
   const debugMode = isDebugMode();
   writeMainLog("INFO", `app ready debugMode=${debugMode}`);
+  ensureAppDataDirectories();
   ipcMain.handle("desktop:open-path", async (_, targetPath: string) => {
     try {
       const err = await shell.openPath(targetPath);
@@ -186,4 +211,5 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   stopBackend("before-quit");
+  cleanupLingeringBackend("before-quit");
 });
