@@ -29,7 +29,9 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          cache-dependency-path: webapp/frontend/package-lock.json
+          cache-dependency-path: |
+            webapp/frontend/package-lock.json
+            electron/package-lock.json
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -46,7 +48,7 @@ jobs:
       - name: Build frontend assets
         working-directory: webapp/frontend
         run: |
-          npm ci
+          npm ci --prefer-offline --no-audit --fund=false
           npm run build
 
       - name: Ensure packaged static directories exist
@@ -87,6 +89,8 @@ jobs:
           $required = @(
             "electron/package.json",
             "electron/package-lock.json",
+            "electron/electron.vite.config.ts",
+            "electron/tsconfig.json",
             "electron/src/main/index.ts",
             "electron/src/preload/index.ts"
           )
@@ -104,7 +108,7 @@ jobs:
       - name: Build Electron installer
         working-directory: electron
         run: |
-          npm ci
+          npm ci --prefer-offline --no-audit --fund=false
           npm run dist
 
       - name: Upload electron release artifacts

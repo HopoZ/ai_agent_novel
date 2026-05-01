@@ -71,3 +71,15 @@ Electron sets:
 - Single-file exe size can be large; slower cold starts are expected.
 - If PyInstaller conflicts with dependencies, switch to **onedir mode** (`--onedir`)
   and point Electron to the generated `novel-backend.exe` path.
+
+## 6. CI/CD Release Notes
+
+For GitHub Actions deployment (`.github/workflows/build-exe.yml`):
+
+- Release tags should use `v*` (example: `v2.1.0`).
+- CI copies `dist/novel-backend.exe` to `electron/resources/backend/novel-backend.exe`,
+  then runs `electron npm run dist`.
+- GitHub Release assets are expected from `electron/release/`:
+  - `*.exe`
+  - `*.blockmap`
+  - `latest*.yml`

@@ -170,6 +170,26 @@ treat graph relations as source of truth before generation.
 
 ---
 
+## Deployment Workflow (GitHub Actions)
+
+The release workflow is in `.github/workflows/build-exe.yml`.
+
+- Pushes that touch backend/frontend/electron paths trigger CI build.
+- Tags matching `v*` trigger release asset upload to GitHub Releases.
+- Electron build requires these tracked files:
+  - `electron/package.json`
+  - `electron/package-lock.json`
+  - `electron/electron.vite.config.ts`
+  - `electron/tsconfig.json`
+  - `electron/src/main/index.ts`
+  - `electron/src/preload/index.ts`
+- Expected release outputs under `electron/release/`:
+  - `*.exe`
+  - `*.blockmap`
+  - `latest*.yml`
+
+---
+
 ## Roadmap
 
 See [TOURMAP.md](./TOURMAP.md) for progress and plans.
